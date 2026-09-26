@@ -75,7 +75,8 @@ def run_daily(settings: Settings) -> None:
 
 
 def main(settings: Settings, daily_hour_utc: int = 10) -> None:
-    """dbt build every DBT_BUILD_EVERY_MINUTES (default 15); daily jobs at daily_hour_utc (10 UTC = 3 am Pacific)."""
+    """dbt build every DBT_BUILD_EVERY_MINUTES (default 15); daily jobs at startup and at
+    daily_hour_utc (10 UTC = 3 am Pacific)."""
     every = timedelta(minutes=int(os.environ.get("DBT_BUILD_EVERY_MINUTES", "15")))
     last_build: datetime | None = None
     last_daily: datetime | None = None
@@ -83,15 +84,17 @@ def main(settings: Settings, daily_hour_utc: int = 10) -> None:
     while True:
         now = datetime.now(tz=UTC)
         try:
+            # daily jobs: at daily_hour_utc, and once at startup, so a brand-new server loads
+            # LTD's schedule immediately instead of waiting for 3 am
+            if last_daily is None or (
+                now.hour == daily_hour_utc and last_daily.date() != now.date()
+            ):
+                last_daily = now
+                run_daily(settings)
             if last_build is None or now - last_build >= every:
                 last_build = now
                 run_dbt_build(settings)
                 run_source_freshness(settings)
-            if now.hour == daily_hour_utc and (
-                last_daily is None or last_daily.date() != now.date()
-            ):
-                last_daily = now
-                run_daily(settings)
         except Exception:
             log.exception("scheduled job failed")
         time.sleep(30)
