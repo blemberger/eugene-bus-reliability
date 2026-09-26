@@ -8,8 +8,9 @@ export
 DBT := DBT_PROFILES_DIR=dbt dbt
 HOST_PGPORT := $(or $(POSTGRES_PORT),5432)
 TUNNEL_PORT := $(or $(TUNNEL_PORT),55439)
+VPS_DIR := $(or $(VPS_DIR),/opt/eugene-bus-reliability)
 
-.PHONY: help setup lock up down reset logs load-static poll-once poll scheduler run migrate check-db replay rebuild report dump server-dump app tunnel test test-all lint format dbt-deps dbt-build dbt-docs
+.PHONY: help setup lock up down reset logs load-static poll-once poll scheduler run migrate check-db replay rebuild report dump server-dump deploy fetch-dump app tunnel test test-all lint format dbt-deps dbt-build dbt-docs
 
 help:             ## list these commands
 	@grep -hE '^[a-z-]+:.*## ' $(firstword $(MAKEFILE_LIST)) | awk 'BEGIN {FS = ":.*## "} {printf "  %-12s %s\n", $$1, $$2}'
@@ -94,6 +95,18 @@ server-dump:      ## on the server (no venv there): the same dump, run inside th
 	  echo; docker compose --profile web exec -T app python app/selfcheck.py || echo "!! app self-check exited with an error (details above)"; \
 	} > dump.txt 2>&1
 	@echo "wrote $(CURDIR)/dump.txt ($$(wc -l < dump.txt) lines)"
+
+deploy:           ## from the laptop: bring the server up to date with GitHub and restart what changed (needs VPS_HOST in .env)
+	@test -n "$(VPS_HOST)" || { echo "add VPS_HOST=root@<server ip> to .env first"; exit 1; }
+	@test -z "$$(git status --porcelain)" || { echo "you have unsaved changes here: commit and push them first"; exit 1; }
+	@git fetch -q && test "$$(git rev-parse HEAD)" = "$$(git rev-parse @{u})" || { echo "this laptop and GitHub differ: git push (or git pull) first"; exit 1; }
+	ssh $(VPS_HOST) 'cd $(VPS_DIR) && git pull --ff-only && docker compose --profile web up -d --build db poller scheduler app caddy && docker compose --profile web ps'
+
+fetch-dump:       ## from the laptop: make the server's dump and copy it here as dump.txt (needs VPS_HOST in .env)
+	@test -n "$(VPS_HOST)" || { echo "add VPS_HOST=root@<server ip> to .env first"; exit 1; }
+	ssh $(VPS_HOST) 'cd $(VPS_DIR) && make server-dump'
+	scp -q $(VPS_HOST):$(VPS_DIR)/dump.txt dump.txt
+	@echo "copied the server's dump to $(CURDIR)/dump.txt ($$(wc -l < dump.txt) lines)"
 
 app:              ## local dashboard at http://localhost:8501 (Ctrl+C to stop)
 	streamlit run app/streamlit_app.py
