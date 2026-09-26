@@ -32,6 +32,9 @@ flags:
   send_anonymous_usage_stats: false
 
 on-run-start:
+  # Every table the build (re)creates is readable by the dashboard's read-only login from the
+  # moment it exists, so pages never hit "permission denied" while a build is running.
+  - "alter default privileges for role {{ target.user }} grant select on tables to ltd_reader"
   - "create schema if not exists analytics"
   - "create table if not exists analytics.build_log (started_at timestamptz, finished_at timestamptz, invocation_id text)"
   - "alter table analytics.build_log add column if not exists n_errors integer, add column if not exists n_warnings integer"

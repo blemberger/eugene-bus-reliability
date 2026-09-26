@@ -225,28 +225,82 @@ if route_id is None:
 
 # ---- by time of day ---------------------------------------------------------------------
 st.subheader("Does accuracy depend on the time of day?")
+AHEAD_CHOICES = {"2 min": (1, 2), "5 min": (5, 5), "10 min": (10, 10), "15 min": (15, 15)}
+ahead = (
+    st.segmented_control(
+        "Predictions made this far ahead",
+        list(AHEAD_CHOICES),
+        default="5 min",
+        key="tod_ahead",
+    )
+    or "5 min"
+)
+lo, hi = AHEAD_CHOICES[ahead]
 tod = q(
     """
-    select hour_local, count(*) as n, count(*) filter (where abs(error_s) <= 60) as within1,
-           percentile_cont(0.5) within group (order by error_s) as median_error
+    select hour_local, count(*) as n,
+           count(*) filter (where abs(error_s) <= 60) as within1,
+           count(*) filter (where abs(error_s) <= 120) as within2,
+           count(*) filter (where abs(error_s) <= 180) as within3
     from marts.fct_prediction_errors
-    where horizon_min = 5 and (%s::text is null or route_id = %s)
+    where horizon_min between %s and %s and (%s::text is null or route_id = %s)
     group by 1 order by 1
     """,
-    (route_id, route_id),
+    (lo, hi, route_id, route_id),
 )
-if not tod.empty:
-    tod = tod[tod["n"] >= 20]
+tod = tod[tod["n"] >= 20].copy() if not tod.empty else tod
+if tod.empty:
+    st.caption("Not enough scored predictions this far ahead yet (needs 20 in an hour).")
+else:
     tod["Hour"] = tod["hour_local"].map(hour_label)
-    tod["Right within 1 min"] = tod["within1"] / tod["n"]
-    fig3 = go.Figure(go.Bar(x=tod["Hour"], y=tod["Right within 1 min"], marker_color="#1f77b4"))
+    for k in (1, 2, 3):
+        tod[f"p{k}"] = tod[f"within{k}"] / tod["n"]
+    # One bar per hour, built up in layers: the dark part is "right within 1 min", adding the
+    # middle part gives "within 2 min", the whole bar "within 3 min". One blue, dark to light.
+    layers = [
+        ("p1", None, "within 1 min", "#1f5f9e"),
+        ("p2", "p1", "1–2 min off", "#5b9bd5"),
+        ("p3", "p2", "2–3 min off", "#b3d1ee"),
+    ]
+    custom = list(zip(tod["p1"], tod["p2"], tod["p3"], tod["n"].astype(int), strict=False))
+    fig3 = go.Figure()
+    for col, below, name, color in layers:
+        fig3.add_trace(
+            go.Bar(
+                x=tod["Hour"],
+                y=tod[col] - (tod[below] if below else 0),
+                name=name,
+                marker={"color": color, "line": {"color": "white", "width": 1}},
+                customdata=custom,
+                hovertemplate=(
+                    "<b>%{x}</b><br>right within 1 min: %{customdata[0]:.0%}<br>"
+                    "within 2 min: %{customdata[1]:.0%}<br>within 3 min: %{customdata[2]:.0%}"
+                    "<br>%{customdata[3]:,} predictions<extra></extra>"
+                ),
+            )
+        )
     fig3.update_layout(
+        barmode="stack",
         yaxis_tickformat=".0%",
         yaxis_range=[0, 1],
         xaxis_title="",
-        yaxis_title="'5 min' predictions right within 1 min",
+        yaxis_title=f"'{ahead}' predictions that were right",
+        legend={
+            "orientation": "h",
+            "yanchor": "bottom",
+            "y": 1.02,
+            "x": 0,
+            "title": "",
+            "traceorder": "normal",
+        },
     )
     st.plotly_chart(fig3, width="stretch")
+    st.caption(
+        f"Predictions made about {ahead} ahead, by the hour they were made. Each bar builds up: the "
+        "dark part is the share that was right to within 1 minute; add the middle part for within 2 "
+        "minutes; the whole bar is within 3 minutes. The empty space above is how often the bus came "
+        "more than 3 minutes off the prediction. Hours with fewer than 20 predictions are left out."
+    )
 
 # ---- revisions --------------------------------------------------------------------------
 st.subheader("How often does the prediction change?")

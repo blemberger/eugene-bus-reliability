@@ -419,7 +419,8 @@ def add_honest_columns(
             continue
         p10, p50, p90 = (float(v) / 60 for v in hit)
         likely.append(round(max(0.0, float(m) + p50)))
-        text.append(f"{max(0, round(float(m) + p10))}–{max(0, round(float(m) + p90))} min")
+        lo_m, hi_m = max(0, round(float(m) + p10)), max(0, round(float(m) + p90))
+        text.append(f"{lo_m} min" if lo_m == hi_m else f"{lo_m}–{hi_m} min")
     out = df.copy()
     out["likely_min"] = likely
     out["usual_range"] = text
@@ -1108,3 +1109,198 @@ def now_local() -> datetime:
 def local_today() -> date:
     """Today's date in Eugene (the server itself runs on UTC)."""
     return now_local().date()
+
+
+# ------------------------------------------------------------ next buses at a stop ----
+STOP_ROWS_PER_ROUTE = 3  # buses shown per route and direction, coming and just left
+
+
+def fmt_in(minutes) -> str:
+    """Minutes until a bus -> 'now', '7 min', '1 h 05 min'."""
+    if minutes is None or pd.isna(minutes):
+        return ""
+    m = max(0, round(float(minutes)))
+    if m == 0:
+        return "now"
+    return f"{m} min" if m < 60 else f"{m // 60} h {m % 60:02d} min"
+
+
+def col_clock(label: str, times: pd.Series, help: str | None = None):
+    """A time column that adds the weekday when any row is not today in Eugene."""
+    t = pd.to_datetime(times, utc=True).dt.tz_convert(LOCAL_TZ).dropna()
+    other_day = bool((t.dt.date != local_today()).any()) if len(t) else False
+    return st.column_config.DatetimeColumn(
+        label, format="ddd h:mm a" if other_day else "h:mm a", timezone=LOCAL_TZ, help=help
+    )
+
+
+def stop_buses(
+    stop_id: str, per_route: int = STOP_ROWS_PER_ROUTE
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """The next and the last `per_route` buses of each route and direction at a stop, however
+    far away in time. Returns (coming, left).
+
+    coming: LTD's live prediction where it has one; beyond the trips LTD is predicting (it
+    only predicts trips about to run), the timetable (source = 'timetable'). A stop counts
+    as left by the same rule as the Arrivals board: the feed kept reporting it after its
+    time, or the bus's next stop was still being updated after it."""
+    fv = current_fv()
+    sj, sched = schedule_join("p")
+    timetable = ""
+    last = "coalesce(se.is_last_stop, false)" if marts_ready() else "false"
+    if marts_ready():
+        timetable = """
+            union all
+            select se.trip_id, se.service_date, se.stop_sequence, se.scheduled_arrival as t,
+                   se.scheduled_arrival as scheduled, 'timetable' as source
+            from intermediate.int_scheduled_stop_events se
+            where se.stop_id = %(stop)s
+              and se.scheduled_arrival between now() and now() + interval '36 hours'
+              and not se.is_last_stop
+              and not exists (
+                  select 1 from rt.prediction_current x
+                  where x.trip_id = se.trip_id and x.start_date = se.service_date
+                    and x.stop_sequence = se.stop_sequence)"""
+    df = q_fresh(
+        f"""
+        with pred as (
+            select p.trip_id, p.start_date as service_date, p.stop_sequence,
+                   coalesce(p.arrival_time, p.departure_time) as t, {sched} as scheduled,
+                   p.last_seen_at, nx.next_seen, {last} as is_last
+            from rt.prediction_current p
+            left join lateral (
+                select x.last_seen_at as next_seen from rt.prediction_current x
+                where x.trip_id = p.trip_id and x.start_date = p.start_date
+                  and x.stop_sequence > p.stop_sequence
+                order by x.stop_sequence limit 1
+            ) nx on true
+            {sj}
+            where p.stop_id = %(stop)s and coalesce(p.arrival_time, p.departure_time) is not null
+        ),
+        classed as (
+            select *, t < now() and (last_seen_at >= t + interval '20 seconds'
+                                     or next_seen >= t + interval '20 seconds') as departed
+            from pred
+            where not is_last  -- a bus ending its trip here is not one to catch
+        ),
+        events as (
+            select trip_id, service_date, stop_sequence, t, scheduled, 'left' as source
+            from classed where departed
+            union all
+            select trip_id, service_date, stop_sequence, t, scheduled, 'live'
+            from classed
+            where not departed and last_seen_at > now() - interval '3 minutes'
+              and t >= now() - interval '2 minutes'
+            {timetable}
+        ),
+        ranked as (
+            select e.*, tr.route_id, tr.direction_id, tr.trip_headsign as headsign,
+                   r.route_short_name as route,
+                   coalesce(stt.timepoint, case when stt.arrival_seconds is null then 0 else 1 end) = 1
+                       as is_timepoint,
+                   extract(epoch from e.t - e.scheduled)::int as delay_s,
+                   row_number() over (
+                       partition by tr.route_id, tr.direction_id, e.source = 'left'
+                       order by case when e.source = 'left' then -extract(epoch from e.t)
+                                     else extract(epoch from e.t) end
+                   ) as n
+            from events e
+            join gtfs.trips tr on tr.trip_id = e.trip_id and tr.feed_version_id = {fv}
+            join gtfs.routes r on r.route_id = tr.route_id and r.feed_version_id = {fv}
+            left join gtfs.stop_times stt on stt.feed_version_id = {fv} and stt.trip_id = e.trip_id
+                                         and stt.stop_sequence = e.stop_sequence
+        )
+        select * from ranked where n <= %(n)s order by t
+        """,
+        {"stop": stop_id, "n": per_route},
+        marker=live_marker()["fid"],
+    )
+    df["t"] = pd.to_datetime(df["t"], utc=True)
+    coming = df[df["source"] != "left"].copy()
+    left = df[df["source"] == "left"].sort_values("t", ascending=False).copy()
+    now = data_now()
+    coming["mins"] = ((coming["t"] - now).dt.total_seconds() / 60).clip(lower=0)
+    live = coming["source"] == "live"
+    coming = add_honest_columns(
+        coming.assign(m=coming["mins"].where(live)), "m", "route_id", "is_timepoint"
+    )
+    coming.loc[~live, "delay_s"] = None  # a timetable row has no prediction to be late by
+    return coming, left
+
+
+def show_coming(coming: pd.DataFrame, empty: str) -> None:
+    """The 'coming up' table of stop_buses()."""
+    if coming.empty:
+        st.caption(empty_message(empty))
+        return
+    table(
+        pd.DataFrame(
+            {
+                "Route": coming["route"],
+                "Toward": clean_headsigns(coming),
+                "Arrives": local_times(coming["t"]),
+                "In": coming["mins"].map(fmt_in),
+                # text, so a timetable row shows blank rather than "None"
+                "Likely in": [
+                    "" if v is None or pd.isna(v) else f"{float(v):.0f} min"
+                    for v in coming["likely_min"]
+                ],
+                "80% of the time": coming["usual_range"],
+                "Scheduled": local_times(coming["scheduled"]),
+                "Min late": [
+                    "" if v is None or pd.isna(v) else f"{float(v):+.1f}"
+                    for v in late_minutes(coming["delay_s"])
+                ],
+                "Time from": coming["source"].map(
+                    {"live": "LTD prediction", "timetable": "timetable only"}
+                ),
+            }
+        ),
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "Arrives": col_clock("Arrives", coming["t"]),
+            "In": st.column_config.TextColumn(
+                "In",
+                help="Time until LTD's predicted time, or the timetable's where LTD has no prediction yet.",
+            ),
+            "Likely in": st.column_config.TextColumn("Likely in", help=col_likely()["help"]),
+            "80% of the time": col_usual(),
+            "Scheduled": col_clock("Scheduled", coming["scheduled"]),
+            "Min late": st.column_config.TextColumn(
+                "Min late",
+                help="How late LTD's prediction puts the bus, in minutes; negative = early.",
+            ),
+            "Time from": st.column_config.TextColumn(
+                "Time from",
+                help="LTD only predicts trips that are about to run; later buses show the timetable.",
+            ),
+        },
+    )
+
+
+def show_left(left: pd.DataFrame, empty: str) -> None:
+    """The 'just left' table of stop_buses()."""
+    if left.empty:
+        st.caption(empty)
+        return
+    table(
+        pd.DataFrame(
+            {
+                "Route": left["route"],
+                "Toward": clean_headsigns(left),
+                "Left at": local_times(left["t"]),
+                "Scheduled": local_times(left["scheduled"]),
+                "Min late": late_minutes(left["delay_s"]),
+                "Ago": local_times(left["t"]),
+            }
+        ),
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "Left at": col_clock("Left at", left["t"]),
+            "Scheduled": col_clock("Scheduled", left["scheduled"]),
+            "Min late": col_late(),
+            "Ago": col_ago(),
+        },
+    )

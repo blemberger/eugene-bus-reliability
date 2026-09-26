@@ -15,15 +15,13 @@ from common import (
     LIVE_CHECK_SECONDS,
     STATUS_COLOR,
     STATUS_LABEL,
-    add_honest_columns,
+    STOP_ROWS_PER_ROUTE,
     busy_stop_buttons,
     clean_headsigns,
     col_ago,
     col_late,
-    col_likely,
     col_minutes,
     col_time,
-    col_usual,
     current_fv,
     data_now,
     empty_message,
@@ -42,7 +40,9 @@ from common import (
     route_picker,
     schedule_join,
     search_stops,
+    show_coming,
     status_from_delay,
+    stop_buses,
     stop_buttons,
     table,
 )
@@ -435,62 +435,16 @@ live_map()
 
 @st.fragment(run_every=f"{LIVE_CHECK_SECONDS}s")
 def stop_arrivals(stop_id: str) -> None:
-    sj2, sched2 = schedule_join("p")
     live_status_line()
-    nxt = q_fresh(
-        f"""
-        select r.route_short_name as route, t.route_id, t.trip_headsign as headsign,
-               coalesce(stt.timepoint, case when stt.arrival_seconds is null then 0 else 1 end) = 1 as is_timepoint,
-               coalesce(p.arrival_time, p.departure_time) as arrival_time,
-               coalesce(p.arrival_delay, p.departure_delay,
-                        extract(epoch from coalesce(p.arrival_time, p.departure_time) - {sched2})::int) as arrival_delay,
-               floor(extract(epoch from coalesce(p.arrival_time, p.departure_time) - now()) / 60)::int as horizon_min
-        from rt.prediction_current p
-        join gtfs.trips t  on t.trip_id = p.trip_id and t.feed_version_id = {FV}
-        join gtfs.routes r on r.route_id = t.route_id and r.feed_version_id = t.feed_version_id
-        left join gtfs.stop_times stt on stt.feed_version_id = {FV} and stt.trip_id = p.trip_id
-                                     and stt.stop_sequence = p.stop_sequence
-        {sj2}
-        where p.stop_id = %s and coalesce(p.arrival_time, p.departure_time) > now() - interval '1 minute'
-          and p.last_seen_at > now() - interval '3 minutes'
-        order by coalesce(p.arrival_time, p.departure_time) limit 12
-        """,
-        (stop_id,),
-        marker=live_marker()["fid"],
+    coming, _ = stop_buses(stop_id)
+    show_coming(coming, "No buses scheduled at this stop in the next 36 hours.")
+    st.caption(
+        f"The next {STOP_ROWS_PER_ROUTE} buses of each route and direction. 'In' is LTD's prediction; "
+        "LTD only predicts trips that are about to run, so later buses show the timetable. 'Likely in' "
+        "corrects LTD's prediction by how far off it has usually been for this route, time of day and "
+        "number of minutes ahead; '80% of the time' is the range the bus actually arrived in, in past "
+        "data. Empty where there isn't enough history yet."
     )
-    if nxt.empty:
-        st.info("No buses predicted for this stop right now.")
-    else:
-        nxt = add_honest_columns(
-            nxt.assign(mins=nxt["horizon_min"].clip(lower=0)), "mins", "route_id", "is_timepoint"
-        )
-        table(
-            pd.DataFrame(
-                {
-                    "Route": nxt["route"],
-                    "Toward": clean_headsigns(nxt),
-                    "Arrives": local_times(nxt["arrival_time"]),
-                    "In": nxt["mins"],
-                    "Likely in": nxt["likely_min"],
-                    "80% of the time": nxt["usual_range"],
-                    "Min late": late_minutes(nxt["arrival_delay"]),
-                }
-            ),
-            hide_index=True,
-            width="stretch",
-            column_config={
-                "Arrives": col_time("Arrives"),
-                "In": col_minutes("In", help="Minutes until LTD's predicted time (0 = now)."),
-                "Likely in": col_likely(),
-                "80% of the time": col_usual(),
-                "Min late": col_late(),
-            },
-        )
-        st.caption(
-            "'In' is LTD's prediction. 'Likely in' corrects it by how far off LTD's predictions have "
-            "usually been for this route, time of day and number of minutes ahead; '80% of the time' "
-            "is the range the bus actually arrived in, in past data. Empty where there isn't enough history yet."
-        )
 
 
 # ---- stop lookup -----------------------------------------------------------------

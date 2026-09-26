@@ -84,7 +84,7 @@ FLOW_BLOCKS_SHORT = {
     1: "1–2 min",
     2: "2–3 min",
 }
-FLOW_COLS = 4  # badges per row inside a block
+FLOW_BIN_SECONDS = 15  # width of the time columns inside each one-minute block
 PASSING = 99  # block id for "passing now": due, not yet confirmed as left
 
 
@@ -124,16 +124,22 @@ def flow_chart(
         return
     df["route"] = df["route"].astype(str)
     df["toward"] = clean_headsigns(df)
-    df["rkey"] = df["route"].map(lambda v: (len(v), v))
-    df = df.sort_values(["block", "rkey", "sec"])
     mobile = is_mobile()
-    ncol = 2 if mobile else FLOW_COLS  # a phone's block is too narrow for four badges across
-    i = df.groupby("block").cumcount()
-    df["x"] = df["block"] + 0.5 + ((i % ncol) - (ncol - 1) / 2) * (0.46 if mobile else 0.21)
-    df["y"] = i // ncol
-    on_line = df["block"] == PASSING  # one column centred on the "now" line
+    # Each minute is split into columns by the second: a badge sits in the column of its time
+    # and a column stacks its badges in time order, earliest at the top. 15 s columns; 30 s on
+    # a phone, where a minute is too narrow for four badges across.
+    bin_s = 30 if mobile else FLOW_BIN_SECONDS
+    df["bin"] = [  # "passing now" badges get one column of their own, centred on the line
+        PASSING if k == "passing" else math.floor(s / bin_s)
+        for s, k in zip(df["sec"], df["kind"], strict=False)
+    ]
+    df = df.sort_values(["bin", "sec"])
+    on_line = df["bin"] == PASSING
+    df["y"] = df.groupby("bin").cumcount()
+    centre = (df["bin"] + 0.5) * bin_s / 60
+    # the columns either side of "now" keep clear of the badges drawn on the line
+    df["x"] = centre.where(centre.abs() >= 0.19, 0.19 * centre.map(lambda c: 1 if c > 0 else -1))
     df.loc[on_line, "x"] = 0.0
-    df.loc[on_line, "y"] = i[on_line]
     df["late_min"] = df["delay_s"] / 60
     df["when"] = [
         f"left {fmt_time(t)} ({_ago(s)} ago)"
@@ -188,7 +194,11 @@ def flow_chart(
     )
     for b in range(-3, 3):  # light separators between the one-minute blocks
         if b != 0:
-            fig.add_vline(x=b, line_width=1, line_color="#ddd")
+            fig.add_vline(x=b, line_width=1, line_color="#ccc")
+    step = bin_s / 60  # fainter dashed lines between the columns inside each minute
+    for k in range(int(-3 / step), int(3 / step)):
+        if abs(k * step - round(k * step)) > 1e-9:
+            fig.add_vline(x=k * step, line_width=1, line_color="#e3e3e3", line_dash="dot")
     fig.add_vline(
         x=0, line_width=3, line_color="#222", layer="below"
     )  # badges on the line stay readable
@@ -253,7 +263,8 @@ def flow_chart(
         "above. Right of the line: due at a stop in that minute. Left: left a stop in that minute (faded). "
         "On the line (dark outline): due now or just past due, but the feed hasn't confirmed yet that the bus "
         "left; a departure can only be confirmed by a later message, so these move left once one arrives. "
-        "Inside a block, badges are sorted by route. Colour = minutes late: how late it left, or how late "
+        "Inside each minute, dotted lines split it into 15-second columns (30 seconds on a phone): a badge "
+        "sits in the column of its time, and each column is stacked in time order, earliest at the top. Colour = minutes late: how late it left, or how late "
         "LTD's prediction puts it at that stop. Hover a badge for the stop and exact times."
     )
 
@@ -500,7 +511,7 @@ def board() -> None:
                     "Sample": col_count("Sample", help="Arrivals behind the 'usually' numbers."),
                 }
             table(out, hide_index=True, width="stretch", column_config=config)
-        if has_marts:
+        if has_marts and route_id:
             st.caption(
                 "'Usually' = this stop, this route and direction, this hour of day, on this kind of day, across all collected days."
             )

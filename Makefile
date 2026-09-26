@@ -9,7 +9,7 @@ DBT := DBT_PROFILES_DIR=dbt dbt
 HOST_PGPORT := $(or $(POSTGRES_PORT),5432)
 TUNNEL_PORT := $(or $(TUNNEL_PORT),55439)
 
-.PHONY: help setup lock up down reset logs load-static poll-once poll scheduler run migrate check-db replay rebuild report dump app tunnel test test-all lint format dbt-deps dbt-build dbt-docs
+.PHONY: help setup lock up down reset logs load-static poll-once poll scheduler run migrate check-db replay rebuild report dump server-dump app tunnel test test-all lint format dbt-deps dbt-build dbt-docs
 
 help:             ## list these commands
 	@grep -hE '^[a-z-]+:.*## ' $(firstword $(MAKEFILE_LIST)) | awk 'BEGIN {FS = ":.*## "} {printf "  %-12s %s\n", $$1, $$2}'
@@ -83,6 +83,18 @@ dump:             ## everything needed to diagnose a problem, in dump.txt: pipel
 	@python app/selfcheck.py >> dump.txt 2>&1 || echo "!! app self-check exited with an error (details above)" >> dump.txt
 	@echo "wrote $(CURDIR)/dump.txt ($$(wc -l < dump.txt) lines)"
 
+server-dump:      ## on the server (no venv there): the same dump, run inside the containers, plus memory, disk and log errors, into dump.txt
+	@echo "collecting pipeline state, then rendering every app page (a minute or two)..."
+	@{ docker compose exec -T poller python -m ltdwatch dump $(if $(RAW),--raw) || echo "!! dump exited with an error (details above)"; \
+	  echo; echo "== SERVER: load, memory, disk, containers"; uptime; free -h; df -h /; du -sh data/raw; \
+	  docker compose --profile web ps; docker stats --no-stream; \
+	  echo; echo "== LOG LINES with ERROR/WARNING/Traceback/denied (last 300 lines of each service)"; \
+	  docker compose --profile web logs --no-color --tail 300 poller scheduler app caddy \
+	    | grep -E "ERROR|WARN|Traceback|denied|FATAL" | grep -vE "Done\. PASS=[0-9]+ WARN=0 ERROR=0" | tail -40; \
+	  echo; docker compose --profile web exec -T app python app/selfcheck.py || echo "!! app self-check exited with an error (details above)"; \
+	} > dump.txt 2>&1
+	@echo "wrote $(CURDIR)/dump.txt ($$(wc -l < dump.txt) lines)"
+
 app:              ## local dashboard at http://localhost:8501 (Ctrl+C to stop)
 	streamlit run app/streamlit_app.py
 
@@ -109,6 +121,3 @@ dbt-build:        ## build the analysis layer (observed arrivals, reliability ma
 
 dbt-docs:         ## generate and serve dbt's documentation site with the lineage graph
 	PGHOST=localhost PGPORT=$(HOST_PGPORT) $(DBT) docs generate --project-dir dbt && $(DBT) docs serve --project-dir dbt
-
-strip-learn:      ## remove every LEARN comment and docs/LEARNING.md before publishing
-	python scripts/strip_learn.py

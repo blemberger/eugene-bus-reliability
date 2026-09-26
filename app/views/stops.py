@@ -8,41 +8,34 @@ import pydeck as pdk
 import streamlit as st
 from common import (
     LIVE_CHECK_SECONDS,
-    add_honest_columns,
+    STOP_ROWS_PER_ROUTE,
     busy_stops,
     clean_headsigns,
-    col_ago,
     col_count,
     col_hour,
     col_late,
-    col_likely,
     col_minutes,
     col_pct,
     col_stop,
-    col_time,
-    col_usual,
     current_fv,
     data_note,
-    data_now,
     day_label,
     day_sql,
-    empty_message,
     fmt_date,
     fmt_pct,
     hour_label,
     hour_time,
     late_minutes,
-    live_marker,
     live_status_line,
-    local_times,
     page_filters,
     q,
-    q_fresh,
     require_db,
     require_marts,
-    schedule_join,
     search_stops,
     share_pct,
+    show_coming,
+    show_left,
+    stop_buses,
     stop_buttons,
     stop_link,
     table,
@@ -165,93 +158,19 @@ st.page_link("views/live.py", label="What's coming to this stop right now →", 
 # ---- right now at this stop ------------------------------------------------------------
 @st.fragment(run_every=f"{LIVE_CHECK_SECONDS}s")
 def stop_right_now() -> None:
-    sj, sched = schedule_join("p")
     live_status_line()
-    rows = q_fresh(
-        f"""
-        select r.route_short_name as route, t.route_id, t.trip_headsign as headsign,
-               coalesce(stt.timepoint, case when stt.arrival_seconds is null then 0 else 1 end) = 1 as is_timepoint,
-               coalesce(p.arrival_time, p.departure_time) as t, {sched} as scheduled,
-               extract(epoch from coalesce(p.arrival_time, p.departure_time) - {sched})::int as delay_s,
-               p.last_seen_at >= coalesce(p.arrival_time, p.departure_time) + interval '20 seconds' as departed
-        from rt.prediction_current p
-        join gtfs.trips t  on t.trip_id = p.trip_id and t.feed_version_id = {FV}
-        join gtfs.routes r on r.route_id = t.route_id and r.feed_version_id = {FV}
-        left join gtfs.stop_times stt on stt.feed_version_id = {FV} and stt.trip_id = p.trip_id
-                                     and stt.stop_sequence = p.stop_sequence
-        {sj}
-        where p.stop_id = %s
-          and p.last_seen_at > now() - interval '3 minutes'
-          and coalesce(p.arrival_time, p.departure_time) between now() - interval '30 minutes' and now() + interval '60 minutes'
-        order by coalesce(p.arrival_time, p.departure_time)
-        """,
-        (stop_id,),
-        marker=live_marker()["fid"],
-    )
-    now = data_now()
-    rows["t"] = pd.to_datetime(rows["t"], utc=True)
-    coming = rows[rows["t"] >= now - pd.Timedelta(seconds=30)].copy()
-    coming["mins"] = ((coming["t"] - now).dt.total_seconds() / 60).clip(lower=0).round()
-    coming = add_honest_columns(coming, "mins", "route_id", "is_timepoint")
-    left = rows[(rows["t"] < now) & rows["departed"].astype(bool)].sort_values("t", ascending=False)
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("**Coming up (next 60 minutes)**")
-        if coming.empty:
-            st.caption(empty_message("No buses predicted for this stop in the next 60 minutes."))
-        else:
-            table(
-                pd.DataFrame(
-                    {
-                        "Route": coming["route"],
-                        "Toward": clean_headsigns(coming),
-                        "Arrives": local_times(coming["t"]),
-                        "In": coming["mins"],
-                        "Likely in": coming["likely_min"],
-                        "80% of the time": coming["usual_range"],
-                        "Scheduled": local_times(coming["scheduled"]),
-                        "Min late": late_minutes(coming["delay_s"]),
-                    }
-                ),
-                hide_index=True,
-                width="stretch",
-                column_config={
-                    "Arrives": col_time("Arrives"),
-                    "In": col_minutes("In", help="Minutes until LTD's predicted time (0 = now)."),
-                    "Likely in": col_likely(),
-                    "80% of the time": col_usual(),
-                    "Scheduled": col_time("Scheduled"),
-                    "Min late": col_late(),
-                },
-            )
-    with c2:
-        st.markdown("**Just left (last 30 minutes)**")
-        if left.empty:
-            st.caption("No departures from this stop recorded in the last 30 minutes.")
-        else:
-            table(
-                pd.DataFrame(
-                    {
-                        "Route": left["route"],
-                        "Toward": clean_headsigns(left),
-                        "Left at": local_times(left["t"]),
-                        "Scheduled": local_times(left["scheduled"]),
-                        "Min late": late_minutes(left["delay_s"]),
-                        "Ago": local_times(left["t"]),
-                    }
-                ),
-                hide_index=True,
-                width="stretch",
-                column_config={
-                    "Left at": col_time("Left at"),
-                    "Scheduled": col_time("Scheduled"),
-                    "Min late": col_late(),
-                    "Ago": col_ago(),
-                },
-            )
+    coming, left = stop_buses(stop_id)
+    n = STOP_ROWS_PER_ROUTE
+    st.markdown(f"**Coming up (next {n} of each route)**")
+    show_coming(coming, "No buses scheduled at this stop in the next 36 hours.")
+    st.markdown(f"**Just left (last {n} of each route)**")
+    show_left(left, "No departures from this stop recorded in the last two days.")
     st.caption(
-        "Arrives/In are LTD's predictions; 'Likely in' corrects them by how far off LTD has usually been "
-        "(same route, time of day, minutes ahead). Min late compares with the timetable; negative = early."
+        f"The next {n} and the last {n} buses of each route and direction, however far away. "
+        "Arrives/In are LTD's predictions where it has one; LTD only predicts trips that are about "
+        "to run, so later buses show the timetable. 'Likely in' corrects LTD's prediction by how far "
+        "off it has usually been (same route, time of day, minutes ahead). Min late compares with "
+        "the timetable; negative = early."
     )
 
 
