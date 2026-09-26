@@ -1,0 +1,15 @@
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false
+
+[client]
+toolbarMode = "viewer"
+
+[theme]
+base = "light"
+primaryColor = "#0b6e4f"
+baseFontSize = 17
+baseRadius = "medium"
+showWidgetBorder = true

@@ -1,0 +1,53 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: ltd
+          POSTGRES_PASSWORD: ltd
+          POSTGRES_DB: ltd
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ltd -d ltd"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      TEST_DATABASE_URL: postgresql://ltd:ltd@localhost:5432/ltd
+      POSTGRES_USER: ltd
+      POSTGRES_PASSWORD: ltd
+      POSTGRES_DB: ltd
+      PGHOST: localhost
+      PGPORT: "5432"
+      RAW_ARCHIVE_DIR: /tmp/raw
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: constraints.txt
+      - name: Install (exact versions from constraints.txt)
+        run: pip install -c constraints.txt -e ".[dev]"
+      - name: Lint and formatting
+        run: |
+          ruff check .
+          ruff format --check .
+      - name: Apply schema
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q postgresql-client
+          for f in sql/schema/*.sql; do psql "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "$f"; done
+      - name: Unit + integration tests
+        run: pytest -q
+      # The integration tests leave the tables empty, so this step proves every model's SQL
+      # and every test compiles and runs against the real schema, not the numbers.
+      - name: dbt build (every model and test, against the real schema)
+        run: |
+          DBT_PROFILES_DIR=dbt dbt deps --project-dir dbt
+          DBT_PROFILES_DIR=dbt dbt build --project-dir dbt

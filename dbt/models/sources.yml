@@ -1,0 +1,29 @@
+version: 2
+
+sources:
+  - name: gtfs
+    schema: gtfs
+    description: Static schedule, one copy per downloaded feed version.
+    tables:
+      - name: feed_version
+      - name: routes
+      - name: stops
+      - name: trips
+      - name: stop_times
+      - name: calendar
+      - name: calendar_dates
+      - name: shapes
+
+  - name: rt
+    schema: rt
+    description: Realtime observations written by the poller.
+    tables:
+      - name: fetch
+        loaded_at_field: fetched_at
+        freshness:
+          warn_after: {count: 10, period: minute}
+          error_after: {count: 60, period: minute}
+      - name: vehicle_position
+      - name: trip_update
+      - name: prediction_current
+      - name: prediction_history

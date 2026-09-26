@@ -1,0 +1,54 @@
+name: ltdwatch
+version: "0.1.0"
+config-version: 2
+profile: ltdwatch
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+vars:
+  timezone: "America/Los_Angeles"
+  # Industry-convention on-time window (TCRP): no more than 1 min early, 5 min late.
+  early_seconds: 60
+  late_seconds: 300
+  # Only rebuild this many days of history on each run (until the models go incremental).
+  lookback_days: 120
+  # Routes whose scheduled headway is at most this are judged on headway adherence, not on-time.
+  frequent_headway_seconds: 1200
+  # Plausibility window. An observed arrival more than this early or late against the
+  # schedule is almost always a trip-id mismatch (a bus reporting the wrong trip), not real
+  # service: it is flagged is_plausible = false and left out of every reliability number.
+  plausible_early_seconds: 1800
+  plausible_late_seconds: 5400
+  # Precision limit. An arrival time is interpolated between two position reports; its
+  # uncertainty is half the gap between them. Above this (normally ~15 s; minutes during a
+  # feed outage) it is too vague to call on time or late, so it is left out of the scores.
+  max_uncertainty_seconds: 120
+
+flags:
+  send_anonymous_usage_stats: false
+
+on-run-start:
+  - "create schema if not exists analytics"
+  - "create table if not exists analytics.build_log (started_at timestamptz, finished_at timestamptz, invocation_id text)"
+  - "alter table analytics.build_log add column if not exists n_errors integer, add column if not exists n_warnings integer"
+  - "{% if flags.WHICH in ('build', 'run') %}insert into analytics.build_log (started_at, invocation_id) values (now(), '{{ invocation_id }}'){% endif %}"
+on-run-end:
+  - "{% if flags.WHICH in ('build', 'run') %}update analytics.build_log set finished_at = now(), n_errors = {{ results | selectattr('status', 'in', ['error', 'fail', 'runtime error']) | list | length }}, n_warnings = {{ results | selectattr('status', 'equalto', 'warn') | list | length }} where invocation_id = '{{ invocation_id }}'{% endif %}"
+  - "grant usage on schema staging, intermediate, marts, analytics to ltd_reader"
+  - "grant select on all tables in schema staging, intermediate, marts, analytics to ltd_reader"
+
+models:
+  ltdwatch:
+    staging:
+      +materialized: view
+      +schema: staging
+    intermediate:
+      +materialized: table
+      +schema: intermediate
+    marts:
+      +materialized: table
+      +schema: marts

@@ -1,0 +1,16 @@
+.env
+data/
+*.pb
+*.pb.gz
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+dbt/target/
+dbt/dbt_packages/
+dbt/logs/
+logs/
+*.parquet
+dump.txt

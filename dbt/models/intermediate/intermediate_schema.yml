@@ -1,0 +1,102 @@
+version: 2
+
+models:
+  - name: int_feed_version_by_date
+    description: The schedule version in force on each service date.
+    columns:
+      - name: service_date
+        tests: [unique, not_null]
+      - name: feed_version_id
+        tests: [not_null]
+
+  - name: int_active_services
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [service_date, feed_version_id, service_id]
+
+  - name: int_stop_times_filled
+    description: stop_times with blank non-timepoint times interpolated between timepoints.
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [feed_version_id, trip_id, stop_sequence]
+    columns:
+      - name: arrival_seconds
+        tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                max_value: 172800
+
+  - name: int_scheduled_stop_events
+    description: Every scheduled stop event as a wall-clock timestamp; the spine for matching.
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [service_date, trip_id, stop_sequence]
+    columns:
+      - name: scheduled_arrival
+        tests: [not_null]
+      - name: route_id
+        tests: [not_null]
+
+  - name: int_shape_lines
+    columns:
+      - name: n_points
+        tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 2
+
+  - name: int_stop_shape_fractions
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [feed_version_id, trip_id, stop_sequence]
+    columns:
+      - name: frac
+        tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                max_value: 1
+
+  - name: int_position_fractions
+    description: Each position projected onto its trip's shape (fraction along, metres off).
+    columns:
+      - name: frac
+        tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                max_value: 1
+
+  - name: int_feed_settled_times
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [service_date, trip_id, stop_sequence]
+
+  - name: int_observed_arrivals
+    description: Observed arrival per trip-stop, derived geometrically from vehicle positions along the route shape.
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [service_date, trip_id, stop_sequence]
+    columns:
+      - name: observed_arrival
+        tests: [not_null]
+      - name: is_plausible
+        tests: [not_null]
+      - name: uncertainty_s
+        tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+
+  - name: int_headways
+    columns:
+      - name: observed_headway_s
+        tests: [not_null]

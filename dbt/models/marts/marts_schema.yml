@@ -1,0 +1,85 @@
+version: 2
+
+models:
+  - name: fct_stop_events
+    description: One row per scheduled stop event in the collection period, with observed arrival and status.
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [service_date, trip_id, stop_sequence]
+    columns:
+      - name: status
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['early', 'on_time', 'late']
+      - name: delay_s
+        # Scored events must lie inside the plausibility window by construction; anything
+        # outside it is flagged is_plausible = false and counted in mart_daily_coverage.
+        tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: "{{ -var('plausible_early_seconds') }}"
+                max_value: "{{ var('plausible_late_seconds') }}"
+              config:
+                where: "status is not null"
+      - name: uncertainty_s
+        # Scored events are precise by construction; imprecise ones are counted in mart_daily_coverage.
+        tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                max_value: "{{ var('max_uncertainty_seconds') }}"
+              config:
+                where: "status is not null"
+
+  - name: fct_prediction_errors
+    description: Every prediction scored against the observed arrival.
+    columns:
+      - name: horizon_s
+        tests: [not_null]
+      - name: error_s
+        tests: [not_null]
+
+  - name: mart_route_daily
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [route_id, direction_id, service_date, hour_local]
+
+  - name: mart_stop_route_hourly
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [stop_id, route_id, direction_id, weekday_type, hour_local]
+
+  - name: mart_calibration
+    columns:
+      - name: horizon_min
+        tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                max_value: 60
+
+  - name: mart_method_agreement
+    description: Agreement between position-derived arrivals and the feed's settled departure times.
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [service_date, route_id]
+
+  - name: mart_daily_coverage
+    columns:
+      - name: service_date
+        tests: [unique, not_null]
+  - name: mart_prediction_error_ranges
+    description: Percentiles of past prediction error by route, time of day, stop type and horizon band (the honest countdown).
+    columns:
+      - name: n_predictions
+        tests: [not_null]
+      - name: horizon_band
+        tests:
+          - accepted_values:
+              arguments:
+                values: [1, 3, 6, 10, 15, 20, 30]

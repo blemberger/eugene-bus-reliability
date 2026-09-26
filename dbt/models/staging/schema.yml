@@ -1,0 +1,42 @@
+version: 2
+
+models:
+  - name: stg_gtfs__stop_times
+    columns:
+      - name: stop_sequence
+        tests: [not_null]
+      - name: arrival_seconds
+        # Blank at non-timepoints in LTD's feed (about two thirds of rows); filled by int_stop_times_filled.
+        tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                max_value: 172800   # < 48h
+  - name: stg_rt__predictions
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [trip_id, service_date, stop_sequence, first_seen_at]
+    columns:
+      - name: first_seen_at
+        tests: [not_null]
+      - name: last_seen_at
+        tests: [not_null]
+  - name: stg_rt__vehicle_positions
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [vehicle_id, position_timestamp]
+    columns:
+      - name: latitude
+        tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 43.5      # Lane County
+                max_value: 44.6
+      - name: longitude
+        tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: -124.2
+                max_value: -122.0
