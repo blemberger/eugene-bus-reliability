@@ -4,7 +4,7 @@
 
 A warehouse and analysis of bus reliability for **Lane Transit District** (Eugene–Springfield, Oregon), built from LTD's public GTFS schedule and GTFS-Realtime feeds.
 
-The headline question is not "are the buses on time" — LTD tracks that internally — but **how accurate is the arrival prediction shown to riders, as a function of how far out it is made.** TripUpdates are the agency's predictions; VehiclePositions are what actually happened. Recording both continuously, and every revision of every prediction, makes that a measurable calibration curve. On-time performance by route, stop and hour, and headway adherence on the frequent routes, come from the same data.
+The headline question is **how accurate is the arrival prediction shown to riders, as a function of how far out it is made.** TripUpdates are the agency's predictions; VehiclePositions are what actually happened. Recording both continuously, and every revision of every prediction, makes that a measurable calibration curve. On-time performance by route, stop and hour, and headway adherence on the frequent routes, come from the same data.
 
 > **Status (September 2026):** collection layer complete and running; analysis layer in progress. Results will be posted here as the history accumulates. Nothing below is a finding yet.
 
