@@ -167,7 +167,7 @@ stop = q(
     (stop_id,),
 ).iloc[0]
 st.subheader(f"{stop['stop_name']}" + (f"  ·  #{stop['stop_code']}" if stop["stop_code"] else ""))
-st.page_link("views/live.py", label="What's coming to this stop right now →", icon="📍")
+st.page_link("views/map.py", label="What's coming to this stop right now →", icon="📍")
 
 
 # ---- right now at this stop ------------------------------------------------------------

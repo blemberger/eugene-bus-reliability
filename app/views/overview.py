@@ -1,7 +1,4 @@
-"""Home: how reliable are Eugene's buses right now and over the last week?
-
-Run: make app   (then open http://localhost:8501)
-"""
+"""Overview (the home page): how reliable are Eugene's buses right now and over the last week?"""
 
 from __future__ import annotations
 
@@ -37,10 +34,10 @@ require_db()
 
 st.title("How reliable are Eugene's buses?")
 c_a, c_b, c_c, c_d = st.columns(4)
-c_a.page_link("views/live.py", label="Where's my bus?", icon="📍")
+c_a.page_link("views/map.py", label="Where's my bus?", icon="📍")
 c_b.page_link("views/stops.py", label="How reliable is my stop?", icon="🚏")
 c_c.page_link("views/routes.py", label="Route report cards", icon="🗺️")
-c_d.page_link("views/predictions.py", label="Can I trust the sign?", icon="⏱️")
+c_d.page_link("views/accuracy.py", label="Can I trust the sign?", icon="⏱️")
 st.caption(
     "Independent measurements from Lane Transit District's public schedule and live vehicle feeds. "
     "Not affiliated with LTD."
@@ -94,14 +91,14 @@ if marts_ready():
     c4.metric("Buses reporting now", buses_now, fmt_ago(last_fetch), delta_color="off")
     if n == 0:
         st.info(
-            "The analysis layer exists but has no scored stop events yet — run `make dbt-build` after a few hours of collection."
+            "No arrivals have been scored yet. They appear once the analysis has run on a few hours of collected bus positions; it refreshes every 15 minutes."
         )
 else:
     c1, c2 = st.columns(2)
     c1.metric("Buses reporting now", buses_now, fmt_ago(last_fetch), delta_color="off")
     c2.metric("Collecting since", fmt_date(start) if start else "—")
     st.info(
-        "Reliability numbers appear after the first `make dbt-build`. Live data is on the Live page."
+        "Reliability numbers appear once the analysis has run on a few hours of collected bus positions. Live data is on the Live map page."
     )
 
 # ---- on-time by hour ------------------------------------------------------------
@@ -208,7 +205,9 @@ def buses_now() -> None:
     colors = route_colors()
     live["color"] = live["route_id"].map(lambda r: colors.get(r, "#444444"))
     st.map(live, latitude="lat", longitude="lon", color="color", size=50, zoom=11, height=350)
-    st.caption(f"{len(live)} buses, colored by route. Details and stop lookup on the Live page.")
+    st.caption(
+        f"{len(live)} buses, colored by route. Details and stop lookup on the Live map page."
+    )
 
 
 buses_now()

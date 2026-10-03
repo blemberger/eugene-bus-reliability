@@ -5,7 +5,6 @@ from __future__ import annotations
 import math
 import os
 import re
-import time
 from datetime import date, datetime, timedelta
 from datetime import time as dtime
 from urllib.parse import quote
@@ -575,16 +574,6 @@ def empty_message(default: str) -> str:
     return default
 
 
-def refresh_countdown(seconds: int) -> None:
-    """A small 'Live · next update in N s' line that counts down in the browser."""
-    st.iframe(
-        f"""<!-- {time.time()} --><div id='c' style='font: 14px system-ui, sans-serif; color: #666;'></div>
-        <script>var n = {seconds}; var el = document.getElementById('c');
-        function t() {{ el.textContent = 'Live · next update in ' + n + ' s'; if (n > 0) {{ n--; setTimeout(t, 1000); }} }} t();</script>""",
-        height=26,
-    )
-
-
 def feed_banner() -> None:
     """Show a site-wide notice when LTD's live feed is down or our collection has stopped."""
     try:
@@ -600,9 +589,8 @@ def require_marts() -> None:
     """Pages that need reliability numbers stop here until the analysis layer exists."""
     if not marts_ready():
         st.info(
-            "Reliability numbers appear after the analysis layer has been built at least once: "
-            "run `make dbt-build`. It derives observed arrivals from the collected positions "
-            "and needs at least a few hours of collection to show anything."
+            "Reliability numbers appear once the analysis has run on a few hours of collected "
+            "bus positions. It refreshes every 15 minutes."
         )
         st.stop()
 
@@ -1086,7 +1074,10 @@ def data_note(start: date | None = None) -> None:
                 f"({fmt_date(cov['d0'])}–{fmt_date(cov['d1'])}), {int(cov['scored']):,} stop events."
             )
         line += " " + build_status()
-    st.caption(line + " On time = no more than 1 min early or 5 min late, at timepoints.")
+    st.caption(
+        line + " On time = no more than 1 min early or 5 min late, at timepoints. "
+        "[Source code on GitHub](https://github.com/blemberger/eugene-bus-reliability)."
+    )
 
 
 def build_status() -> str:

@@ -1,4 +1,4 @@
-"""Diagnostic snapshot: `python -m ltdwatch dump` (or `make dump`, which writes dump.txt).
+"""Diagnostic snapshot: `python -m eugene_bus_reliability dump` (or `make dump`, which writes dump.txt).
 
 Collection health, feed shape, what change-only storage saves, the state of the
 analysis layer, anomalies, and recent container errors, in about 100 lines.
@@ -8,6 +8,7 @@ analysis layer, anomalies, and recent container errors, in about 100 lines.
 from __future__ import annotations
 
 import gzip
+import shutil
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -15,8 +16,8 @@ from pathlib import Path
 import psycopg
 from google.protobuf import text_format
 
-from ltdwatch import rt_parse
-from ltdwatch.config import Settings
+from eugene_bus_reliability import rt_parse
+from eugene_bus_reliability.config import Settings
 
 # Must match the dbt macro horizon_band() and app/common.py HORIZON_BANDS.
 HORIZON_BAND_SQL = (
@@ -126,7 +127,7 @@ def raw_samples(settings: Settings) -> None:
 
 
 def main(settings: Settings, raw: bool = False) -> None:
-    print("ltdwatch dump (concise)")
+    print("Eugene Bus Watch dump (concise)")
     if raw:
         raw_samples(settings)
 
@@ -163,7 +164,7 @@ def main(settings: Settings, raw: bool = False) -> None:
         )
         archive_status(settings, cur)
 
-        section("CLOCKS & LIVE FRESHNESS (what Live, Board and Overview depend on)")
+        section("CLOCKS & LIVE FRESHNESS (what Live map, Arrivals and Overview depend on)")
         cur.execute("select now()")
         db_now = cur.fetchone()[0]
         host_now = datetime.now(tz=UTC)
@@ -582,7 +583,7 @@ def main(settings: Settings, raw: bool = False) -> None:
         """,
         )
 
-        section("BUSY STOP BUTTONS (Stops, Live, Predictions): most scored arrivals, last 30 days")
+        section("BUSY STOP BUTTONS (Stops, Live map, Accuracy): most scored arrivals, last 30 days")
         show(
             cur,
             """
@@ -613,6 +614,11 @@ def main(settings: Settings, raw: bool = False) -> None:
         """,
         )
 
+    # Inside a container (`make server-dump`) there is no docker command; the server dump
+    # collects the container logs itself instead.
+    if shutil.which("docker") is None:
+        print("\n(end)")
+        return
     section("CONTAINER LOG LINES with ERROR/WARNING/Traceback (last 200 lines each)")
     for svc in ("poller", "scheduler"):
         lines = container_logs(svc)

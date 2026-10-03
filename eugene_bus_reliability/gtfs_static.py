@@ -13,7 +13,8 @@ from datetime import date, datetime
 import httpx
 import psycopg
 
-from ltdwatch.db import copy_rows
+from eugene_bus_reliability import USER_AGENT
+from eugene_bus_reliability.db import copy_rows
 
 log = logging.getLogger(__name__)
 
@@ -233,7 +234,9 @@ def feed_info(zf: zipfile.ZipFile) -> tuple[date | None, date | None, str | None
 
 
 def download(url: str) -> bytes:
-    with httpx.Client(timeout=60, follow_redirects=True) as client:
+    with httpx.Client(
+        timeout=60, follow_redirects=True, headers={"User-Agent": USER_AGENT}
+    ) as client:
         r = client.get(url)
         r.raise_for_status()
         return r.content

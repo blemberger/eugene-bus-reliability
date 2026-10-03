@@ -1,5 +1,5 @@
 # dbt reads DBT_PROFILES_DIR; `make dbt-build` points it here. Values come from .env.
-ltdwatch:
+eugene_bus_reliability:
   target: dev
   outputs:
     dev:

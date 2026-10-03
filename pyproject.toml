@@ -1,9 +1,10 @@
 [project]
-name = "ltdwatch"
-version = "0.1.0"
-description = "Warehouse and reliability analysis for Lane Transit District (Eugene, OR) built from public GTFS and GTFS-Realtime feeds."
+name = "eugene-bus-reliability"
+dynamic = ["version"]  # read from eugene_bus_reliability/__init__.py
+description = "Eugene Bus Watch: how reliable are Lane Transit District's buses, and how far can you trust the arrival sign? Built from LTD's public GTFS and GTFS-Realtime feeds."
 readme = "README.md"
-requires-python = ">=3.11"
+# 3.12 is the oldest Python the pinned numpy (constraints.txt) supports; Docker and CI use 3.14.
+requires-python = ">=3.12"
 license = "MIT"
 license-files = ["LICENSE"]
 dependencies = [
@@ -15,7 +16,7 @@ dependencies = [
 
 
 [project.urls]
-Homepage = "https://github.com/blemberger/eugene-bus-reliability"
+Homepage = "https://eugenebuswatch.com"
 Source = "https://github.com/blemberger/eugene-bus-reliability"
 
 [project.optional-dependencies]
@@ -23,19 +24,20 @@ pipeline = ["dbt-postgres>=1.8,<2"]
 dev = ["pytest>=8,<10", "ruff>=0.6", "dbt-postgres>=1.8,<2"]
 app = ["streamlit>=1.64,<2", "pandas>=2.2,<4", "plotly>=5.24,<8", "pydeck>=0.9,<1"]
 
-[project.scripts]
-ltdwatch = "ltdwatch.cli:main"
-
+# Hatchling installs the package without leaving a *.egg-info folder in the project.
 [build-system]
-requires = ["setuptools>=77"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
 
-[tool.setuptools.packages.find]
-include = ["ltdwatch*"]
+[tool.hatch.version]
+path = "eugene_bus_reliability/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["eugene_bus_reliability"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]

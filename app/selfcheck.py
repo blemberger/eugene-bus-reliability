@@ -1,6 +1,6 @@
 """Render every dashboard page headlessly and report what a visitor would see.
 
-Run by `make dump` (appended to dump.txt), or on its own: python app/selfcheck.py
+Run by `make dump` and `make fetch-dump` (appended to dump.txt), or on its own: python app/selfcheck.py
 For each page: exceptions with their traceback, every error / warning / info message,
 the size of every table, and what each chart and map contains. Uses Streamlit's own
 test runner, the same database (DATABASE_URL) and the same code as `make app`.
@@ -25,15 +25,15 @@ os.environ.setdefault("STREAMLIT_LOGGER_LEVEL", "error")
 logging.getLogger("streamlit").setLevel(logging.ERROR)
 
 PAGES = [
-    "views/home.py",
-    "views/live.py",
-    "views/board.py",
+    "views/overview.py",
+    "views/map.py",
+    "views/arrivals.py",
     "views/stops.py",
     "views/routes.py",
     "views/route.py",
-    "views/predictions.py",
+    "views/accuracy.py",
     "views/methods.py",
-    "views/diagnostics.py",
+    "views/status.py",
 ]
 
 
@@ -207,13 +207,13 @@ def main() -> None:
     ex = pick_examples()
     if ex.get("route_id"):
         run_page(
-            "views/board.py",
-            f"views/board.py with route {ex['route_id']}",
+            "views/arrivals.py",
+            f"views/arrivals.py with route {ex['route_id']}",
             {"board_route": ex["route_id"]},
         )
         run_page(
-            "views/live.py",
-            f"views/live.py with route {ex['route_id']}",
+            "views/map.py",
+            f"views/map.py with route {ex['route_id']}",
             {"live_route": ex["route_id"]},
         )
         run_page(
@@ -228,13 +228,13 @@ def main() -> None:
             {"stop_id": ex["stop_id"]},
         )
         run_page(
-            "views/predictions.py",
-            f"views/predictions.py with stop {ex['stop_id']}",
+            "views/accuracy.py",
+            f"views/accuracy.py with stop {ex['stop_id']}",
             {"pred_stop_id": ex["stop_id"]},
         )
         run_page(
-            "views/live.py",
-            f"views/live.py with stop {ex['stop_id']}",
+            "views/map.py",
+            f"views/map.py with stop {ex['stop_id']}",
             {"live_stop_id": ex["stop_id"]},
         )
     print("\n(end of self-check)")

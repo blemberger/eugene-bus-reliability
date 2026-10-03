@@ -1,4 +1,4 @@
-"""Rebuild the database from the raw archive: `python -m ltdwatch replay`.
+"""Rebuild the database from the raw archive: `python -m eugene_bus_reliability replay`.
 
 Walks data/raw/<feed>/YYYY/MM/DD/<header_ts>.pb.gz, in time order, and stores
 every message whose header timestamp is not already in rt.fetch. This is what
@@ -15,9 +15,9 @@ from datetime import UTC, datetime
 
 import psycopg
 
-from ltdwatch import rt_parse
-from ltdwatch.config import Settings
-from ltdwatch.poller import Poller
+from eugene_bus_reliability import rt_parse
+from eugene_bus_reliability.config import Settings
+from eugene_bus_reliability.poller import Poller
 
 log = logging.getLogger(__name__)
 

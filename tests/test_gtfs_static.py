@@ -1,6 +1,6 @@
 import pytest
 
-from ltdwatch.gtfs_static import gtfs_date, gtfs_time_to_seconds
+from eugene_bus_reliability.gtfs_static import gtfs_date, gtfs_time_to_seconds
 
 
 @pytest.mark.parametrize(
@@ -35,7 +35,7 @@ def test_rows_are_python_typed(gtfs_zip_bytes):
     import io
     import zipfile
 
-    from ltdwatch.gtfs_static import rows_for
+    from eugene_bus_reliability.gtfs_static import rows_for
 
     zf = zipfile.ZipFile(io.BytesIO(gtfs_zip_bytes))
     stop_times = list(rows_for(zf, "stop_times.txt", 1))

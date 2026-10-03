@@ -1,5 +1,6 @@
-# Run `make` on its own for the list of commands. `make setup` first; host commands
-# (load-static, poll-once, report, app, test, dbt-*) need the venv: source .venv/bin/activate
+# Run `make` on its own for the list of commands. `make setup` first; laptop commands
+# (load-static, poll-once, report, app, test, lint, format, dbt-*) need the venv:
+# source .venv/bin/activate. Commands marked "from the laptop" reach the server over ssh.
 -include .env
 export
 
@@ -10,10 +11,10 @@ HOST_PGPORT := $(or $(POSTGRES_PORT),5432)
 TUNNEL_PORT := $(or $(TUNNEL_PORT),55439)
 VPS_DIR := $(or $(VPS_DIR),/opt/eugene-bus-reliability)
 
-.PHONY: help setup lock up down reset logs load-static poll-once poll scheduler run migrate check-db replay rebuild report dump server-dump deploy fetch-dump app tunnel test test-all lint format dbt-deps dbt-build dbt-docs
+.PHONY: help setup lock up down reset logs load-static poll-once poll scheduler run migrate check-db replay rebuild fingerprint report dump server-dump server-dbt-build deploy fetch-dump app tunnel test test-all lint format dbt-deps dbt-build dbt-docs
 
 help:             ## list these commands
-	@grep -hE '^[a-z-]+:.*## ' $(firstword $(MAKEFILE_LIST)) | awk 'BEGIN {FS = ":.*## "} {printf "  %-12s %s\n", $$1, $$2}'
+	@grep -hE '^[a-z-]+:.*## ' $(firstword $(MAKEFILE_LIST)) | awk 'BEGIN {FS = ":.*## "} {printf "  %-17s %s\n", $$1, $$2}'
 
 setup:            ## create .env if missing, and a venv with the dev and app dependencies
 	@test -f .env || cp .env.example .env
@@ -37,11 +38,11 @@ logs:             ## follow the poller and scheduler logs (Ctrl+C stops watching
 	docker compose logs -f --tail=100 poller scheduler
 
 load-static:      ## download the current LTD schedule and load it if new
-	python -m ltdwatch load-static
+	python -m eugene_bus_reliability load-static
 
 poll-once:        ## proof of principle: 10 cycles in the foreground, then a report
-	python -m ltdwatch poll --cycles 10
-	python -m ltdwatch report
+	python -m eugene_bus_reliability poll --cycles 10
+	python -m eugene_bus_reliability report
 
 poll:             ## run the poller continuously in the background (docker)
 	docker compose up -d --build poller
@@ -69,24 +70,27 @@ migrate:          ## apply sql/migrations/*.sql (if any) to both databases, then
 	@echo "ltd_reader password set from READER_PASSWORD"
 
 replay:           ## store archived feed messages that are missing from the database (idempotent)
-	docker compose run --rm --build poller python -m ltdwatch replay
+	docker compose run --rm --build poller python -m eugene_bus_reliability replay
 
 rebuild:          ## EMPTY the realtime tables and rebuild them from the raw archive (poller paused meanwhile)
 	docker compose stop poller
-	docker compose run --rm --build poller python -m ltdwatch replay --rebuild; status=$$?; docker compose start poller; exit $$status
+	docker compose run --rm --build poller python -m eugene_bus_reliability replay --rebuild; status=$$?; docker compose start poller; exit $$status
+
+fingerprint:      ## row counts and a hash of the realtime tables; run before and after `make rebuild`, the two must match
+	docker compose exec -T db psql -U $(POSTGRES_USER) -d $(POSTGRES_DB) -f - < sql/checks/rt_fingerprint.sql
 
 report:           ## what has been collected so far
-	python -m ltdwatch report
+	python -m eugene_bus_reliability report
 
 dump:             ## everything needed to diagnose a problem, in dump.txt: pipeline, clocks, every app page; RAW=1 adds raw feed samples
 	@echo "collecting pipeline state, then rendering every app page (about a minute)..."
-	@python -m ltdwatch dump $(if $(RAW),--raw) > dump.txt 2>&1 || echo "!! dump exited with an error (details above)" >> dump.txt
+	@python -m eugene_bus_reliability dump $(if $(RAW),--raw) > dump.txt 2>&1 || echo "!! dump exited with an error (details above)" >> dump.txt
 	@python app/selfcheck.py >> dump.txt 2>&1 || echo "!! app self-check exited with an error (details above)" >> dump.txt
 	@echo "wrote $(CURDIR)/dump.txt ($$(wc -l < dump.txt) lines)"
 
 server-dump:      ## on the server (no venv there): the same dump, run inside the containers, plus memory, disk and log errors, into dump.txt
 	@echo "collecting pipeline state, then rendering every app page (a minute or two)..."
-	@{ docker compose exec -T poller python -m ltdwatch dump $(if $(RAW),--raw) || echo "!! dump exited with an error (details above)"; \
+	@{ docker compose exec -T poller python -m eugene_bus_reliability dump $(if $(RAW),--raw) || echo "!! dump exited with an error (details above)"; \
 	  echo; echo "== SERVER: load, memory, disk, containers"; uptime; free -h; df -h /; du -sh data/raw; \
 	  docker compose --profile web ps; docker stats --no-stream; \
 	  echo; echo "== LOG LINES with ERROR/WARNING/Traceback/denied (last 300 lines of each service)"; \
@@ -96,11 +100,14 @@ server-dump:      ## on the server (no venv there): the same dump, run inside th
 	} > dump.txt 2>&1
 	@echo "wrote $(CURDIR)/dump.txt ($$(wc -l < dump.txt) lines)"
 
-deploy:           ## from the laptop: bring the server up to date with GitHub and restart what changed (needs VPS_HOST in .env)
+server-dbt-build: ## on the server: rebuild the analysis layer now instead of waiting for the next 15-minute build
+	docker compose exec -T scheduler python -m eugene_bus_reliability schedule --once
+
+deploy:           ## from the laptop: bring the server up to date with GitHub, apply migrations, restart what changed (needs VPS_HOST in .env)
 	@test -n "$(VPS_HOST)" || { echo "add VPS_HOST=root@<server ip> to .env first"; exit 1; }
 	@test -z "$$(git status --porcelain)" || { echo "you have unsaved changes here: commit and push them first"; exit 1; }
 	@git fetch -q && test "$$(git rev-parse HEAD)" = "$$(git rev-parse @{u})" || { echo "this laptop and GitHub differ: git push (or git pull) first"; exit 1; }
-	ssh $(VPS_HOST) 'cd $(VPS_DIR) && git pull --ff-only && docker compose --profile web up -d --build db poller scheduler app caddy && docker compose --profile web exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile && docker compose --profile web ps'
+	ssh $(VPS_HOST) 'cd $(VPS_DIR) && git pull --ff-only && docker compose up -d --wait db && make migrate && docker compose --profile web up -d --build db poller scheduler app caddy && docker compose --profile web exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile && docker compose --profile web ps'
 
 fetch-dump:       ## from the laptop: make the server's dump and copy it here as dump.txt (needs VPS_HOST in .env)
 	@test -n "$(VPS_HOST)" || { echo "add VPS_HOST=root@<server ip> to .env first"; exit 1; }
@@ -111,7 +118,8 @@ fetch-dump:       ## from the laptop: make the server's dump and copy it here as
 app:              ## local dashboard at http://localhost:8501 (Ctrl+C to stop)
 	streamlit run app/streamlit_app.py
 
-tunnel:           ## forward the server's database to localhost:55439 (leave running; see docs/deploy.md)
+tunnel:           ## from the laptop: forward the server's database to localhost:55439 (leave running; see docs/deploy.md)
+	@test -n "$(VPS_HOST)" || { echo "add VPS_HOST=root@<server ip> to .env first"; exit 1; }
 	ssh -N -L $(TUNNEL_PORT):127.0.0.1:$(HOST_PGPORT) $(VPS_HOST)
 
 test:             ## unit tests only (no database)
@@ -129,7 +137,7 @@ format:           ## apply the safe lint fixes and the standard formatting
 dbt-deps:         ## install dbt's package (dbt_utils) into dbt/dbt_packages
 	$(DBT) deps --project-dir dbt
 
-dbt-build:        ## build the analysis layer (observed arrivals, reliability marts) and run its tests
+dbt-build:        ## on the laptop: build the analysis layer (observed arrivals, reliability marts) and run its tests
 	PGHOST=localhost PGPORT=$(HOST_PGPORT) $(DBT) build --project-dir dbt
 
 dbt-docs:         ## generate and serve dbt's documentation site with the lineage graph

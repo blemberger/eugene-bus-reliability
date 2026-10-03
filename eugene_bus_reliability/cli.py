@@ -1,4 +1,4 @@
-"""Command line: python -m ltdwatch <command>."""
+"""Command line: python -m eugene_bus_reliability <command>."""
 
 from __future__ import annotations
 
@@ -6,11 +6,11 @@ import argparse
 import logging
 import sys
 
-from ltdwatch.config import Settings
+from eugene_bus_reliability.config import Settings
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(prog="ltdwatch")
+    parser = argparse.ArgumentParser(prog="python -m eugene_bus_reliability")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("load-static", help="download the static GTFS zip and load it if new")
@@ -52,7 +52,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.cmd == "load-static":
         import psycopg
 
-        from ltdwatch import gtfs_static
+        from eugene_bus_reliability import gtfs_static
 
         with psycopg.connect(settings.database_url) as conn:
             if args.file:
@@ -62,24 +62,24 @@ def main(argv: list[str] | None = None) -> None:
                 gtfs_static.load_from_url(conn, args.url or settings.gtfs_static_url)
 
     elif args.cmd == "poll":
-        from ltdwatch.poller import Poller
+        from eugene_bus_reliability.poller import Poller
 
         Poller(settings).run(max_cycles=args.cycles)
 
     elif args.cmd == "report":
-        from ltdwatch import report
+        from eugene_bus_reliability import report
 
         report.run(settings.database_url)
 
     elif args.cmd == "dump":
-        from ltdwatch import dump
+        from eugene_bus_reliability import dump
 
         dump.main(settings, raw=args.raw)
 
     elif args.cmd == "replay":
         from datetime import UTC, datetime
 
-        from ltdwatch import replay
+        from eugene_bus_reliability import replay
 
         since = None
         if args.since:
@@ -89,7 +89,7 @@ def main(argv: list[str] | None = None) -> None:
         replay.main(settings, since=since, rebuild=args.rebuild)
 
     elif args.cmd == "schedule":
-        from ltdwatch import scheduler
+        from eugene_bus_reliability import scheduler
 
         if args.once:
             scheduler.run_dbt_build(settings)

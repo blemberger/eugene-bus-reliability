@@ -2,8 +2,8 @@ from datetime import UTC, date, datetime
 
 from conftest import SERVICE_DATE, make_trip_updates, make_vehicle_positions
 
-from ltdwatch import rt_parse
-from ltdwatch.poller import service_date_for
+from eugene_bus_reliability import rt_parse
+from eugene_bus_reliability.poller import service_date_for
 
 
 def test_trip_updates_parse():

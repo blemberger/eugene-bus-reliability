@@ -71,7 +71,7 @@ cancellation flag, realtime trip ids that don't match the schedule. See the Cove
 # ---- coverage & quality ----------------------------------------------------------------------
 with tab_cov:
     if not marts_ready():
-        st.info("Coverage tables appear after `make dbt-build`.")
+        st.info("Coverage tables appear once the analysis has run; it refreshes every 15 minutes.")
     else:
         cov = q("select * from marts.mart_daily_coverage order by service_date")
         if cov.empty:
@@ -267,7 +267,7 @@ with tab_dl:
             select route_short_name as route, sum(n_events) as timepoint_arrivals, sum(n_on_time) as on_time, sum(n_early) as early, sum(n_late) as late
             from marts.mart_route_daily group by 1 order by 1
         """)
-        download_button(rc, "ltd_route_report_cards.csv", "Route report cards (all data)")
+        download_button(rc, "eugenebuswatch_route_totals_all_data.csv", "Route totals (all data)")
         if st.button("Prepare the scored stop events (latest 200,000)"):
             st.session_state["prepare_stop_events"] = True
         if st.session_state.get("prepare_stop_events"):
@@ -277,11 +277,13 @@ with tab_dl:
                 from marts.fct_stop_events where status is not null order by service_date desc, trip_id, stop_sequence limit 200000
             """)
             download_button(
-                se, "ltd_stop_events_latest.csv", f"Scored stop events (latest {len(se):,} rows)"
+                se,
+                "eugenebuswatch_stop_events_latest.csv",
+                f"Scored stop events (latest {len(se):,} rows)",
             )
     else:
-        st.info("Downloads appear after `make dbt-build`.")
+        st.info("Downloads appear once the analysis has run; it refreshes every 15 minutes.")
     stops = q(
         f"select stop_id, stop_code, stop_name, stop_lat, stop_lon from gtfs.stops where feed_version_id = {current_fv()} order by stop_name"
     )
-    download_button(stops, "ltd_stops.csv", "Stops (current schedule)")
+    download_button(stops, "eugenebuswatch_stops.csv", "Stops (current schedule)")

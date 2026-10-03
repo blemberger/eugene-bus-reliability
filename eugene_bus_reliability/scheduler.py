@@ -21,8 +21,8 @@ from pathlib import Path
 
 import psycopg
 
-from ltdwatch import gtfs_static
-from ltdwatch.config import Settings
+from eugene_bus_reliability import gtfs_static
+from eugene_bus_reliability.config import Settings
 
 log = logging.getLogger(__name__)
 

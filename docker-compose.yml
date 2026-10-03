@@ -58,7 +58,7 @@ services:
       RAW_ARCHIVE_DIR: /data/raw
     volumes:
       - ./data/raw:/data/raw
-    command: ["python", "-m", "ltdwatch", "poll"]
+    command: ["python", "-m", "eugene_bus_reliability", "poll"]
 
   scheduler:
     <<: *logging
@@ -73,7 +73,7 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       PGHOST: db
       PGPORT: "5432"
-    command: ["python", "-m", "ltdwatch", "schedule"]
+    command: ["python", "-m", "eugene_bus_reliability", "schedule"]
 
   app:
     <<: *logging

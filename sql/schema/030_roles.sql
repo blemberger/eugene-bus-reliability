@@ -1,6 +1,5 @@
 -- Read-only role for the dashboard. On a new database this runs once, after the
--- tables exist; sql/migrations/002_reader_role.sql applies the same thing to
--- databases created before this file was correct. Keep the two in step.
+-- tables exist.
 -- The password is not set here (schema files run before .env is read);
 -- `make migrate` sets it from READER_PASSWORD.
 -- The dbt schemas (staging, intermediate, marts, analytics) are created by dbt, so

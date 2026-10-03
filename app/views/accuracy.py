@@ -1,4 +1,4 @@
-"""Predictions: how much should you trust the countdown sign?"""
+"""Accuracy: how much should you trust the countdown sign?"""
 
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ cal = q(
 )
 if cal.empty or cal["n_predictions"].sum() == 0:
     st.info(
-        "No scored predictions yet. They appear after `make dbt-build` once observed arrivals exist."
+        "No scored predictions yet. They appear once the analysis has measured some arrivals; it refreshes every 15 minutes."
     )
     st.stop()
 
@@ -122,7 +122,7 @@ fig.update_layout(
 st.plotly_chart(fit_phone(fig), width="stretch")
 st.caption(
     "Solid lines: how often the bus came within 1, 2 or 5 minutes of what the sign said, by how far ahead "
-    "the sign said it. Dashed lines, same colours: for the same buses, how often the printed timetable was "
+    "the sign said it. Dashed lines, same colors: for the same buses, how often the printed timetable was "
     "that close. Where a solid line is above its dashed twin, the live prediction is worth checking; where "
     "they meet, the timetable would have done as well. Click a legend entry to hide or show a line. "
     "Horizons with fewer than 30 scored predictions are left out."

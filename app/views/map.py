@@ -1,4 +1,4 @@
-"""Live: every bus with heading and next stops; next arrivals at any stop; alerts.
+"""Live map: every bus with heading and next stops; next arrivals at any stop; alerts.
 
 The map is pydeck on Streamlit's built-in basemap; it refreshes itself every 15 s.
 """

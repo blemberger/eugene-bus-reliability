@@ -11,9 +11,9 @@ import psycopg
 import pytest
 from conftest import make_alerts, make_trip_updates, make_vehicle_positions
 
-from ltdwatch import gtfs_static, replay, rt_parse
-from ltdwatch.config import Settings
-from ltdwatch.poller import Poller
+from eugene_bus_reliability import gtfs_static, replay, rt_parse
+from eugene_bus_reliability.config import Settings
+from eugene_bus_reliability.poller import Poller
 
 pytestmark = pytest.mark.integration
 

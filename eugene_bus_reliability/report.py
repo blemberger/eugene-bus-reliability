@@ -1,4 +1,4 @@
-"""Collection report: what has the poller collected? `python -m ltdwatch report`.
+"""Collection report: what has the poller collected? `python -m eugene_bus_reliability report`.
 
 Totals per feed are all-time; everything that scans the large realtime tables is
 limited to recent days so the report stays fast as history grows."""

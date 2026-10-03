@@ -20,15 +20,15 @@ import httpx
 import psycopg
 from psycopg.types.json import Jsonb
 
-from ltdwatch import __version__, rt_parse
-from ltdwatch.config import Settings
-from ltdwatch.db import copy_rows
+from eugene_bus_reliability import USER_AGENT, rt_parse
+from eugene_bus_reliability.config import Settings
+from eugene_bus_reliability.db import copy_rows
 
 log = logging.getLogger(__name__)
 
 LOCAL_TZ = ZoneInfo("America/Los_Angeles")
 ALERT_EVERY = 10  # cycles
-USER_AGENT = f"ltdwatch/{__version__} (+https://github.com/blemberger/ltd-transit-reliability)"
+
 
 PREDICTION_COLUMNS = (
     "trip_id",

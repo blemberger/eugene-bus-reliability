@@ -1,4 +1,4 @@
-"""Diagnostics: is data flowing, how much, and has the analysis layer been rebuilt?"""
+"""Status: is data flowing, how much, and has the analysis layer been rebuilt?"""
 
 from __future__ import annotations
 
@@ -26,16 +26,15 @@ from common import (
     table,
 )
 
-from ltdwatch.dump import newest_archive_file
+from eugene_bus_reliability.dump import newest_archive_file
 
 require_db()
 FV = str(current_fv())  # schedule version in force today
-st.title("Diagnostics")
+st.title("Status")
 st.caption(
-    "Everything here reads the database directly. The Refresh button clears the 60-second cache."
+    "Is data flowing from LTD, and is the analysis up to date? Everything here reads the "
+    "database directly and is at most a minute old."
 )
-if st.button("Refresh"):
-    st.cache_data.clear()
 
 # ---- 0. What just came in ------------------------------------------------------------------------
 st.subheader("0 · What came in during the last few minutes")
@@ -224,7 +223,7 @@ if marts_ready():
     )
     if derived.empty:
         st.warning(
-            "The last build derived no arrivals. Section 4 below and `make dump` will show why."
+            "The last build derived no arrivals. Section 4 below shows whether positions are arriving."
         )
     else:
         table(
@@ -260,9 +259,7 @@ fresh = q("""
     from rt.fetch group by 1 order by 1
 """)
 if fresh.empty:
-    st.error(
-        "No fetches at all. The poller has never written. `docker compose ps` and `make logs`."
-    )
+    st.error("No fetches at all: the collector has never written to the database.")
 else:
     cols = st.columns(len(fresh))
     for col, (_, r) in zip(cols, fresh.iterrows(), strict=False):
@@ -416,7 +413,7 @@ st.caption(
 st.subheader("4 · Analysis layer (dbt)")
 if not marts_ready():
     st.warning(
-        "Never built. Run `make dbt-build` once, then `make scheduler` to keep it rebuilding every 15 minutes."
+        "The analysis has never been built. It runs every 15 minutes once the scheduler is running."
     )
 else:
     log = (
@@ -431,9 +428,7 @@ else:
         else pd.DataFrame()
     )
     if log.empty:
-        st.caption(
-            "No build log yet (it starts with the first build after the scheduler files are in place)."
-        )
+        st.caption("No build log yet: it starts with the scheduler's first build.")
     else:
         last = log.iloc[0]
         st.metric(
@@ -464,7 +459,7 @@ else:
             },
         )
     st.caption(
-        "The dashboard shows what the last build computed. New positions don't appear in reliability numbers until the next build (every 15 minutes with `make scheduler`)."
+        "The dashboard shows what the last build computed. New positions don't appear in reliability numbers until the next build (every 15 minutes)."
     )
 
     layer = q("""
@@ -501,5 +496,5 @@ else:
     )
     if int(obs_today["n"]) == 0:
         st.error(
-            "No observed arrivals were derived since yesterday. If positions are arriving (section 2), check `make dump` and the scheduler's dbt log."
+            "No observed arrivals were derived since yesterday. If positions are arriving (section 2), the analysis build is not deriving arrivals from them."
         )

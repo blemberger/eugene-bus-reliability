@@ -1,4 +1,4 @@
-"""Board: what's about to happen and what just happened on a route — the processed
+"""Arrivals: what's about to happen and what just happened on a route — the processed
 data as it comes in. One block per bus, with what each stop usually does at this hour."""
 
 from __future__ import annotations
@@ -181,7 +181,7 @@ def flow_chart(
                 },
                 "opacity": [0.45 if k == "left" else 1.0 for k in df["kind"]],
                 "colorbar": {"title": {"text": "min late"}, "thickness": 12},
-                "showscale": not mobile,  # on a phone the colour scale takes too much width
+                "showscale": not mobile,  # on a phone the color scale takes too much width
             },
             customdata=list(
                 zip(df["toward"], df["stop"], df["when"], df["late_txt"], strict=False)
@@ -264,7 +264,7 @@ def flow_chart(
         "On the line (dark outline): due now or just past due, but the feed hasn't confirmed yet that the bus "
         "left; a departure can only be confirmed by a later message, so these move left once one arrives. "
         "Inside each minute, dotted lines split it into 15-second columns (30 seconds on a phone): a badge "
-        "sits in the column of its time, and each column is stacked in time order, earliest at the top. Colour = minutes late: how late it left, or how late "
+        "sits in the column of its time, and each column is stacked in time order, earliest at the top. Color = minutes late: how late it left, or how late "
         "LTD's prediction puts it at that stop. Hover a badge for the stop and exact times."
     )
 
@@ -348,7 +348,7 @@ def route_chart(upcoming: pd.DataFrame, left: pd.DataFrame, now: pd.Timestamp) -
     st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
     st.caption(
         "Each point is one bus at one stop: stops in route order down the side, time across. Solid points are "
-        "LTD's predicted times still to come; faded points are stops just left. Colour = minutes late "
+        "LTD's predicted times still to come; faded points are stops just left. Color = minutes late "
         "(projected for stops still to come). Hover a point for details."
     )
 

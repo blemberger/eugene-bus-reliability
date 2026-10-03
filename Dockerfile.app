@@ -2,7 +2,7 @@
 FROM python:3.14-slim
 WORKDIR /app
 COPY pyproject.toml README.md constraints.txt ./
-COPY ltdwatch ./ltdwatch
+COPY eugene_bus_reliability ./eugene_bus_reliability
 RUN pip install --no-cache-dir -c constraints.txt ".[app]"
 COPY app ./app
 COPY .streamlit ./.streamlit

@@ -79,7 +79,9 @@ st.caption(
     f"Timepoint arrivals only, {day_label(wt)}. Sorted best to worst; click a column header to "
     "re-sort. **Click a route's row to open its full report card.**"
 )
-download_button(card, "ltd_route_report_cards.csv")
+download_button(
+    card, f"eugenebuswatch_route_report_cards_{day_label(wt).replace(' ', '_')}_since_{start}.csv"
+)
 
 st.divider()
 data_note(start)

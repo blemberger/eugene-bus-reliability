@@ -1,151 +1,104 @@
-# Deploying: private GitHub repo + a small server
+# Running it on a server
 
-The pipeline runs unattended on a rented Linux server with the same `docker compose`
-file used locally. GitHub (private) is how the code gets there and is backed up.
-The public dashboard is a later step and needs nothing here.
+How eugenebuswatch.com runs: one small Linux server running the same `docker compose`
+file as a laptop, with Caddy in front for HTTPS. The code reaches the server from GitHub,
+and every later update is one command from the laptop: `make deploy`.
 
-## 1. GitHub — private repository (30 minutes)
+Two terminals appear below. **Laptop** means the project folder on your own computer, with
+the venv active. **Server** means a shell on the server, opened with `ssh root@<server ip>`.
 
-On your laptop, in the project folder, in Ubuntu:
+## 1. The server
 
-```bash
-git init -b main
-git add .
-git status          # .env, data/, .venv/, dump.txt must NOT appear — .gitignore handles them
-git commit -m "LTD transit reliability: collector, analysis layer, dashboard"
-```
+**Provider.** A DigitalOcean droplet, Ubuntu 24.04, 2 GB RAM (the dbt build needs the
+headroom; 1 GB is too small), any region. Add your laptop's SSH public key
+(`~/.ssh/id_ed25519.pub`; `ssh-keygen -t ed25519` makes one) when creating it, so the
+server accepts keys only and never passwords.
 
-On github.com: New repository → name `ltd-transit-reliability` → **Private** → no README,
-no .gitignore, no license (you have them) → Create. Then, using the SSH URL it shows:
+**Software and firewall** (server):
 
 ```bash
-ssh-keygen -t ed25519 -C "laptop"          # once; press Enter for defaults
-cat ~/.ssh/id_ed25519.pub                  # add this at github.com → Settings → SSH and GPG keys
-git remote add origin git@github.com:blemberger/ltd-transit-reliability.git
-git push -u origin main
+apt update && apt install -y git make unattended-upgrades
+curl -fsSL https://get.docker.com | sh
+ufw allow OpenSSH && ufw allow 80 && ufw allow 443 && ufw --force enable
 ```
 
-From now on, after each change: `git add -A && git commit -m "what changed" && git push`.
-This history stays private. When it's time to go public, `make strip-learn`, copy the tree
-to a fresh folder, `git init` there, and push that as a new repository; the private history stays private.
-
-## 2. The server (one evening)
-
-**Provider.** Hetzner Cloud, CX22 (2 vCPU, 4 GB RAM, 40 GB disk, ~€4/month), Ubuntu 24.04,
-location Hillsboro (Oregon). 4 GB matters: the dbt build needs headroom; 1 GB servers crash.
-Add your laptop's SSH public key (`~/.ssh/id_ed25519.pub`) when creating the server so
-there is no password login at all.
-
-**First login and hardening (10 minutes).** Replace `1.2.3.4` with the server's IP.
+**Code and settings** (server):
 
 ```bash
-ssh root@1.2.3.4
-adduser ben && usermod -aG sudo ben
-rsync --archive --chown=ben:ben ~/.ssh /home/ben     # your key works for ben too
-ufw allow OpenSSH && ufw --force enable               # firewall: only SSH is open
-apt update && apt install -y unattended-upgrades git rsync make
-exit
-ssh ben@1.2.3.4
+git clone https://github.com/blemberger/eugene-bus-reliability.git /opt/eugene-bus-reliability
+cd /opt/eugene-bus-reliability
+cp .env.example .env
+nano .env    # new passwords (openssl rand -hex 24), the same POSTGRES_PASSWORD inside both URLs
 ```
 
-**Docker.**
+## 2. Start collecting (server)
 
 ```bash
-curl -fsSL https://get.docker.com | sudo sh
-sudo usermod -aG docker ben
-exit; ssh ben@1.2.3.4          # log back in so the docker group applies
-docker run --rm hello-world     # prints a greeting; then it works
+make up && make migrate && make run
+docker compose ps        # db, db_test, poller, scheduler: all Up
+make logs                # watch a few poll cycles, then Ctrl+C
 ```
 
-**Code.** Give the server read-only access to the private repo with a *deploy key*:
+`make migrate` sets the read-only site user's password from `READER_PASSWORD`. The
+scheduler loads LTD's schedule at startup and then builds the analysis every 15 minutes.
+
+## 3. The site on its own domain
+
+1. **DNS.** At the domain's DNS host, add two A records pointing at the server's IP: one
+   for the bare name (`eugenebuswatch.com`) and one for `www`.
+2. **Site address** (server): in `.env`, the names separated by a space, no quotes:
+
+   ```
+   SITE_ADDRESS=eugenebuswatch.com www.eugenebuswatch.com
+   ```
+
+3. **Start the site** (server): `docker compose --profile web up -d --build`
+
+Caddy gets and renews the HTTPS certificates itself once DNS points at the server, and
+sends the `www` name to the bare one. Before DNS exists, `SITE_ADDRESS=:80` serves plain
+HTTP on the server's IP. The site connects as the read-only database user, so nothing on
+it can change data.
+
+## 4. Updating the server after a code change
+
+Once, on the laptop, add the server to `.env`: `VPS_HOST=root@<server ip>`. Then, after
+committing and pushing a change (laptop):
 
 ```bash
-ssh-keygen -t ed25519 -C "ltd-server" -N "" -f ~/.ssh/id_ed25519
-cat ~/.ssh/id_ed25519.pub       # github.com → the repo → Settings → Deploy keys → Add (read-only)
-git clone git@github.com:blemberger/ltd-transit-reliability.git
-cd ltd-transit-reliability
-cp .env.example .env && nano .env          # new, strong POSTGRES_PASSWORD; same in all three URLs
+make deploy
 ```
 
-**Run.**
+It checks that the laptop matches GitHub, then on the server: pulls the code, applies any
+new migrations, rebuilds and restarts what changed, and reloads Caddy. The database and
+the raw archive are untouched. Model changes take effect at the next 15-minute build, or
+immediately with `make server-dbt-build` run on the server.
 
-```bash
-make up && sleep 20 && make migrate && make load-static && make run
-docker compose ps               # four containers Up
-make logs                       # watch a few cycles; Ctrl+C
-```
+## 5. Checking on it
 
-`make migrate` creates the read-only dashboard user with the password from `.env`; the
-scheduler's dbt build grants it access and fails if it doesn't exist, so migrate first.
-
-The server is now collecting. Nothing on it is reachable from the internet except SSH:
-`docker-compose.yml` binds Postgres to 127.0.0.1 only, and the firewall allows only port 22.
-
-## 3. Moving the history you already collected
-
-The raw archive is the source of truth; copy it up and rebuild the tables from it.
-On your **laptop**, with `VPS_HOST=ben@1.2.3.4` in `.env`:
-
-```bash
-make push-archive               # rsync of data/raw — a few hundred MB
-```
-
-On the **server**:
-
-```bash
-make rebuild                    # replays the archive; the poller keeps running meanwhile
-make dbt-build                  # first analysis build; then the scheduler does it hourly
-```
-
-Then stop collecting on the laptop so there is one source of truth: `make down` there.
-Keep the laptop's `data/raw` as a second copy of the archive.
-
-## 4. Looking at the server's data from your laptop
-
-Postgres on the server is not exposed, and shouldn't be. An SSH tunnel makes it look local:
-
-```bash
-make tunnel        # terminal 1: stays open; forwards server:5432 to localhost:5432
-make app           # terminal 2: the dashboard, reading the server's database
-```
-
-(Your laptop's own Postgres must be down first — `make down` — or the ports collide.)
-
-## 5. Updating the server after code changes
-
-On the laptop: commit and push. On the server:
-
-```bash
-cd ~/ltd-transit-reliability && git pull && make run
-```
-
-`make run` rebuilds the image and restarts poller and scheduler; the database is untouched.
-If a change added a migration: `make migrate` before `make run`. If it changed dbt models:
-they take effect at the next hourly build, or `make dbt-build` now.
+- **Laptop:** `make fetch-dump` builds a full diagnostic snapshot on the server (collection
+  health, outages, the analysis, every page rendered, memory, disk, log errors) and
+  copies it to `dump.txt`.
+- **Site:** the Status page shows what came in during the last few minutes and when the
+  analysis last ran.
 
 ## 6. Backups
 
-The archive is the backup of everything realtime; the schedule reloads from LTD. Once a
-week, from the laptop: `rsync -avz ben@1.2.3.4:~/ltd-transit-reliability/data/raw/ data/raw/`
-pulls new archive files down. Object storage (S3) replaces this when the archive outgrows
-the laptop, which at ~300 MB/month is a long way off.
+- **Raw archive.** It can rebuild every realtime table (`make rebuild`). From the laptop,
+  now and then: `rsync -avz root@<server ip>:/opt/eugene-bus-reliability/data/raw/ data/raw/`
+- **Whole server.** DigitalOcean's weekly backups (droplet → Backups) cover the database too.
 
-## 7. The public dashboard, on the same server (when ready)
+## 7. Looking at the server's database from the laptop
 
-The dashboard runs identically on the server: same code, same pages, live map included.
-It only needs a hostname for HTTPS. Point a subdomain (e.g. `transit.benlemberger.com`)
-at the server's IP with an A record, then on the server:
+The database isn't reachable from the internet. An SSH tunnel makes it appear on the
+laptop at port 55439 (laptop, leave it running):
 
 ```bash
-nano .env                       # SITE_ADDRESS=transit.benlemberger.com
-sudo ufw allow 80 && sudo ufw allow 443
-docker compose --profile web up -d --build
+make tunnel
 ```
 
-Caddy obtains and renews the certificate itself. To test before DNS exists, leave
-`SITE_ADDRESS=:80`, open port 80, and visit `http://<server-ip>`. To take it down:
-`docker compose --profile web down` (the collector keeps running).
+Then, in a second laptop terminal, run the site against it, using the server's
+`READER_PASSWORD`:
 
-The dashboard connects as the read-only database user, so nothing typed into its SQL
-box can change data. Until the repository is public you may want the site password-
-protected: add `basicauth` to the Caddyfile (`caddy hash-password` makes the hash).
+```bash
+make app DATABASE_URL=postgresql://ltd_reader:<server READER_PASSWORD>@localhost:55439/ltd
+```

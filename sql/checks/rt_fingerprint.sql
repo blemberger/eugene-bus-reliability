@@ -4,7 +4,7 @@
 -- Excluded: fetch ids and fetched_at (a replay numbers fetches differently and uses the
 -- feed's clock for fetched_at), and rt.fetch_unchanged (counts of discarded polls,
 -- which are not archived).
--- Run: docker compose exec -T db psql -U ltd -d ltd -f - < sql/checks/rt_fingerprint.sql
+-- Run: make fingerprint
 select 'fetches' as tbl, count(*) as n,
        md5(string_agg(concat_ws('|', feed, header_timestamp, entity_count, byte_size,
                                 encode(sha256, 'hex'), archive_path),
