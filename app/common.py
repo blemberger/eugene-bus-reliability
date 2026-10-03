@@ -547,6 +547,16 @@ def is_mobile() -> bool:
     return "Mobi" in ua or "Android" in ua
 
 
+def fit_phone(fig):
+    """On a phone, move a chart's legend from beside the plot to above it, so the plot keeps the
+    screen's full width."""
+    if is_mobile():
+        fig.update_layout(
+            legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0, "xanchor": "left"}
+        )
+    return fig
+
+
 def fmt_ago_seconds(s: float) -> str:
     if s < 90:
         return f"{s:.0f} s ago"

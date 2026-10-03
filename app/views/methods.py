@@ -14,6 +14,7 @@ from common import (
     collection_start,
     current_fv,
     download_button,
+    fit_phone,
     fmt_date,
     fmt_pct,
     marts_ready,
@@ -95,7 +96,7 @@ with tab_cov:
                 yaxis_title="scheduled stop events with an observed arrival",
                 xaxis_title="",
             )
-            st.plotly_chart(fig, width="stretch")
+            st.plotly_chart(fit_phone(fig), width="stretch")
             table(
                 pd.DataFrame(
                     {

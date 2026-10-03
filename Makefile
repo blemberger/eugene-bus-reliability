@@ -100,7 +100,7 @@ deploy:           ## from the laptop: bring the server up to date with GitHub an
 	@test -n "$(VPS_HOST)" || { echo "add VPS_HOST=root@<server ip> to .env first"; exit 1; }
 	@test -z "$$(git status --porcelain)" || { echo "you have unsaved changes here: commit and push them first"; exit 1; }
 	@git fetch -q && test "$$(git rev-parse HEAD)" = "$$(git rev-parse @{u})" || { echo "this laptop and GitHub differ: git push (or git pull) first"; exit 1; }
-	ssh $(VPS_HOST) 'cd $(VPS_DIR) && git pull --ff-only && docker compose --profile web up -d --build db poller scheduler app caddy && docker compose --profile web ps'
+	ssh $(VPS_HOST) 'cd $(VPS_DIR) && git pull --ff-only && docker compose --profile web up -d --build db poller scheduler app caddy && docker compose --profile web exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile && docker compose --profile web ps'
 
 fetch-dump:       ## from the laptop: make the server's dump and copy it here as dump.txt (needs VPS_HOST in .env)
 	@test -n "$(VPS_HOST)" || { echo "add VPS_HOST=root@<server ip> to .env first"; exit 1; }

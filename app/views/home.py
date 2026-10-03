@@ -16,6 +16,7 @@ from common import (
     col_pct,
     collection_start,
     empty_message,
+    fit_phone,
     fmt_ago,
     fmt_date,
     fmt_delay,
@@ -146,7 +147,7 @@ if marts_ready():
             xaxis_title="",
             legend_title="",
         )
-        st.plotly_chart(fig, width="stretch")
+        st.plotly_chart(fit_phone(fig), width="stretch")
         st.caption(
             "Share of scheduled timepoint arrivals that were early, on time, or late, by hour of day, last 7 days."
         )

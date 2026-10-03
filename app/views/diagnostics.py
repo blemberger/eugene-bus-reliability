@@ -14,6 +14,7 @@ from common import (
     col_minutes,
     col_time,
     current_fv,
+    fit_phone,
     fmt_ago,
     fmt_dt,
     late_minutes,
@@ -284,7 +285,7 @@ per5 = q("""
 if not per5.empty:
     fig = px.bar(per5, x="bucket", y="fetches", color="feed", barmode="group")
     fig.update_layout(xaxis_title="", yaxis_title="fetches per 5 min (expect 10)", legend_title="")
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fit_phone(fig), width="stretch")
 
 unchanged = q(
     "select feed::text as feed, sum(unchanged_count) as discarded from rt.fetch_unchanged where hour > now() - interval '24 hours' group by 1"

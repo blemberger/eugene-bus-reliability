@@ -380,6 +380,62 @@ def main(settings: Settings, raw: bool = False) -> None:
             from marts.mart_daily_coverage order by 1
         """,
         )
+        print(
+            "Why scheduled stop events weren't scored (stops due more than 2 h ago; one reason each,"
+        )
+        print(
+            "checked left to right): trip never in LTD's feed / feed marked the stop skipped / a trip's"
+        )
+        print(
+            "first stop / its last stop / bus never reached it in the data / passed before the trip's"
+        )
+        print("first report / implausible time / imprecise time / anything else")
+        show(
+            cur,
+            """
+            select service_date, count(*) sched,
+                   round(100.0 * count(*) filter (where r = 'scored') / count(*), 1) pct_scored,
+                   count(*) filter (where r = 'no_rt') trip_not_in_feed,
+                   count(*) filter (where r = 'skipped') skipped,
+                   count(*) filter (where r = 'first') first_stop,
+                   count(*) filter (where r = 'last') last_stop,
+                   count(*) filter (where r = 'never') never_reached,
+                   count(*) filter (where r = 'before') before_first_report,
+                   count(*) filter (where r = 'implausible') implausible,
+                   count(*) filter (where r = 'imprecise') imprecise,
+                   count(*) filter (where r = 'other') other
+            from (
+                select service_date,
+                       case when status is not null then 'scored'
+                            when not trip_had_realtime then 'no_rt'
+                            when was_skipped then 'skipped'
+                            when is_first_stop then 'first'
+                            when is_last_stop then 'last'
+                            when observed_arrival is null then 'never'
+                            when not is_bounded then 'before'
+                            when not is_plausible then 'implausible'
+                            when not is_precise then 'imprecise'
+                            else 'other' end as r
+                from marts.fct_stop_events
+                where scheduled_arrival < now() - interval '2 hours'
+            ) x
+            group by 1 order by 1
+        """,
+        )
+        print(
+            "Trips never in LTD's feed, by the hour they were due to start (all days): cancelled trips, or buses not reporting"
+        )
+        show(
+            cur,
+            """
+            select hour_local as trip_start_hour, count(*) trips_not_in_feed
+            from marts.fct_stop_events
+            where is_first_stop and not trip_had_realtime
+              and scheduled_arrival < now() - interval '2 hours'
+            group by 1 order by 1
+        """,
+            limit=30,
+        )
         show(
             cur,
             """

@@ -21,6 +21,7 @@ from common import (
     data_note,
     day_label,
     day_sql,
+    fit_phone,
     fmt_delay,
     fmt_pct,
     hour_label,
@@ -168,7 +169,7 @@ if not hourly.empty:
         category_orders={"Hour": list(hourly["Hour"])},
     )
     fig.update_layout(yaxis_tickformat=".0%", yaxis_title="", xaxis_title="", legend_title="")
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fit_phone(fig), width="stretch")
     st.caption(f"Route {route_name}: share of timepoint arrivals early / on time / late by hour.")
 
 # delay along the route
@@ -236,7 +237,7 @@ else:
         height=450,
         legend_title="",
     )
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fit_phone(fig), width="stretch")
     st.caption(
         "Lateness at each stop along the trip. The green band is the on-time window. A rising line means the schedule loses time along the route; a drop means the timetable has slack there."
     )

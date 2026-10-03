@@ -11,6 +11,7 @@ from common import (
     col_pct,
     col_time,
     current_fv,
+    fit_phone,
     fmt_minutes,
     fmt_pct,
     hour_label,
@@ -118,7 +119,7 @@ fig.update_layout(
     xaxis_range=[0, 30.5],
     legend_title="",
 )
-st.plotly_chart(fig, width="stretch")
+st.plotly_chart(fit_phone(fig), width="stretch")
 st.caption(
     "Solid lines: how often the bus came within 1, 2 or 5 minutes of what the sign said, by how far ahead "
     "the sign said it. Dashed lines, same colours: for the same buses, how often the printed timetable was "
@@ -174,7 +175,7 @@ fig2.update_layout(
     yaxis_title="bus arrived this many minutes AFTER the sign said",
     legend_title="",
 )
-st.plotly_chart(fig2, width="stretch")
+st.plotly_chart(fit_phone(fig2), width="stretch")
 st.caption(
     "Above zero: the bus came later than predicted (the sign was optimistic). Below: earlier (you might miss it)."
 )
@@ -294,7 +295,7 @@ else:
             "traceorder": "normal",
         },
     )
-    st.plotly_chart(fig3, width="stretch")
+    st.plotly_chart(fit_phone(fig3), width="stretch")
     st.caption(
         f"Predictions made about {ahead} ahead, by the hour they were made. Each bar builds up: the "
         "dark part is the share that was right to within 1 minute; add the middle part for within 2 "
@@ -424,7 +425,7 @@ if pstop:
             legend_title="",
             height=420,
         )
-        st.plotly_chart(fig4, width="stretch")
+        st.plotly_chart(fit_phone(fig4), width="stretch")
         latest = hist.sort_values("first_seen_at").groupby("Bus", as_index=False).last()
         table(
             pd.DataFrame(
