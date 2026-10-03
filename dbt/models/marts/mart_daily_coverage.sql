@@ -1,4 +1,15 @@
 -- How complete is each day's collection? Feed gaps, trips seen, stop events observed.
+--
+-- The two completeness measures, both ideally 100%, count only stop events due more than
+-- two hours before the build (later ones may simply not have happened yet):
+--   trips_reported / trips_due: trips LTD's feed reported at all. A shortfall is LTD's side
+--     (a cancelled trip, a bus not reporting) or our own collection outage (gap_minutes).
+--   mid_stops_timed / mid_stops_due: on those trips, the stops we timed, leaving out each
+--     trip's first and last stop. The first can't be timed by our method (the bus sits there
+--     and starts reporting the trip already at the stop) and at the last the bus often switches
+--     to its next trip before passing it, so including them would cap the measure near 93%.
+--     A shortfall here is our measurement missing stops: GPS gaps, detours, a trip that started
+--     reporting part-way along.
 
 with fetches as (
     select
@@ -32,8 +43,18 @@ events as (
         count(*) filter (where is_bounded and not is_plausible) as stop_events_implausible,
         count(*) filter (where is_bounded and is_plausible and not is_precise) as stop_events_imprecise,
         count(distinct trip_id)                         as trips_scheduled,
-        count(distinct trip_id) filter (where trip_had_realtime) as trips_seen
-    from {{ ref('fct_stop_events') }}
+        count(distinct trip_id) filter (where trip_had_realtime) as trips_seen,
+        count(*) filter (where is_first_stop and due)                       as trips_due,
+        count(*) filter (where is_first_stop and due and trip_had_realtime) as trips_reported,
+        count(*) filter (where mid_trip and due and trip_had_realtime)      as mid_stops_due,
+        count(*) filter (where mid_trip and due and trip_had_realtime and status is not null)
+                                                        as mid_stops_timed
+    from (
+        select *,
+               scheduled_arrival < now() - interval '2 hours' as due,
+               not is_first_stop and not is_last_stop as mid_trip
+        from {{ ref('fct_stop_events') }}
+    ) e
     group by 1
 ),
 
@@ -51,6 +72,7 @@ select
     coalesce(f.gap_minutes, 0)         as gap_minutes,
     v.vehicles_reporting,
     e.trips_scheduled, e.trips_seen,
+    e.trips_due, e.trips_reported, e.mid_stops_due, e.mid_stops_timed,
     e.stop_events_scheduled, e.stop_events_trip_seen, e.stop_events_observed,
     e.stop_events_implausible,
     e.stop_events_imprecise

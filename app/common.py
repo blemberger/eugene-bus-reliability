@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import uuid
 from datetime import date, datetime, timedelta
 from datetime import time as dtime
 from urllib.parse import quote
@@ -544,6 +545,46 @@ def is_mobile() -> bool:
     except Exception:  # noqa: BLE001 — no browser (tests, scripts)
         return False
     return "Mobi" in ua or "Android" in ua
+
+
+# User agents of crawlers, link previewers and monitoring tools that run the site's scripts.
+BOT_AGENTS = re.compile(
+    r"bot|crawl|spider|slurp|headless|lighthouse|preview|monitor|python|curl|wget", re.I
+)
+
+
+def log_page_view(page: str) -> None:
+    """Count a page view in site.page_view: the time, the page (with the stop or route
+    chosen on it), phone or computer, and a random id for this browser tab's session, so
+    visits can be counted. No IP address, cookie or anything identifying is stored. Logged
+    once per page and choice, not on every rerun; never interrupts the page."""
+    try:
+        ua = st.context.headers.get("User-Agent", "") or ""
+    except Exception:  # noqa: BLE001 — no browser (tests, scripts)
+        return
+    if not ua or not DATABASE_URL:
+        return
+    detail = st.query_params.get("stop") or st.query_params.get("route")
+    if st.session_state.get("_page_view_logged") == (page, detail):
+        return
+    st.session_state["_page_view_logged"] = (page, detail)
+    session_id = st.session_state.setdefault("_visit_id", uuid.uuid4().hex)
+    device = (
+        "bot"
+        if BOT_AGENTS.search(ua)
+        else ("phone" if "Mobi" in ua or "Android" in ua else "computer")
+    )
+    try:
+        with psycopg.connect(DATABASE_URL, connect_timeout=3) as conn:
+            conn.read_only = (
+                False  # the site's login is read-only by default; this table takes inserts
+            )
+            conn.execute(
+                "insert into site.page_view (session_id, page, detail, device) values (%s, %s, %s, %s)",
+                (session_id, page, detail, device),
+            )
+    except Exception:  # noqa: BLE001 — a missing table or a busy database must not break the page
+        pass
 
 
 def fit_phone(fig):

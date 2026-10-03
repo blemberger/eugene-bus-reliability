@@ -21,6 +21,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--cycles", type=int, help="stop after N cycles (default: run forever)")
 
     sub.add_parser("report", help="print what has been collected so far")
+    sub.add_parser(
+        "referrers", help="summarize the web server's access log (on stdin): visits, sources"
+    )
 
     p = sub.add_parser(
         "dump", help="diagnostic snapshot: collection health, feed shape, analysis layer"
@@ -65,6 +68,11 @@ def main(argv: list[str] | None = None) -> None:
         from eugene_bus_reliability.poller import Poller
 
         Poller(settings).run(max_cycles=args.cycles)
+
+    elif args.cmd == "referrers":
+        from eugene_bus_reliability import referrers
+
+        referrers.main()
 
     elif args.cmd == "report":
         from eugene_bus_reliability import report

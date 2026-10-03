@@ -78,6 +78,10 @@ immediately with `make server-dbt-build` run on the server.
 - **Laptop:** `make fetch-dump` builds a full diagnostic snapshot on the server (collection
   health, outages, the analysis, every page rendered, memory, disk, log errors) and
   copies it to `dump.txt`.
+- **Laptop:** `make visitors` reports the site's visitors: visits and page views per day,
+  share on phones, the pages and stops people looked at, and the other sites that sent
+  them (from Caddy's access log). The site records only the time, the page, phone or
+  computer, and a random id per browser tab; no IP addresses or cookies.
 - **Site:** the Status page shows what came in during the last few minutes and when the
   analysis last ran.
 

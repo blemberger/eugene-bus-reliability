@@ -375,6 +375,8 @@ def main(settings: Settings, raw: bool = False) -> None:
             select service_date, trips_scheduled sched_trips, trips_seen, stop_events_scheduled sched_events,
                    stop_events_observed scored,
                    round(100.0 * stop_events_observed / nullif(stop_events_scheduled, 0)) pct_scored,
+                   round(100.0 * trips_reported / nullif(trips_due, 0), 1) pct_trips_reported,
+                   round(100.0 * mid_stops_timed / nullif(mid_stops_due, 0), 1) pct_mid_stops_timed,
                    stop_events_implausible implausible,
                    stop_events_imprecise imprecise,
                    round(gap_minutes) feed_gap_min
@@ -447,6 +449,33 @@ def main(settings: Settings, raw: bool = False) -> None:
                    round(percentile_cont(0.5) within group (order by uncertainty_s)) median_unc_s,
                    count(*) filter (where uncertainty_s > 120) unc_over_2min
             from marts.fct_stop_events where status is not null group by 1 order by 1
+        """,
+        )
+
+        section("DISK: database growth per day, and the biggest tables")
+        show(
+            cur,
+            """
+            select day, pg_size_pretty(size) as size_at_end_of_day,
+                   pg_size_pretty(size - lag(size) over (order by day)) as growth
+            from (
+                select (finished_at at time zone 'America/Los_Angeles')::date as day,
+                       max(db_bytes) filter (where finished_at = last) as size
+                from (select *, max(finished_at) over (partition by
+                        (finished_at at time zone 'America/Los_Angeles')::date) as last
+                      from analytics.build_log where db_bytes is not null) b
+                group by 1
+            ) d order by day desc limit 14
+        """,
+        )
+        show(
+            cur,
+            """
+            select n.nspname || '.' || c.relname as table_name,
+                   pg_size_pretty(pg_total_relation_size(c.oid)) as total_size
+            from pg_class c join pg_namespace n on n.oid = c.relnamespace
+            where c.relkind in ('r', 'm') and n.nspname not in ('pg_catalog', 'information_schema')
+            order by pg_total_relation_size(c.oid) desc limit 12
         """,
         )
 

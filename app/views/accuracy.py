@@ -305,24 +305,10 @@ else:
 
 # ---- revisions --------------------------------------------------------------------------
 st.subheader("How often does the prediction change?")
-rev = q("""
-    with per_stop as (
-        select count(*) as revisions,
-               extract(epoch from max(last_seen_at) - min(first_seen_at)) as tracked_s
-        from (
-            select trip_id, start_date, stop_sequence, first_seen_at, last_seen_at from rt.prediction_history
-            union all
-            select trip_id, start_date, stop_sequence, first_seen_at, last_seen_at from rt.prediction_current
-        ) u
-        where start_date >= current_date - 7
-        group by trip_id, start_date, stop_sequence
-    )
-    select count(*) as trip_stops,
-           percentile_cont(0.5) within group (order by revisions) as median_revisions,
-           percentile_cont(0.9) within group (order by revisions) as p90_revisions,
-           percentile_cont(0.5) within group (order by tracked_s) as median_tracked_s
-    from per_stop
-""")
+# computed once per analysis build (marts.mart_prediction_revisions): it reads every
+# prediction of the week, far too slow to run on each visit
+has_rev = q("select to_regclass('marts.mart_prediction_revisions') is not null as ok")["ok"][0]
+rev = q("select * from marts.mart_prediction_revisions") if has_rev else pd.DataFrame()
 if not rev.empty and rev["trip_stops"][0]:
     r = rev.iloc[0]
     st.write(

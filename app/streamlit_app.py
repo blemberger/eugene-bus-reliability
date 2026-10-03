@@ -39,7 +39,8 @@ pages = [
 ]
 page = st.navigation(pages, position="top")
 if os.environ.get("DATABASE_URL"):
-    from common import feed_banner
+    from common import feed_banner, log_page_view
 
     feed_banner()
+    log_page_view(page.url_path or "overview")
 page.run()

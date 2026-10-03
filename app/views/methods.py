@@ -76,27 +76,58 @@ with tab_cov:
         cov = q("select * from marts.mart_daily_coverage order by service_date")
         if cov.empty:
             st.info("No coverage rows yet.")
+        elif "trips_due" not in cov.columns:  # in the minutes after an update, before the rebuild
+            st.info("Coverage is being recalculated; it reappears within 15 minutes.")
         else:
             cov["Date"] = cov["service_date"].map(fmt_date)
-            cov["observed_share"] = cov["stop_events_observed"] / cov[
-                "stop_events_scheduled"
-            ].replace(0, pd.NA)
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Days collected", len(cov))
-            c2.metric("Stop events scored", f"{int(cov['stop_events_observed'].sum()):,}")
-            c3.metric(
-                "Of scheduled",
-                fmt_pct(
-                    int(cov["stop_events_observed"].sum()), int(cov["stop_events_scheduled"].sum())
-                ),
+            for c in ("trips_due", "trips_reported", "mid_stops_due", "mid_stops_timed"):
+                cov[c] = pd.to_numeric(cov[c]).fillna(0)
+            cov["Trips LTD reported"] = cov["trips_reported"] / cov["trips_due"].where(
+                cov["trips_due"] > 0
             )
-            fig = px.bar(cov, x="Date", y="observed_share")
+            cov["Stops we timed on them"] = cov["mid_stops_timed"] / cov["mid_stops_due"].where(
+                cov["mid_stops_due"] > 0
+            )
+            week = cov.tail(7)
+            c1, c2, c3 = st.columns(3)
+            c1.metric(
+                "Trips LTD reported, last 7 days",
+                fmt_pct(int(week["trips_reported"].sum()), int(week["trips_due"].sum())),
+                help="Scheduled trips that appeared in LTD's realtime feed at all.",
+            )
+            c2.metric(
+                "Stops we timed on them, last 7 days",
+                fmt_pct(int(week["mid_stops_timed"].sum()), int(week["mid_stops_due"].sum())),
+                help="On those trips, the stops whose arrival we measured, leaving out each "
+                "trip's first and last stop.",
+            )
+            c3.metric("Stop events scored, all days", f"{int(cov['stop_events_observed'].sum()):,}")
+            long = cov.melt(
+                id_vars=["Date"],
+                value_vars=["Trips LTD reported", "Stops we timed on them"],
+                var_name="Measure",
+                value_name="Share",
+            )
+            fig = px.line(long, x="Date", y="Share", color="Measure", markers=True)
             fig.update_layout(
                 yaxis_tickformat=".0%",
-                yaxis_title="scheduled stop events with an observed arrival",
+                yaxis_range=[0, 1.02],
+                yaxis_title="",
                 xaxis_title="",
+                legend_title="",
             )
             st.plotly_chart(fit_phone(fig), width="stretch")
+            st.caption(
+                "Both should sit near 100%. A dip in **trips LTD reported** is on LTD's side (a "
+                "cancelled trip, or a bus whose tracker was off) or a gap in our own collection: "
+                "check Feed gaps in the table. A dip in **stops we timed** means our measurement "
+                "missed stops on trips that did report: gaps between a bus's GPS reports, detours, "
+                "or a trip that started reporting part-way along. Each trip's first and last stop "
+                "are left out of that measure because the method can't time them reliably: at the "
+                "first stop the bus is already sitting there when it starts reporting the trip, "
+                "and at the last it often switches to its next trip first. Stops due in the last "
+                "two hours are not counted yet."
+            )
             table(
                 pd.DataFrame(
                     {
@@ -104,6 +135,8 @@ with tab_cov:
                         "Buses seen": cov["vehicles_reporting"],
                         "Trips scheduled": cov["trips_scheduled"],
                         "Trips seen": cov["trips_seen"],
+                        "Mid-trip stops due": cov["mid_stops_due"],
+                        "Timed": cov["mid_stops_timed"],
                         "Stop events scheduled": cov["stop_events_scheduled"],
                         "Observed": cov["stop_events_observed"],
                         "Implausible": cov["stop_events_implausible"],
@@ -118,6 +151,11 @@ with tab_cov:
                     "Buses seen": col_count("Buses seen"),
                     "Trips scheduled": col_count("Trips scheduled"),
                     "Trips seen": col_count("Trips seen"),
+                    "Mid-trip stops due": col_count(
+                        "Mid-trip stops due",
+                        help="On reported trips, excluding first and last stops.",
+                    ),
+                    "Timed": col_count("Timed"),
                     "Stop events scheduled": col_count("Stop events scheduled"),
                     "Observed": col_count("Observed"),
                     "Implausible": col_count("Implausible"),
@@ -126,7 +164,7 @@ with tab_cov:
                 },
             )
             st.caption(
-                "A partial first and last day are normal. Feed gaps count minutes where consecutive fetches were more than 2 minutes apart. "
+                "Feed gaps count minutes where consecutive fetches were more than 2 minutes apart. "
                 "Implausible = arrivals left out because they were more than 30 min early or 90 min late (a bus reporting the wrong trip). "
                 "Imprecise = arrivals left out because the bus's reports around that stop were more than 4 minutes apart "
                 "(usually a feed outage), so the time can't be pinned down to within 2 minutes."

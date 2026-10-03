@@ -37,9 +37,11 @@ on-run-start:
   - "create schema if not exists analytics"
   - "create table if not exists analytics.build_log (started_at timestamptz, finished_at timestamptz, invocation_id text)"
   - "alter table analytics.build_log add column if not exists n_errors integer, add column if not exists n_warnings integer"
+  # the database's size after each build, so the dump can show how fast it grows
+  - "alter table analytics.build_log add column if not exists db_bytes bigint"
   - "{% if flags.WHICH in ('build', 'run') %}insert into analytics.build_log (started_at, invocation_id) values (now(), '{{ invocation_id }}'){% endif %}"
 on-run-end:
-  - "{% if flags.WHICH in ('build', 'run') %}update analytics.build_log set finished_at = now(), n_errors = {{ results | selectattr('status', 'in', ['error', 'fail', 'runtime error']) | list | length }}, n_warnings = {{ results | selectattr('status', 'equalto', 'warn') | list | length }} where invocation_id = '{{ invocation_id }}'{% endif %}"
+  - "{% if flags.WHICH in ('build', 'run') %}update analytics.build_log set finished_at = now(), n_errors = {{ results | selectattr('status', 'in', ['error', 'fail', 'runtime error']) | list | length }}, n_warnings = {{ results | selectattr('status', 'equalto', 'warn') | list | length }}, db_bytes = pg_database_size(current_database()) where invocation_id = '{{ invocation_id }}'{% endif %}"
   - "grant usage on schema staging, intermediate, marts, analytics to ltd_reader"
   - "grant select on all tables in schema staging, intermediate, marts, analytics to ltd_reader"
 

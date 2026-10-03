@@ -92,6 +92,9 @@ services:
     volumes:
       - ./data/raw:/data/raw:ro
     expose: ["8501"]
+    # If a rush of visitors uses up memory, only the site restarts; the database and the
+    # collector keep running. It normally uses about 200 MB.
+    mem_limit: 700m
 
   caddy:
     <<: *logging

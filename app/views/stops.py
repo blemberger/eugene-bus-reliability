@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import math
-
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import pydeck as pdk
 import streamlit as st
 from common import (
@@ -34,6 +33,7 @@ from common import (
     q,
     require_db,
     require_marts,
+    route_colors,
     search_stops,
     share_pct,
     show_coming,
@@ -197,19 +197,20 @@ with st.expander("Where is this stop?", expanded=False):
         height=260,
     )
 
-st.markdown("#### Right now at this stop")
-stop_right_now()
-
-# ---- reliability: everything below follows these filters -------------------------------
-st.markdown("#### How reliable is this stop?")
+# ---- reliability: everything down to "Right now" follows these filters ---------------------
 start, wt = page_filters()
 wt_clause, wt_params = day_sql(wt)
 period = f"{day_label(wt)} since {fmt_date(start)}"
 
-# ---- per route ----------------------------------------------------------------
+
+def route_key(v) -> tuple:
+    v = str(v)
+    return (len(v), v)
+
+
 by_route = q(
     f"""
-    select route_short_name as route, direction_id, count(*) as n,
+    select route_id, route_short_name as route, direction_id, count(*) as n,
            count(*) filter (where status = 'on_time') as on_time,
            count(*) filter (where status = 'early') as early,
            count(*) filter (where status = 'late') as late,
@@ -218,29 +219,15 @@ by_route = q(
            count(distinct service_date) as n_days
     from marts.fct_stop_events
     where stop_id = %s and status is not null and service_date >= %s {wt_clause}
-    group by 1, 2 order by 1, 2
+    group by 1, 2, 3 order by 2, 3
     """,
     (stop_id, start, *wt_params),
 )
 if by_route.empty:
     st.info("No scored arrivals at this stop in the selected period yet.")
+    st.markdown("#### Right now at this stop")
+    stop_right_now()
     st.stop()
-
-total_n, total_ot = int(by_route["n"].sum()), int(by_route["on_time"].sum())
-c1, c2, c3 = st.columns(3)
-c1.metric(
-    "On time here", fmt_pct(total_ot, total_n), help="No more than 1 min early or 5 min late."
-)
-c2.metric(
-    "Ran early",
-    fmt_pct(int(by_route["early"].sum()), total_n),
-)
-c3.metric(
-    "Scored arrivals",
-    f"{total_n:,}",
-    f"{int(by_route['n_days'].max())} day(s), {fmt_date(by_route['first_day'].min())}–{fmt_date(by_route['last_day'].max())}",
-    delta_color="off",
-)
 
 headsigns = q(
     f"""
@@ -260,7 +247,172 @@ hs = (
     .reset_index()
 )
 tbl = by_route.merge(hs, on=["route", "direction_id"], how="left")
+# One name per route and direction: just the route where it passes here in one direction,
+# "route → destination" where it passes in both.
+both_ways = set(tbl.groupby("route")["direction_id"].nunique().loc[lambda s: s > 1].index)
+tbl["label"] = [
+    (f"{r} → {h}" if isinstance(h, str) and h else f"{r} (direction {d})") if r in both_ways else r
+    for r, h, d in zip(tbl["route"], tbl["headsign"], tbl["direction_id"], strict=False)
+]
+tbl = tbl.assign(rkey=tbl["route"].map(route_key)).sort_values(["rkey", "direction_id"])
+labels = dict(zip(zip(tbl["route"], tbl["direction_id"], strict=False), tbl["label"], strict=False))
+
+# ---- when are buses late here: by hour, one line per route --------------------------------
+st.markdown("#### When are buses late here?")
+hourly = q(
+    f"""
+    select route_id, route_short_name as route, direction_id, hour_local, count(*) as n,
+           count(*) filter (where status = 'on_time') as on_time,
+           percentile_cont(0.05) within group (order by delay_s) as p05,
+           percentile_cont(0.1) within group (order by delay_s) as p10,
+           percentile_cont(0.5) within group (order by delay_s) as p50,
+           percentile_cont(0.9) within group (order by delay_s) as p90,
+           count(distinct service_date) as n_days
+    from marts.fct_stop_events
+    where stop_id = %s and status is not null and service_date >= %s {wt_clause}
+    group by 1, 2, 3, 4 order by 4
+    """,
+    (stop_id, start, *wt_params),
+)
+hourly["label"] = [
+    labels.get((r, d), r) for r, d in zip(hourly["route"], hourly["direction_id"], strict=False)
+]
+options = tbl["label"].tolist()
+busiest = tbl.sort_values("n", ascending=False)["label"].head(6).tolist()
+c_show, c_routes = st.columns([1, 3])
+measure = (
+    c_show.segmented_control(
+        "Show", ["Minutes late", "% on time"], default="Minutes late", key="stop_hour_measure"
+    )
+    or "Minutes late"
+)
+picked = c_routes.pills(
+    "Routes",
+    options,
+    selection_mode="multi",
+    default=[o for o in options if o in busiest],
+    key=f"stop_hour_routes_{stop_id}",
+)
+chart = hourly[hourly["label"].isin(picked or []) & (hourly["n"] >= 5)].copy()
+if not picked:
+    st.caption("Pick at least one route above.")
+elif chart.empty:
+    st.caption("Not enough arrivals yet for an hour-by-hour view (needs 5 in an hour).")
+else:
+    minutes = measure == "Minutes late"
+    colors = route_colors()
+    hours = sorted(chart["hour_local"].unique())
+    x_of = {h: hour_label(h) for h in hours}
+    fig = go.Figure()
+    if minutes:
+        fig.add_hrect(
+            y0=-1,
+            y1=5,
+            fillcolor="#0b6e4f",
+            opacity=0.08,
+            line_width=0,
+            annotation_text="on time",
+            annotation_position="top left",
+        )
+        fig.add_hline(y=0, line_width=1, line_color="#999", line_dash="dot")
+    one = len(picked) == 1
+    for label in [o for o in options if o in picked]:
+        d = chart[chart["label"] == label]
+        if d.empty:
+            continue
+        color = colors.get(str(d["route_id"].iloc[0]), "#0b6e4f")
+        x = [x_of[h] for h in d["hour_local"]]
+        if minutes and one:
+            # the range most buses fall in: 10th to 90th percentile
+            fig.add_trace(
+                go.Scatter(
+                    x=x + x[::-1],
+                    y=list(d["p90"] / 60) + list(d["p10"] / 60)[::-1],
+                    fill="toself",
+                    fillcolor=color,
+                    opacity=0.18,
+                    line_width=0,
+                    hoverinfo="skip",
+                    showlegend=False,
+                )
+            )
+        y = d["p50"] / 60 if minutes else d["on_time"] / d["n"]
+        hover = [
+            (
+                f"<b>{label}</b>, {xx}<br>typically {p50 / 60:+.1f} min"
+                f"<br>8 in 10 buses: {p10 / 60:+.0f} to {p90 / 60:+.0f} min"
+                f"<br>on time {ot / n:.0%}<br>{n:,} arrivals over {nd} days"
+            )
+            for xx, p10, p50, p90, ot, n, nd in zip(
+                x, d["p10"], d["p50"], d["p90"], d["on_time"], d["n"], d["n_days"], strict=False
+            )
+        ]
+        fig.add_trace(
+            go.Scatter(
+                x=x,
+                y=y,
+                name=label,
+                mode="lines+markers",
+                line={
+                    "color": color,
+                    "width": 2.5,
+                    "dash": "dot"
+                    if d["route"].iloc[0] in both_ways and d["direction_id"].iloc[0] == 1
+                    else "solid",
+                },
+                hovertext=hover,
+                hoverinfo="text",
+            )
+        )
+    fig.update_layout(
+        xaxis={
+            "type": "category",
+            "categoryorder": "array",
+            "categoryarray": [x_of[h] for h in hours],
+        },
+        yaxis_title="minutes late (typical bus)" if minutes else "share on time",
+        yaxis_tickformat="+d" if minutes else ".0%",
+        legend_title="",
+        showlegend=not one,
+        margin={"t": 30},
+    )
+    if not minutes:
+        fig.update_yaxes(range=[0, 1.02])
+    st.plotly_chart(fit_phone(fig), width="stretch")
+    st.caption(
+        (
+            "The line is the typical bus (the median) in each hour, in minutes behind the timetable; "
+            "below zero = early. The green band is on time (up to 1 min early, 5 min late)."
+            + (
+                " The shaded range is where 8 in 10 buses fell."
+                if one
+                else " Pick one route to see the range where most of its buses fall."
+            )
+            if minutes
+            else "Share of buses on time (up to 1 min early, 5 min late) in each hour."
+        )
+        + f" Scheduled hour, {period}; an hour needs 5 arrivals to show. Hover a point for details."
+    )
+
+# ---- per route ------------------------------------------------------------------------------
 st.markdown("**Routes at this stop**")
+total_n, total_ot = int(by_route["n"].sum()), int(by_route["on_time"].sum())
+c1, c2, c3 = st.columns(3)
+c1.metric(
+    "On time here, all routes",
+    fmt_pct(total_ot, total_n),
+    help="No more than 1 min early or 5 min late.",
+)
+c2.metric(
+    "Ran early",
+    fmt_pct(int(by_route["early"].sum()), total_n),
+)
+c3.metric(
+    "Scored arrivals",
+    f"{total_n:,}",
+    f"{int(by_route['n_days'].max())} day(s), {fmt_date(by_route['first_day'].min())}–{fmt_date(by_route['last_day'].max())}",
+    delta_color="off",
+)
 table(
     pd.DataFrame(
         {
@@ -285,30 +437,6 @@ table(
         "Arrivals": col_count("Arrivals"),
     },
 )
-
-# ---- by hour: one row per route and hour, plus one per hour for all routes together ----
-hourly = q(
-    f"""
-    select route_short_name as route, grouping(route_short_name) = 1 as all_routes,
-           hour_local, count(*) as n,
-           count(*) filter (where status = 'on_time') as on_time,
-           percentile_cont(0.05) within group (order by delay_s) as p05,
-           min(service_date) as first_day, max(service_date) as last_day,
-           count(distinct service_date) as n_days
-    from marts.fct_stop_events
-    where stop_id = %s and status is not null and service_date >= %s {wt_clause}
-    group by grouping sets ((route_short_name, hour_local), (hour_local))
-    order by 3
-    """,
-    (stop_id, start, *wt_params),
-)
-hourly["route"] = hourly["route"].where(~hourly["all_routes"], "All routes")
-
-
-def route_key(v) -> tuple:
-    v = str(v)
-    return (len(v), v)
-
 
 # ---- arrive-by guidance ---------------------------------------------------
 st.markdown("**How early should I be at the stop?**")
@@ -350,7 +478,7 @@ st.caption(
     "(0 = on time is enough). Blank until a route has 20 arrivals here."
 )
 with st.expander("Hour by hour"):
-    guide = hourly[~hourly["all_routes"] & (hourly["n"] >= 10)].copy()
+    guide = hourly[hourly["n"] >= 10].copy()
     # minutes before the scheduled time; 0 when the earliest buses are no more than 30 s early
     guide["early_by"] = guide["p05"].map(
         lambda s: 0.0 if s is None or pd.isna(s) or s >= -30 else round(-float(s) / 60)
@@ -358,11 +486,12 @@ with st.expander("Hour by hour"):
     if guide.empty:
         st.caption("Not enough arrivals per hour yet (needs 10+ in an hour).")
     else:
-        guide["col"] = "Route " + guide["route"].astype(str)
+        guide["col"] = "Route " + guide["label"].astype(str)
         pivot = guide.pivot_table(
             index="hour_local", columns="col", values="early_by", aggfunc="first"
         ).sort_index()
-        pivot = pivot[sorted(pivot.columns, key=lambda c: route_key(c[6:]))]
+        order = ["Route " + o for o in options]
+        pivot = pivot[[c for c in order if c in pivot.columns]]
         pivot.insert(0, "Hour", [hour_time(h) for h in pivot.index])
         table(
             pivot.reset_index(drop=True),
@@ -382,59 +511,9 @@ with st.expander("Hour by hour"):
             f"Same measure for each hour, {period}. Blank where an hour has fewer than 10 arrivals."
         )
 
-# ---- when is it worst -------------------------------------------------------
-st.markdown("**When is it worst?**")
-split = (
-    st.segmented_control(
-        "Show",
-        ["All routes together", "Each route"],
-        default="All routes together",
-        key="stop_hour_split",
-        label_visibility="collapsed",
-    )
-    or "All routes together"
-)
-each = split == "Each route"
-chart = hourly[hourly["all_routes"] != each].copy()
-chart["Hour"] = chart["hour_local"].map(hour_label)
-chart["On time"] = chart["on_time"] / chart["n"]
-chart["Arrivals"] = chart["n"].astype(int)
-chart["Days of data"] = chart["n_days"].astype(int)
-chart["From"] = chart["first_day"].map(fmt_date)
-chart["To"] = chart["last_day"].map(fmt_date)
-fig = px.line(
-    chart,
-    x="Hour",
-    y="On time",
-    color="route",
-    markers=True,
-    hover_data={
-        "Arrivals": True,
-        "Days of data": True,
-        "From": True,
-        "To": True,
-        "Hour": False,
-        "On time": ":.0%",
-    },
-    category_orders={
-        "Hour": [hour_label(h) for h in range(24)],
-        "route": sorted(chart["route"].unique(), key=route_key),
-    },
-    color_discrete_sequence=None if each else ["#0b6e4f"],
-)
-fig.update_layout(
-    yaxis_tickformat=".0%",
-    xaxis_title="",
-    legend_title="Route",
-    showlegend=each,
-    # top fixed just above 100%; bottom a little under the worst hour, so dips stay visible
-    yaxis_range=[max(0.0, math.floor((float(chart["On time"].min()) - 0.05) * 10) / 10), 1.02],
-)
-st.plotly_chart(fit_phone(fig), width="stretch")
-st.caption(
-    f"Share of arrivals on time by hour of day, {period}. "
-    "Use the Days filter above for weekdays, Saturdays or Sundays only. Hover a point for sample size and dates."
-)
+# ---- right now ------------------------------------------------------------------------------
+st.markdown("#### Right now at this stop")
+stop_right_now()
 
 # ---- trend --------------------------------------------------------------------
 st.markdown("**Is it getting better?**")

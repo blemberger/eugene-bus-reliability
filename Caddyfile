@@ -2,9 +2,16 @@
 # names, separated by a space, with no quotes. Caddy gets and renews the HTTPS certificates
 # itself once DNS points here. ":80" (the default) serves plain HTTP on the server's IP instead.
 {$SITE_ADDRESS} {
-    encode zstd gzip
-    # one address for the site: the www. version redirects to the plain name, keeping the page path
-    @www header_regexp www Host ^www\.(.+)$
-    redir @www https://{re.www.1}{uri} permanent
-    reverse_proxy app:8501
+	encode zstd gzip
+	# one address for the site: the www. version redirects to the plain name, keeping the page path
+	@www header_regexp www Host ^www\.(.+)$
+	redir @www https://{re.www.1}{uri} permanent
+	reverse_proxy app:8501
+	# access log for `make visitors` (where visitors came from); kept to about 400 MB
+	log {
+		output file /data/access.log {
+			roll_size 20MiB
+			roll_keep 20
+		}
+	}
 }
