@@ -10,7 +10,10 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 from common import (
+    EARLY_HELP,
+    LATE_HELP,
     STATUS_COLOR,
+    TYPICAL_HELP,
     col_count,
     col_hour,
     col_late,
@@ -106,6 +109,12 @@ title_slot.title(f"Route {full[route_id]}")
 st.caption(
     f"Report card for {day_label(wt)}, from the date filter above. Share this page's address to link to it."
 )
+me = rank[rank["route_id"].astype(str) == route_id].iloc[0]
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("Typical bus", fmt_delay(me["median_delay"]), help=TYPICAL_HELP)
+m2.metric("Early (1+ min)", fmt_pct(int(me["early"]), int(me["n"])), help=EARLY_HELP)
+m3.metric("5+ min late", fmt_pct(int(me["late"]), int(me["n"])), help=LATE_HELP)
+m4.metric("Timepoint arrivals", f"{int(me['n']):,}")
 
 dirs = q(
     f"""
@@ -152,7 +161,9 @@ if not hourly.empty:
         value_name="count",
     )
     long["share"] = long["count"] / long.groupby("hour_local")["count"].transform("sum")
-    long["status"] = long["status"].map({"early": "Early", "on_time": "On time", "late": "Late"})
+    long["status"] = long["status"].map(
+        {"early": "Early (1+ min)", "on_time": "On time", "late": "5+ min late"}
+    )
     long["Arrivals"] = long["count"].astype(int)
     fig = px.bar(
         long,
@@ -162,15 +173,18 @@ if not hourly.empty:
         color="status",
         barmode="stack",
         color_discrete_map={
-            "Early": STATUS_COLOR["early"],
+            "Early (1+ min)": STATUS_COLOR["early"],
             "On time": STATUS_COLOR["on_time"],
-            "Late": STATUS_COLOR["late"],
+            "5+ min late": STATUS_COLOR["late"],
         },
         category_orders={"Hour": list(hourly["Hour"])},
     )
     fig.update_layout(yaxis_tickformat=".0%", yaxis_title="", xaxis_title="", legend_title="")
     st.plotly_chart(fit_phone(fig), width="stretch")
-    st.caption(f"Route {route_name}: share of timepoint arrivals early / on time / late by hour.")
+    st.caption(
+        f"Route {route_name}: share of timepoint arrivals by hour that came more than 1 min early, "
+        "on time (between those), or more than 5 min late."
+    )
 
 # delay along the route
 st.markdown("**Where does the delay build up?**")
@@ -358,10 +372,9 @@ cmp = rank[rank["route_id"].isin([route_id, other_id])].set_index("route_short_n
 cmp_tbl = pd.DataFrame(
     {
         r: {
-            "On time": fmt_pct(int(cmp.loc[r, "on_time"]), int(cmp.loc[r, "n"])),
-            "Early": fmt_pct(int(cmp.loc[r, "early"]), int(cmp.loc[r, "n"])),
-            "Late": fmt_pct(int(cmp.loc[r, "late"]), int(cmp.loc[r, "n"])),
             "Typical bus": fmt_delay(cmp.loc[r, "median_delay"]),
+            "Early (1+ min)": fmt_pct(int(cmp.loc[r, "early"]), int(cmp.loc[r, "n"])),
+            "5+ min late": fmt_pct(int(cmp.loc[r, "late"]), int(cmp.loc[r, "n"])),
             "Worst hour": hour_label(cmp.loc[r, "worst_hour"])
             if pd.notna(cmp.loc[r, "worst_hour"])
             else "—",

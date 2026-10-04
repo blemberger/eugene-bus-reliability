@@ -12,6 +12,9 @@ st.set_page_config(page_title="Eugene Bus Watch", page_icon="🚌", layout="wide
 
 st.html(
     "<style>"
+    # Streamlit fades whatever is being recomputed; on pages that update every few seconds
+    # (and when a bus is clicked) that made the whole map flash. Keep everything solid.
+    "[data-stale='true'] { opacity: 1 !important; transition: none !important; }"
     "[data-testid='stCaptionContainer'] { font-size: 0.95rem; }"
     "[data-testid='stButtonGroup'] button { font-size: 1.05rem; min-height: 2.5rem;"
     " padding: 0.35rem 1rem; }"
@@ -28,14 +31,21 @@ st.html(
 pages = [
     st.Page("views/overview.py", title="Overview", icon="🚌", default=True),
     st.Page("views/map.py", title="Live map", icon="📍", url_path="map"),
-    st.Page("views/arrivals.py", title="Arrivals", icon="🕒", url_path="arrivals"),
     st.Page("views/stops.py", title="Stops", icon="🚏", url_path="stops"),
     st.Page("views/routes.py", title="Routes", icon="🗺️", url_path="routes"),
     # one route's report card: no menu entry, reached from the Routes table or /route?route=...
     st.Page("views/route.py", title="Route", icon="🗺️", url_path="route", visibility="hidden"),
     st.Page("views/accuracy.py", title="Accuracy", icon="⏱️", url_path="accuracy"),
     st.Page("views/methods.py", title="Data & methods", icon="📐", url_path="methods"),
-    st.Page("views/status.py", title="Status", icon="🔧", url_path="status"),
+    # behind the scenes, linked from Data & methods rather than the menu
+    st.Page(
+        "views/arrivals.py",
+        title="Arrivals board",
+        icon="🕒",
+        url_path="arrivals",
+        visibility="hidden",
+    ),
+    st.Page("views/status.py", title="Status", icon="🔧", url_path="status", visibility="hidden"),
 ]
 page = st.navigation(pages, position="top")
 if os.environ.get("DATABASE_URL"):

@@ -1,7 +1,7 @@
 -- When did each bus actually reach each stop? Derived from VehiclePositions.
 --
--- LTD's positions carry no stop fields, so the method is geometric: project each
--- position onto the trip's route shape to get a fraction 0..1 along the route,
+-- LTD's positions carry no stop fields, so the method is geometric: place each
+-- position along the trip's route shape (int_positions_along_shape) as a fraction 0..1,
 -- take the running maximum over time (so GPS jitter can't move the bus backwards),
 -- and whenever that fraction steps past a stop's fraction between two reports,
 -- interpolate the crossing time linearly between them. Uncertainty is half the
@@ -25,7 +25,8 @@
 
 with positions as (
     select trip_id, service_date, vehicle_id, ts, frac, off_route_m
-    from {{ ref('int_position_fractions') }}
+    from {{ ref('int_positions_along_shape') }}
+    where service_date between current_date - {{ var('lookback_days') }} and current_date
 ),
 
 stepped as (

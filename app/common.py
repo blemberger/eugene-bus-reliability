@@ -339,6 +339,37 @@ def stop_link(stop_id, name) -> str | None:
     return f"/stops?stop={quote(str(stop_id))}#{'' if name is None or pd.isna(name) else name}"
 
 
+def route_link(route_id, name) -> str | None:
+    """A link to a route's report card, for LinkColumn (the text after # is what the cell shows)."""
+    if route_id is None or pd.isna(route_id):
+        return None
+    return f"/route?route={quote(str(route_id))}#{'' if name is None or pd.isna(name) else name}"
+
+
+def col_route(label: str = "Route"):
+    return st.column_config.LinkColumn(
+        label, display_text=r"#(.*)$", help="Opens this route's report card (in a new tab)."
+    )
+
+
+# The site's three measures of reliability, everywhere the same words:
+#   Typical bus  — the median minutes behind the timetable (negative = early)
+#   Early        — share of buses more than 1 minute ahead of the timetable
+#   5+ min late  — share of buses more than 5 minutes behind it
+TYPICAL_HELP = "Median minutes behind the timetable: half the buses were later than this, half earlier. Negative = early."
+EARLY_HELP = (
+    "Share of buses that came more than 1 minute ahead of the timetable, when you could miss them."
+)
+LATE_HELP = "Share of buses more than 5 minutes behind the timetable."
+
+
+def col_typical(label: str = "Typical bus (min late)", max_minutes: float = 5.0):
+    """Typical minutes late, drawn as a bar from 0 (on schedule) up to max_minutes."""
+    return st.column_config.ProgressColumn(
+        label, format="%+.1f min", min_value=0.0, max_value=float(max_minutes), help=TYPICAL_HELP
+    )
+
+
 def col_stop(label: str = "Stop"):
     return st.column_config.LinkColumn(
         label, display_text=r"#(.*)$", help="Opens this stop's page (in a new tab)."
@@ -706,8 +737,8 @@ def col_date(label: str):
     return st.column_config.DateColumn(label, format="MMM D, YYYY")
 
 
-def col_hour(label: str = "Hour"):
-    return st.column_config.TimeColumn(label, format="h a")
+def col_hour(label: str = "Hour", help: str | None = None):
+    return st.column_config.TimeColumn(label, format="h a", help=help)
 
 
 def col_late(label: str = "Min late", help: str | None = None):
@@ -1116,7 +1147,8 @@ def data_note(start: date | None = None) -> None:
             )
         line += " " + build_status()
     st.caption(
-        line + " On time = no more than 1 min early or 5 min late, at timepoints. "
+        line + " Typical bus = the median minutes behind the timetable; early = more than 1 min "
+        "ahead of it; on time = from 1 min early to 5 min late. "
         "[Source code on GitHub](https://github.com/blemberger/eugene-bus-reliability)."
     )
 
@@ -1176,11 +1208,14 @@ def col_clock(label: str, times: pd.Series, help: str | None = None):
     )
 
 
+JUST_LEFT_MINUTES = 6  # "just left" at a stop: only buses gone this recently
+
+
 def stop_buses(
     stop_id: str, per_route: int = STOP_ROWS_PER_ROUTE
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """The next and the last `per_route` buses of each route and direction at a stop, however
-    far away in time. Returns (coming, left).
+    """The next `per_route` buses of each route and direction at a stop, however far away in
+    time, and the buses that left it in the last JUST_LEFT_MINUTES. Returns (coming, left).
 
     coming: LTD's live prediction where it has one; beyond the trips LTD is predicting (it
     only predicts trips about to run), the timetable (source = 'timetable'). A stop counts
@@ -1227,7 +1262,7 @@ def stop_buses(
         ),
         events as (
             select trip_id, service_date, stop_sequence, t, scheduled, 'left' as source
-            from classed where departed
+            from classed where departed and t >= now() - interval '{JUST_LEFT_MINUTES} minutes'
             union all
             select trip_id, service_date, stop_sequence, t, scheduled, 'live'
             from classed

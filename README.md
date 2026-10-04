@@ -44,7 +44,7 @@ docs/                    design notes and the deployment guide
 
 **Raw bytes are archived** as gzipped protobufs, one per stored fetch, so the database is rebuildable from source if the parsing logic changes (`make rebuild`).
 
-**Arrivals are measured, not taken from the feed.** LTD's vehicle positions carry no stop information, so each position is projected onto the route's shape and the moment a bus passes each stop is interpolated. The feed's own "settled" times are recorded independently and the two methods are compared on the site.
+**Arrivals are measured, not taken from the feed.** LTD's vehicle positions carry no stop information, so each position is placed along the route's shape (walked in time order, so routes that use a street twice don't confuse it) and the moment a bus passes each stop is interpolated. The feed's own "settled" times are recorded independently and the two methods are compared on the site.
 
 **The schedule is versioned.** LTD republishes GTFS a few times a year. Every static table carries `feed_version_id`; realtime rows carry a service date; `int_feed_version_by_date` resolves which schedule applies to each day.
 

@@ -63,8 +63,8 @@ models:
                 min_value: 0
                 max_value: 1
 
-  - name: int_position_fractions
-    description: Each position projected onto its trip's shape (fraction along, metres off).
+  - name: int_positions_along_shape
+    description: Each position placed along its trip's shape (fraction along, metres off), walked in time order.
     columns:
       - name: frac
         tests:

@@ -1,15 +1,17 @@
-"""Routes: every route's report card in one table; click a route for its own page."""
+"""Routes: every route's report card in one table; pick a route to open its own page."""
 
 from __future__ import annotations
 
 import pandas as pd
 import streamlit as st
 from common import (
-    arrow_safe,
+    EARLY_HELP,
+    LATE_HELP,
     col_count,
     col_hour,
-    col_late,
     col_pct,
+    col_route,
+    col_typical,
     current_fv,
     data_note,
     day_label,
@@ -20,8 +22,10 @@ from common import (
     q,
     require_db,
     require_marts,
+    route_link,
     route_rank,
     share_pct,
+    table,
 )
 
 require_db()
@@ -29,7 +33,6 @@ st.title("Route report cards")
 require_marts()
 start, wt = page_filters()
 FV = str(current_fv())  # schedule version in force today
-# ---- ranking ----------------------------------------------------------------------
 rank = route_rank(start, wt)
 if rank.empty:
     st.info("No scored arrivals in the selected period yet.")
@@ -39,48 +42,75 @@ names = q(
     f"select route_id, route_short_name, route_long_name from gtfs.routes where feed_version_id = {FV}"
 )
 rank = rank.merge(names[["route_id", "route_long_name"]], on="route_id", how="left")
+rank = rank.assign(rkey=rank["route_short_name"].astype(str).map(lambda v: (len(v), v)))
+rank = rank.sort_values("rkey").reset_index(drop=True)
+
+
+# ---- open one route's report card -------------------------------------------------------
+def _open_route() -> None:
+    rid = st.session_state.get("routes_open")
+    if rid:
+        # the report card page keeps its choice in these keys; set them all to this route
+        for k in ("route_id", "route_chips", "route_select"):
+            st.session_state[k] = rid
+        st.session_state["routes_go"] = rid
+    st.session_state["routes_open"] = None  # so coming back here doesn't jump away again
+
+
+st.markdown("**Open a route's report card**")
+labels = dict(zip(rank["route_id"].astype(str), rank["route_short_name"].astype(str), strict=False))
+st.pills(
+    "Route",
+    list(labels),
+    format_func=lambda r: labels[r],
+    key="routes_open",
+    on_change=_open_route,
+    label_visibility="collapsed",
+)
+go_to = st.session_state.pop("routes_go", None)
+if go_to:
+    st.switch_page("views/route.py", query_params={"route": go_to})
+
+# ---- every route ----------------------------------------------------------------------
+st.markdown("**Every route**")
+typical = late_minutes(rank["median_delay"])
 card = pd.DataFrame(
     {
-        "Route": rank["route_short_name"].to_numpy(),
+        "Route": [
+            route_link(r, s)
+            for r, s in zip(rank["route_id"], rank["route_short_name"], strict=False)
+        ],
         "Name": rank["route_long_name"].to_numpy(),
-        "On time": share_pct(rank["on_time"], rank["n"]).to_numpy(),
+        "Typical bus": typical.to_numpy(),
         "Early": share_pct(rank["early"], rank["n"]).to_numpy(),
         "Late": share_pct(rank["late"], rank["n"]).to_numpy(),
-        "Typical bus": late_minutes(rank["median_delay"]).to_numpy(),
         "Worst hour": [hour_time(h) for h in rank["worst_hour"]],
         "Arrivals": rank["n"].astype(int).to_numpy(),
     }
 )
-table_key = f"route_table_{st.session_state.get('route_table_n', 0)}"
-picked = st.dataframe(
-    arrow_safe(card),
+table(
+    card,
     hide_index=True,
     width="stretch",
-    height=min(700, 40 + 35 * len(card)),
-    on_select="rerun",
-    selection_mode="single-row",
-    key=table_key,
+    height=min(800, 40 + 35 * len(card)),
     column_config={
-        "On time": col_pct("On time", bar=True),
-        "Early": col_pct("Early"),
-        "Late": col_pct("Late"),
-        "Typical bus": col_late(
-            "Typical bus (min late)", help="Median minutes late; negative = early."
+        "Route": col_route("Route"),
+        "Typical bus": col_typical(max_minutes=max(5.0, float(typical.max() or 0))),
+        "Early": col_pct("Early (1+ min)", help=EARLY_HELP),
+        "Late": col_pct("5+ min late", help=LATE_HELP),
+        "Worst hour": col_hour(
+            "Worst hour", help="The hour with the most buses early or 5+ min late."
         ),
-        "Worst hour": col_hour("Worst hour"),
         "Arrivals": col_count("Arrivals"),
     },
 )
-rows = picked.selection.rows if picked is not None else []
-if rows:
-    st.session_state["route_table_n"] = st.session_state.get("route_table_n", 0) + 1
-    st.switch_page("views/route.py", query_params={"route": str(rank.iloc[rows[0]]["route_id"])})
 st.caption(
-    f"Timepoint arrivals only, {day_label(wt)}. Sorted best to worst; click a column header to "
-    "re-sort. **Click a route's row to open its full report card.**"
+    f"Timepoint arrivals only, {day_label(wt)}. Typical bus = the median minutes behind the "
+    "timetable. Click a column header to sort; click a route number to open its report card."
 )
 download_button(
-    card, f"eugenebuswatch_route_report_cards_{day_label(wt).replace(' ', '_')}_since_{start}.csv"
+    card.assign(Route=rank["route_short_name"].to_numpy()),
+    f"eugenebuswatch_route_report_cards_{day_label(wt).replace(' ', '_')}_since_{start}.csv",
 )
 
 st.divider()

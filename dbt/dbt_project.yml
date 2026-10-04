@@ -35,6 +35,7 @@ on-run-start:
   # moment it exists, so pages never hit "permission denied" while a build is running.
   - "alter default privileges for role {{ target.user }} grant select on tables to ltd_reader"
   - "create schema if not exists analytics"
+  - "{{ create_shape_walk_functions() }}"
   - "create table if not exists analytics.build_log (started_at timestamptz, finished_at timestamptz, invocation_id text)"
   - "alter table analytics.build_log add column if not exists n_errors integer, add column if not exists n_warnings integer"
   # the database's size after each build, so the dump can show how fast it grows

@@ -363,7 +363,7 @@ def main(settings: Settings, raw: bool = False) -> None:
             cur,
             """
             select (select count(*) from intermediate.int_scheduled_stop_events) scheduled_events,
-                   (select count(*) from intermediate.int_position_fractions) position_fractions,
+                   (select count(*) from intermediate.int_positions_along_shape) positions_along_shape,
                    (select count(*) from intermediate.int_observed_arrivals) observed_arrivals,
                    (select count(*) from marts.fct_stop_events where status is not null) scored_events,
                    (select count(*) from marts.fct_prediction_errors) scored_predictions
@@ -496,9 +496,29 @@ def main(settings: Settings, raw: bool = False) -> None:
             cur,
             """
             select route_short_name route, count(*) n, count(*) filter (where abs(methods_diff_s) > 300) over_5min,
-                   round(100.0 * count(*) filter (where abs(methods_diff_s) > 300) / count(*)) pct
+                   round(100.0 * count(*) filter (where abs(methods_diff_s) > 300) / count(*)) pct,
+                   round(100.0 * count(*) filter (where abs(methods_diff_s) > 300 and service_date >= current_date - 1)
+                         / nullif(count(*) filter (where service_date >= current_date - 1), 0)) pct_last_2_days,
+                   round(percentile_cont(0.5) within group (order by methods_diff_s)) median_diff_s,
+                   round(percentile_cont(0.5) within group (order by methods_diff_s) filter (where is_timepoint)) median_diff_timepoints_s
             from marts.fct_stop_events where methods_diff_s is not null and is_bounded
-            group by 1 having count(*) >= 50 order by pct desc limit 6
+            group by 1 having count(*) >= 50 order by pct desc limit 8
+        """,
+        )
+        print(
+            "Stops the arrival method can't place on the route shape (out of order, or > 60 m off it), by route"
+        )
+        show(
+            cur,
+            """
+            select r.route_short_name route, count(*) stop_times,
+                   count(*) filter (where not f.is_usable) unusable,
+                   round(100.0 * count(*) filter (where not f.is_usable) / count(*), 1) pct_unusable
+            from intermediate.int_stop_shape_fractions f
+            join gtfs.trips t on t.trip_id = f.trip_id and t.feed_version_id = f.feed_version_id
+            join gtfs.routes r on r.route_id = t.route_id and r.feed_version_id = t.feed_version_id
+            where f.feed_version_id = (select max(feed_version_id) from gtfs.feed_version)
+            group by 1 having count(*) filter (where not f.is_usable) > 0 order by 4 desc limit 10
         """,
         )
 
@@ -639,7 +659,7 @@ def main(settings: Settings, raw: bool = False) -> None:
             """
             select service_date, count(*) positions,
                    round(100.0 * count(*) filter (where off_route_m > 100) / count(*), 1) pct_over_100m
-            from intermediate.int_position_fractions group by 1 order by 1
+            from intermediate.int_positions_along_shape group by 1 order by 1
         """,
         )
 

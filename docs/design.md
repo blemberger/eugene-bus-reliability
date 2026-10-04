@@ -30,7 +30,7 @@ Storing every poll's predictions verbatim would be ~3–5M rows/day. That is the
 - **On-time**: arrival no more than 60 s early and no more than 300 s late, at timepoints only (TCRP convention).
 - **Prediction horizon**: `arrival_time − first_seen_at` for the prediction row in force at a given moment.
 - **Prediction error**: `observed_arrival − arrival_time`, signed (positive = bus arrived after the prediction).
-- **Observed arrival**: LTD's positions carry no stop fields, so each position is projected onto the trip's route shape (a fraction 0–1 along it), the running maximum removes GPS jitter, and the moment that fraction passes a stop is interpolated between the two reports either side (`int_observed_arrivals`). The feed's own "settled" time for stops already passed is recorded independently and the two are compared (`mart_method_agreement`).
+- **Observed arrival**: LTD's positions carry no stop fields, so each position is placed along the trip's route shape (a fraction 0–1 along it). Positions are walked in time order, each placed on the first pass of the shape ahead of where the bus had got to and within reach of its previous report (`macros/shape_walk.sql`), because on routes that use a street twice the nearest point on the whole shape can be the wrong pass. The running maximum removes GPS jitter, and the moment that fraction passes a stop is interpolated between the two reports either side (`int_observed_arrivals`). The feed's own "settled" time for stops already passed is recorded independently and the two are compared (`mart_method_agreement`).
 
 ## Known failure modes to measure, not assume
 

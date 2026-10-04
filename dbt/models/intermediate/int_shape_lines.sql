@@ -1,6 +1,6 @@
--- One linestring per route shape, built from shapes.txt points in order.
--- Geometry (not geography) because ST_LineLocatePoint works on planar geometry;
--- at Eugene's scale the distortion is irrelevant for locating a point along a line.
+-- One linestring per route shape, built from shapes.txt points in order: in longitude and
+-- latitude (line, for maps) and in metres (line_m, UTM zone 10N, for locating stops and buses
+-- along it; see macros/shape_walk.sql).
 
 {{ config(indexes=[{'columns': ['feed_version_id', 'shape_id'], 'unique': True}]) }}
 
@@ -14,5 +14,6 @@ with lines as (
     group by 1, 2
 )
 
-select feed_version_id, shape_id, line, n_points, ST_Length(line::geography) as length_m
+select feed_version_id, shape_id, line, ST_Transform(line, 32610) as line_m, n_points,
+       ST_Length(line::geography) as length_m
 from lines

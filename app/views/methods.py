@@ -26,6 +26,16 @@ from common import (
 
 require_db()
 st.title("Data & methods")
+st.caption("Behind the scenes, for anyone curious how the data flows:")
+b1, b2 = st.columns(2)
+b1.page_link(
+    "views/arrivals.py", label="Arrivals board: the live feed, processed, bus by bus", icon="🕒"
+)
+b2.page_link(
+    "views/status.py",
+    label="Status: is data flowing, and when did the analysis last run?",
+    icon="🔧",
+)
 
 tab_defs, tab_cov, tab_explore, tab_dl = st.tabs(
     ["Definitions", "Coverage & quality", "Data explorer", "Downloads"]
@@ -44,8 +54,9 @@ no more than 5 minutes late — the convention used by most US agencies (TCRP). 
 Stop-level pages use all stops, not just timepoints, because riders wait at every stop.
 
 **Observed arrival.** LTD's vehicle positions carry no stop information, so arrivals are derived geometrically: each
-position is projected onto the route's shape as a fraction of the way along it, the running maximum over time removes
-GPS jitter, and when that fraction steps past a stop between two reports the crossing time is interpolated (±15 s at a
+position is placed along the route's shape as a fraction of the way along it (walked in time order, each position on
+the first stretch of the route ahead of the last, so a route that uses a street twice can't be confused), the running
+maximum over time removes GPS jitter, and when that fraction steps past a stop between two reports the crossing time is interpolated (±15 s at a
 30 s poll while moving). Independently, the feed keeps reporting a departure time for stops already passed that no longer
 changes; that "settled" time is recorded too, and the two are compared on the Coverage & quality tab. Stops passed before
 a trip's first report can't be timed and are excluded.

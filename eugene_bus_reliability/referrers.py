@@ -47,7 +47,8 @@ def main(stream: TextIO = sys.stdin, days: int = 30) -> None:
         if (
             when < since
             or request.get("method") != "GET"
-            or entry.get("status") != 200
+            # 304 = "not changed": a returning visitor whose browser already had the page
+            or entry.get("status") not in (200, 304)
             or NOT_A_PAGE.search(path)
         ):
             continue

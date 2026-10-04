@@ -6,6 +6,7 @@ The map is pydeck on Streamlit's built-in basemap; it refreshes itself every 15 
 from __future__ import annotations
 
 import base64
+import json
 import math
 
 import pandas as pd
@@ -80,6 +81,109 @@ ARROW_ICON = {
 }
 
 
+def paths_to_next_stops(focus: pd.DataFrame) -> pd.DataFrame:
+    """For each bus in `focus`: the route's own path from the bus to its next stop, and from
+    there to the stop after, as lists of [lon, lat]. Stops and the bus are placed along the
+    shape the same way the arrival analysis does (int_stop_shape_fractions), so on a route
+    that uses a street twice the path follows the right pass. Empty if the analysis tables
+    aren't there yet; the map then draws straight lines."""
+    rows = focus.dropna(subset=["trip_id", "next_seq"])
+    if rows.empty:
+        return pd.DataFrame()
+    try:
+        df = q(
+            f"""
+            with v as (
+                select * from unnest(%s::text[], %s::text[], %s::float8[], %s::float8[], %s::int[], %s::int[])
+                    as v(vehicle_id, trip_id, lon, lat, next_seq, seq2)
+            ),
+            g as (
+                select v.vehicle_id, l.line_m,
+                       ST_Transform(ST_SetSRID(ST_MakePoint(v.lon, v.lat), 4326), 32610) as pt,
+                       nf.frac as next_frac, tf.frac as then_frac,
+                       coalesce((select max(f.frac) from intermediate.int_stop_shape_fractions f
+                                 where f.feed_version_id = t.feed_version_id and f.trip_id = v.trip_id
+                                   and f.stop_sequence < v.next_seq), 0) as prev_frac
+                from v
+                join gtfs.trips t on t.trip_id = v.trip_id and t.feed_version_id = {FV}
+                join intermediate.int_shape_lines l
+                  on l.shape_id = t.shape_id and l.feed_version_id = t.feed_version_id
+                join intermediate.int_stop_shape_fractions nf
+                  on nf.feed_version_id = t.feed_version_id and nf.trip_id = v.trip_id
+                 and nf.stop_sequence = v.next_seq
+                left join intermediate.int_stop_shape_fractions tf
+                  on tf.feed_version_id = t.feed_version_id and tf.trip_id = v.trip_id
+                 and tf.stop_sequence = v.seq2
+            ),
+            located as (
+                select g.*, least(prev_frac + ST_LineLocatePoint(
+                           ST_LineSubstring(line_m, prev_frac, greatest(next_frac, prev_frac + 1e-6)), pt)
+                           * (greatest(next_frac, prev_frac + 1e-6) - prev_frac), next_frac) as bus_frac
+                from g where next_frac >= prev_frac
+            )
+            select vehicle_id,
+                   ST_AsGeoJSON(ST_Transform(ST_LineSubstring(line_m, bus_frac, next_frac), 4326)) as to_next,
+                   case when then_frac > next_frac then
+                       ST_AsGeoJSON(ST_Transform(ST_LineSubstring(line_m, next_frac, then_frac), 4326))
+                   end as to_then
+            from located
+            """,
+            (
+                rows["vehicle_id"].astype(str).tolist(),
+                rows["trip_id"].astype(str).tolist(),
+                rows["lon"].astype(float).tolist(),
+                rows["lat"].astype(float).tolist(),
+                rows["next_seq"].astype(int).tolist(),
+                [int(x) if pd.notna(x) else None for x in rows["seq2"]],
+            ),
+        )
+    except Exception:  # noqa: BLE001 — the analysis tables may not exist yet
+        return pd.DataFrame()
+    return df
+
+
+def coords(geojson: str | None) -> list:
+    if not geojson:
+        return []
+    g = json.loads(geojson)
+    return g["coordinates"] if g.get("type") == "LineString" else []
+
+
+def dashed(path: list, zoom: float, on_px: float = 9, off_px: float = 6) -> list[list]:
+    """Cut a [lon, lat] path into dashes about on_px long with off_px gaps at this zoom."""
+    if len(path) < 2:
+        return []
+    metres_per_px = 156543.0 * math.cos(math.radians(44.05)) / 2**zoom
+    on, period = on_px * metres_per_px, (on_px + off_px) * metres_per_px
+    kx, ky = 111320.0 * math.cos(math.radians(44.05)), 110540.0  # metres per degree here
+    out, cur, pos = [], [], 0.0  # pos: metres along the path, mod period
+    for (x0, y0), (x1, y1) in zip(path, path[1:], strict=False):
+        seg = math.hypot((x1 - x0) * kx, (y1 - y0) * ky)
+        done = 0.0
+        while done < seg:
+            in_dash = pos < on
+            step = min(seg - done, (on - pos) if in_dash else (period - pos))
+            a = done / seg if seg else 0
+            b = (done + step) / seg if seg else 1
+            pa = [x0 + (x1 - x0) * a, y0 + (y1 - y0) * a]
+            pb = [x0 + (x1 - x0) * b, y0 + (y1 - y0) * b]
+            if in_dash:
+                if not cur:
+                    cur = [pa]
+                cur.append(pb)
+            elif cur:
+                out.append(cur)
+                cur = []
+            done += step
+            pos = (pos + step) % period
+            if pos == 0 and cur:  # a dash ended exactly at the period boundary
+                out.append(cur)
+                cur = []
+    if cur:
+        out.append(cur)
+    return [d for d in out if len(d) >= 2]
+
+
 def load_live() -> pd.DataFrame:
     sj, sched = schedule_join("p")
     return q_fresh(
@@ -90,9 +194,10 @@ def load_live() -> pd.DataFrame:
             where position_timestamp between now() - interval '10 minutes' and now() + interval '5 minutes'
             order by vehicle_id, position_timestamp desc
         )
-        select vp.vehicle_id, vp.route_id, r.route_short_name as route, t.trip_headsign as headsign,
+        select vp.vehicle_id, vp.trip_id, vp.route_id, r.route_short_name as route, t.trip_headsign as headsign,
                vp.latitude as lat, vp.longitude as lon, vp.bearing, vp.speed_mps, vp.occupancy_status,
                vp.position_timestamp,
+               p.stop_sequence as next_seq, p2.stop_sequence as seq2,
                s.stop_name as next_stop, s.stop_lat as next_lat, s.stop_lon as next_lon,
                coalesce(p.arrival_time, p.departure_time) as next_time,
                s2.stop_name as stop2, s2.stop_lat as lat2s, s2.stop_lon as lon2s,
@@ -154,6 +259,9 @@ def live_map() -> None:
         load=live["occupancy_status"].map(
             lambda o: "" if pd.isna(o) else f" · Seats: {OCCUPANCY.get(int(o), '')}"
         ),
+        seats=live["occupancy_status"].map(
+            lambda o: "" if pd.isna(o) else OCCUPANCY.get(int(o), "")
+        ),
         headsign=clean_headsigns(live),
         next_stop=live["next_stop"].fillna("—"),
         stop_line="",  # filled in for stop markers only; every tooltip field must exist on every layer
@@ -206,6 +314,8 @@ def live_map() -> None:
         choice = st.selectbox("Zoom to a bus", options, key="live_bus_pick")
         if choice != options[0] and choice in shown["label"].values:
             sel_bus = shown[shown["label"] == choice].iloc[0]
+    else:  # the same box, inactive, so the map doesn't jump down when a route is picked
+        st.selectbox("Zoom to a bus", ["(pick a route first)"], disabled=True)
 
     # ---- geometry ----
     arrows = shown[shown["bearing"].notna()].copy()
@@ -268,6 +378,44 @@ def live_map() -> None:
             + "</i><br/>"
         )
 
+    if sel_bus is not None:
+        # frame the bus and its next two stops: centre on them, zoom until they fit
+        pts = [(float(sel_bus["lat"]), float(sel_bus["lon"]))] + [
+            (float(sel_bus[a]), float(sel_bus[b]))
+            for a, b in (("next_lat", "next_lon"), ("lat2s", "lon2s"))
+            if a in sel_bus and not pd.isna(sel_bus[a]) and not pd.isna(sel_bus[b])
+        ]
+        lats, lons = [p_[0] for p_ in pts], [p_[1] for p_ in pts]
+        span = max(max(lats) - min(lats), (max(lons) - min(lons)) * 0.72, 0.002)
+        # web-map zoom z shows 360 * pixels / (256 * 2**z) degrees; fit the span into a third
+        # of the map's 560 px height so the surrounding streets stay in view (longitude is
+        # scaled by cos(44°) ≈ 0.72 at Eugene), and never closer than neighbourhood level
+        zoom = max(12.5, min(14.5, math.log2(360 * map_h * 0.33 / (256 * span))))
+        view = pdk.ViewState(
+            latitude=(max(lats) + min(lats)) / 2,
+            longitude=(max(lons) + min(lons)) / 2,
+            zoom=zoom,
+            transition_duration=1200,
+        )
+    elif sel_route:
+        view = pdk.ViewState(
+            latitude=float(shown["lat"].mean()), longitude=float(shown["lon"].mean()), zoom=12
+        )
+    else:
+        view = pdk.ViewState(latitude=44.06, longitude=-123.09, zoom=11.2)
+    # the bus's way to its next stop and on to the one after, dashed, along the route itself
+    zoom_now = float(view.zoom)
+    along = paths_to_next_stops(focus) if len(focus) else pd.DataFrame()
+    dash_next: list[dict] = []
+    dash_then: list[dict] = []
+    for _, r in along.iterrows():
+        dash_next += [{"path": d} for d in dashed(coords(r["to_next"]), zoom_now)]
+        dash_then += [{"path": d} for d in dashed(coords(r["to_then"]), zoom_now)]
+    have_paths = set(along["vehicle_id"]) if len(along) else set()
+    # straight lines only for buses whose route path couldn't be worked out
+    to_stop = to_stop[~to_stop["vehicle_id"].astype(str).isin(have_paths)]
+    to_then = to_then[~to_then["vehicle_id"].astype(str).isin(have_paths)]
+
     layers = [
         pdk.Layer(
             "PathLayer",
@@ -278,6 +426,28 @@ def live_map() -> None:
             get_width=4,
             width_min_pixels=3,
             width_max_pixels=5,
+            pickable=False,
+        ),
+        pdk.Layer(
+            "PathLayer",
+            id="to_then",
+            data=dash_then,
+            get_path="path",
+            get_color=[230, 30, 30, 150],
+            get_width=2,
+            width_min_pixels=2,  # min = max: the same width in pixels at every zoom
+            width_max_pixels=2,
+            pickable=False,
+        ),
+        pdk.Layer(
+            "PathLayer",
+            id="to_next",
+            data=dash_next,
+            get_path="path",
+            get_color=[230, 30, 30, 230],
+            get_width=3,
+            width_min_pixels=3,
+            width_max_pixels=3,
             pickable=False,
         ),
         pdk.Layer(
@@ -333,24 +503,26 @@ def live_map() -> None:
             pickable=True,
         ),
     ]
-    if highlighted:  # halo on the selected bus
-        layers.insert(
-            3,
-            pdk.Layer(
-                "ScatterplotLayer",
-                data=focus,
-                get_position="[lon, lat]",
-                get_fill_color=[0, 0, 0, 0],
-                get_line_color=[30, 30, 30],
-                line_width_min_pixels=2,
-                stroked=True,
-                filled=False,
-                get_radius=90,
-                radius_min_pixels=HALO_PX,
-                radius_max_pixels=HALO_PX,
-                pickable=False,
-            ),
-        )
+    # halo on the selected bus; always in the list, so the map keeps the same layers from one
+    # update to the next and redraws in place instead of starting over
+    layers.insert(
+        len(layers) - 2,
+        pdk.Layer(
+            "ScatterplotLayer",
+            id="halo",
+            data=focus if highlighted else focus.iloc[0:0],
+            get_position="[lon, lat]",
+            get_fill_color=[0, 0, 0, 0],
+            get_line_color=[30, 30, 30],
+            line_width_min_pixels=2,
+            stroked=True,
+            filled=False,
+            get_radius=90,
+            radius_min_pixels=HALO_PX,
+            radius_max_pixels=HALO_PX,
+            pickable=False,
+        ),
+    )
     tooltip = {
         "html": "<b>Route {route} → {headsign}</b><br/>"
         "<span style='color:#bbb'>destination shown on the bus</span><br/>{stop_line}"
@@ -360,31 +532,6 @@ def live_map() -> None:
         "<span style='color:#999'>position reported {reported}</span>",
         "style": {"backgroundColor": "#222", "color": "white", "fontSize": "13px"},
     }
-    if sel_bus is not None:
-        # frame the bus and its next two stops: centre on them, zoom until they fit
-        pts = [(float(sel_bus["lat"]), float(sel_bus["lon"]))] + [
-            (float(sel_bus[a]), float(sel_bus[b]))
-            for a, b in (("next_lat", "next_lon"), ("lat2s", "lon2s"))
-            if a in sel_bus and not pd.isna(sel_bus[a]) and not pd.isna(sel_bus[b])
-        ]
-        lats, lons = [p_[0] for p_ in pts], [p_[1] for p_ in pts]
-        span = max(max(lats) - min(lats), (max(lons) - min(lons)) * 0.72, 0.002)
-        # web-map zoom z shows 360 * pixels / (256 * 2**z) degrees; fit the span into a third
-        # of the map's 560 px height so the surrounding streets stay in view (longitude is
-        # scaled by cos(44°) ≈ 0.72 at Eugene), and never closer than neighbourhood level
-        zoom = max(12.5, min(14.5, math.log2(360 * map_h * 0.33 / (256 * span))))
-        view = pdk.ViewState(
-            latitude=(max(lats) + min(lats)) / 2,
-            longitude=(max(lons) + min(lons)) / 2,
-            zoom=zoom,
-            transition_duration=1200,
-        )
-    elif sel_route:
-        view = pdk.ViewState(
-            latitude=float(shown["lat"].mean()), longitude=float(shown["lon"].mean()), zoom=12
-        )
-    else:
-        view = pdk.ViewState(latitude=44.06, longitude=-123.09, zoom=11.2)
     deck = pdk.Deck(layers=layers, initial_view_state=view, map_style=None, tooltip=tooltip)
 
     counts = shown["status"].value_counts()
@@ -414,7 +561,7 @@ def live_map() -> None:
                     "At ": local_times(shown["time2"]),
                     "Min late": late_minutes(shown["delay_s"]),
                     "Speed": shown["speed_mps"] * 2.237,
-                    "Load": shown["load"],
+                    "Seats": shown["seats"],
                     "Reported": local_times(shown["position_timestamp"]),
                 }
             ).sort_values("Route", key=lambda c: c.astype(str).map(lambda v: (len(v), v))),
@@ -425,6 +572,7 @@ def live_map() -> None:
                 "At ": col_time("At"),
                 "Min late": col_late(),
                 "Speed": col_minutes("Speed", fmt="%.0f mph"),
+                "Seats": st.column_config.TextColumn("Seats", width="medium"),
                 "Reported": col_ago("Reported"),
             },
         )
