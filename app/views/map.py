@@ -143,7 +143,8 @@ def paths_to_next_stops(focus: pd.DataFrame) -> pd.DataFrame:
 
 
 def coords(geojson: str | None) -> list:
-    if not geojson:
+    # missing (None, or NaN in a column of them) when a bus is at its trip's last stop
+    if not isinstance(geojson, str) or not geojson:
         return []
     g = json.loads(geojson)
     return g["coordinates"] if g.get("type") == "LineString" else []

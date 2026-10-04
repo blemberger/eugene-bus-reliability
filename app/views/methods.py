@@ -19,6 +19,7 @@ from common import (
     fmt_pct,
     marts_ready,
     q,
+    q_live,
     require_db,
     run_explorer_query,
     table,
@@ -320,7 +321,7 @@ with tab_dl:
         if st.button("Prepare the scored stop events (latest 200,000)"):
             st.session_state["prepare_stop_events"] = True
         if st.session_state.get("prepare_stop_events"):
-            se = q("""
+            se = q_live("""
                 select service_date, route_short_name, direction_id, trip_id, stop_sequence, stop_id, is_timepoint,
                        scheduled_arrival, observed_arrival, delay_s, status
                 from marts.fct_stop_events where status is not null order by service_date desc, trip_id, stop_sequence limit 200000

@@ -3,7 +3,9 @@
 Runs forever in its own container (docker compose service `scheduler`):
   * every 15 min — `dbt build` (observed arrivals, marts, tests), then
                    `dbt source freshness` (logs a warning if collection has stalled);
-                   DBT_BUILD_EVERY_MINUTES changes the interval
+                   DBT_BUILD_EVERY_MINUTES changes the interval. Most models recompute only
+                   the latest two service days (dbt/macros/incremental.sql); when the analysis
+                   code has changed since the last full refresh, the build is a full refresh
   * every day    — reload the static schedule if LTD published a new one,
                    and move stale predictions from rt.prediction_current to history
 A loop that checks the clock is all this workload needs; the jobs are plain
@@ -12,6 +14,8 @@ functions, so moving them to cron or an orchestrator changes only what calls the
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 import subprocess
@@ -38,9 +42,51 @@ def _dbt(args: list[str], timeout: int) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=timeout)
 
 
+def analysis_code_version() -> str:
+    """A fingerprint of everything that decides what the analysis computes: the dbt models,
+    macros, tests and project file."""
+    h = hashlib.sha256()
+    files = [DBT_DIR / "dbt_project.yml"] + [
+        p
+        for d in ("models", "macros", "tests")
+        for p in sorted((DBT_DIR / d).rglob("*"))
+        if p.is_file()
+    ]
+    for p in files:
+        h.update(str(p.relative_to(DBT_DIR)).encode() + b"\0" + p.read_bytes() + b"\0")
+    return h.hexdigest()[:16]
+
+
+def refreshed_version(settings: Settings) -> str | None:
+    """The code version of the last successful full refresh (None: never, or reset by
+    `make server-full-refresh` / the drop-before cleanup, which delete it)."""
+    with psycopg.connect(settings.database_url) as conn:
+        conn.execute("create schema if not exists analytics")
+        conn.execute(
+            "create table if not exists analytics.build_code (version text, refreshed_at timestamptz)"
+        )
+        row = conn.execute(
+            "select version from analytics.build_code order by refreshed_at desc limit 1"
+        ).fetchone()
+    return row[0] if row else None
+
+
+def models_built_ok() -> bool:
+    """Did every model of the last dbt invocation build? (A failing test doesn't count.)"""
+    try:
+        results = json.loads((DBT_DIR / "target" / "run_results.json").read_text())["results"]
+    except (OSError, ValueError, KeyError):
+        return False
+    return not any(
+        r["unique_id"].startswith("model.") and r["status"] != "success" for r in results
+    )
+
+
 def run_dbt_build(settings: Settings) -> None:
-    log.info("dbt build starting")
-    result = _dbt(["build"], timeout=3600)
+    version = analysis_code_version()
+    full = refreshed_version(settings) != version
+    log.info("dbt build starting%s", " (full refresh: analysis code changed)" if full else "")
+    result = _dbt(["build", "--full-refresh"] if full else ["build"], timeout=3600 * 3)
     tail = "\n".join(result.stdout.splitlines()[-15:])
     if result.returncode == 0:
         log.info("dbt build finished\n%s", tail)
@@ -48,6 +94,13 @@ def run_dbt_build(settings: Settings) -> None:
         log.error(
             "dbt build FAILED (exit %s)\n%s\n%s", result.returncode, tail, result.stderr[-2000:]
         )
+    if full and models_built_ok():
+        with psycopg.connect(settings.database_url) as conn:
+            conn.execute("delete from analytics.build_code")
+            conn.execute(
+                "insert into analytics.build_code (version, refreshed_at) values (%s, now())",
+                (version,),
+            )
 
 
 def run_source_freshness(settings: Settings) -> None:

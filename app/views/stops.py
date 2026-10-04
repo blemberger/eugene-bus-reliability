@@ -1,4 +1,5 @@
-"""Stops: how reliable is my stop, and how early should I get there?"""
+"""Stops: how late buses run at all stops together, how reliable is my stop, and how early
+should I get there?"""
 
 from __future__ import annotations
 
@@ -11,6 +12,7 @@ from common import (
     EARLY_HELP,
     JUST_LEFT_MINUTES,
     LATE_HELP,
+    LATENESS_CHART_NOTE,
     LIVE_CHECK_SECONDS,
     STOP_ROWS_PER_ROUTE,
     TYPICAL_HELP,
@@ -34,9 +36,13 @@ from common import (
     hour_label,
     hour_time,
     late_minutes,
+    lateness,
+    lateness_chart,
     live_status_line,
+    marts_ready,
     page_filters,
     q,
+    recomputing_note,
     require_db,
     require_marts,
     route_colors,
@@ -73,54 +79,53 @@ def lateness_color(minutes: float) -> list[int]:
     return [150, 150, 150, 200]
 
 
-def all_stops_view() -> None:
-    """Before a stop is chosen: every stop at once. Summary numbers, a map of every stop
-    coloured by its typical lateness (click one to open it), and the stops where buses are
-    most often 5+ minutes late or early."""
-    st.markdown("#### Every stop at a glance")
+def all_stops_summary() -> tuple:
+    """Before a stop is chosen, at the top: how late buses run by hour at all stops together,
+    and the headline numbers. Returns the filters and the per-stop rows for the rest."""
+    st.markdown("#### When are buses late? All stops together")
     start, wt = page_filters()
-    wt_clause, wt_params = day_sql(wt, "e.service_date", "e.weekday_type")
-    period = f"{day_label(wt)} since {fmt_date(start)}"
-    tot = q(
-        f"""
-        select count(*) as n, count(distinct e.stop_id) as stops,
-               percentile_cont(0.5) within group (order by e.delay_s) as median_delay,
-               count(*) filter (where e.status = 'early') as early,
-               count(*) filter (where e.status = 'late') as late
-        from marts.fct_stop_events e
-        where e.status is not null and e.service_date >= %s {wt_clause}
-        """,
-        (start, *wt_params),
-    ).iloc[0]
-    n = int(tot["n"] or 0)
-    if not n:
-        st.info("No scored arrivals in the selected period yet.")
-        return
+    tot = lateness("all_stops", start, wt, "overall")
+    if tot.empty:
+        if marts_ready() and lateness("all_stops", start, None, "overall").empty:
+            recomputing_note()
+        else:
+            st.info("No scored arrivals in the selected period yet.")
+        return start, wt, pd.DataFrame()
+    fig = lateness_chart(lateness("all_stops", start, wt, "hour"), "all stops")
+    if fig is not None:
+        st.plotly_chart(fit_phone(fig), width="stretch")
+        st.caption(
+            LATENESS_CHART_NOTE + f" Every stop, {day_label(wt)}. Choose a stop below to see "
+            "its own, route by route."
+        )
+    t = tot.iloc[0]
+    n = int(t["n"])
+    per = lateness("all_stops", start, wt, "stop")
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Typical bus, all stops", fmt_delay(tot["median_delay"]), help=TYPICAL_HELP)
-    c2.metric("Early (1+ min)", fmt_pct(int(tot["early"]), n), help=EARLY_HELP)
-    c3.metric("5+ min late", fmt_pct(int(tot["late"]), n), help=LATE_HELP)
-    c4.metric("Stops measured", f"{int(tot['stops']):,}", f"{n:,} arrivals", delta_color="off")
+    c1.metric("Typical bus, all stops", fmt_delay(t["median_delay_s"]), help=TYPICAL_HELP)
+    c2.metric("Early (1+ min)", fmt_pct(int(t["n_early"]), n), help=EARLY_HELP)
+    c3.metric("5+ min late", fmt_pct(int(t["n_late"]), n), help=LATE_HELP)
+    c4.metric("Stops measured", f"{len(per):,}", f"{n:,} arrivals", delta_color="off")
+    return start, wt, per
 
-    per = q(
-        f"""
-        select e.stop_id, s.stop_name, s.stop_code, s.stop_lat as lat, s.stop_lon as lon,
-               count(*) as n,
-               percentile_cont(0.5) within group (order by e.delay_s) as median_delay,
-               count(*) filter (where e.status = 'early') as early,
-               count(*) filter (where e.status = 'late') as late,
-               string_agg(distinct e.route_short_name, ', ') as routes
-        from marts.fct_stop_events e
-        join gtfs.stops s on s.stop_id = e.stop_id and s.feed_version_id = {FV}
-        where e.status is not null and e.service_date >= %s {wt_clause}
-        group by 1, 2, 3, 4, 5
-        """,
-        (start, *wt_params),
-    )
-    per["typical"] = per["median_delay"].astype(float) / 60
-    per["early_pct"] = 100 * per["early"] / per["n"]
-    per["late_pct"] = 100 * per["late"] / per["n"]
 
+def all_stops_details(start, wt, per: pd.DataFrame) -> None:
+    """Before a stop is chosen, below the pickers: a map of every stop coloured by its typical
+    lateness (click one to open it), and the stops where buses are most often 5+ minutes late
+    or early."""
+    if per.empty:
+        return
+    period = f"{day_label(wt).capitalize()} since {fmt_date(start)}"
+    names = q(f"""
+        select stop_id, stop_name, stop_code, stop_lat as lat, stop_lon as lon
+        from gtfs.stops where feed_version_id = {FV}
+    """)
+    per = per.merge(names, on="stop_id", how="inner").rename(columns={"routes_here": "routes"})
+    per["typical"] = per["median_delay_s"] / 60
+    per["early_pct"] = 100 * per["n_early"] / per["n"]
+    per["late_pct"] = 100 * per["n_late"] / per["n"]
+
+    st.markdown("#### Every stop on a map")
     shown = per[per["n"] >= 20].copy()
     shown["color"] = shown["typical"].map(lateness_color)
     shown["typical_txt"] = shown["typical"].map(lambda m: f"{m:+.1f} min")
@@ -204,8 +209,6 @@ def all_stops_view() -> None:
     st.markdown("**Where buses most often come early** (when you could miss them)")
     stop_table(worst.sort_values(["early_pct", "n"], ascending=False).head(10))
     st.caption(f"{period}; stops with at least 30 arrivals. Click a stop's name to open it.")
-    st.divider()
-    data_note(start)
 
 
 def stop_button_grid(df: pd.DataFrame, key_prefix: str, show_code: bool = False) -> None:
@@ -215,11 +218,80 @@ def stop_button_grid(df: pd.DataFrame, key_prefix: str, show_code: bool = False)
         st.rerun()  # redraw with the stop pickers folded away
 
 
-# a stop chosen earlier (or arriving in the link) keeps the stop pickers folded away, so the
-# stop itself is at the top of the screen; a typed search still shows its matches in full
+def stop_pickers(with_map: bool) -> None:
+    """Busy-stop buttons, a list of every stop and (once a stop is chosen) a plain stop map;
+    before a stop is chosen, the coloured all-stops map further down does the map's job."""
+    busiest = busy_stops(9)
+    st.caption("Start with a busy stop:")
+    stop_button_grid(busiest, "busy")
+    all_stops = q(f"""
+        select stop_id, stop_code, stop_name from gtfs.stops
+        where feed_version_id = {FV} and location_type = 0 order by stop_name
+    """)
+    all_stops["label"] = all_stops["stop_name"] + all_stops["stop_code"].map(
+        lambda c: f"  ·  #{c}" if c else ""
+    )
+    label_to_id = dict(zip(all_stops["label"], all_stops["stop_id"], strict=False))
+
+    def _picked_from_list() -> None:
+        choice = st.session_state.get("stop_pick_list")
+        if choice in label_to_id:
+            st.session_state["stop_id"] = label_to_id[choice]
+
+    st.selectbox(
+        "Or pick any stop",
+        ["—"] + all_stops["label"].tolist(),
+        index=0,
+        key="stop_pick_list",
+        on_change=_picked_from_list,
+    )
+    if not with_map:
+        return
+    st.caption("Or pick a stop on the map:")
+    pts = q(f"""
+        select stop_id, stop_code, stop_name, stop_lat as lat, stop_lon as lon from gtfs.stops
+        where feed_version_id = {FV} and location_type = 0
+    """)
+    pts["code"] = pts["stop_code"].map(lambda c: f"#{c}" if c else "")
+    picked_map = st.pydeck_chart(
+        pdk.Deck(
+            layers=[
+                pdk.Layer(
+                    "ScatterplotLayer",
+                    id="stops",
+                    data=pts,
+                    get_position="[lon, lat]",
+                    get_fill_color=[11, 110, 79, 200],
+                    get_line_color=[255, 255, 255],
+                    stroked=True,
+                    line_width_min_pixels=1,
+                    get_radius=12,
+                    radius_min_pixels=4,
+                    radius_max_pixels=9,
+                    pickable=True,
+                )
+            ],
+            initial_view_state=pdk.ViewState(latitude=44.05, longitude=-123.09, zoom=12),
+            map_style=None,
+            tooltip={"html": "<b>{stop_name}</b> {code}<br/>click to open this stop"},
+        ),
+        height=420,
+        on_select="rerun",
+        selection_mode="single-object",
+        key="stop_pick_map",
+    )
+    objs = (picked_map.selection.objects or {}).get("stops") if picked_map is not None else None
+    clicked = objs[0]["stop_id"] if objs else None
+    # only a new click counts, so it doesn't override later picks made another way
+    if clicked and clicked != st.session_state.get("stop_pick_map_last"):
+        st.session_state["stop_pick_map_last"] = clicked
+        st.session_state["stop_id"] = clicked
+        st.rerun()
+
+
+# a stop arriving in the link opens straight away
 if "stop" in st.query_params and not st.session_state.get("stop_id"):
     st.session_state["stop_id"] = st.query_params["stop"]
-chosen = bool(st.session_state.get("stop_id"))
 
 # ---- choose a stop ----------------------------------------------------------------
 example = q(f"""
@@ -241,83 +313,21 @@ if query:
     else:
         st.caption("Pick one:")
         stop_button_grid(matches, "stop", show_code=True)
-else:
-    with st.expander("Choose a different stop") if chosen else st.container():
-        busiest = busy_stops(9)
-        st.caption("Or start with a busy stop:")
-        stop_button_grid(busiest, "busy")
-        all_stops = q(f"""
-            select stop_id, stop_code, stop_name from gtfs.stops
-            where feed_version_id = {FV} and location_type = 0 order by stop_name
-        """)
-        all_stops["label"] = all_stops["stop_name"] + all_stops["stop_code"].map(
-            lambda c: f"  ·  #{c}" if c else ""
-        )
-        label_to_id = dict(zip(all_stops["label"], all_stops["stop_id"], strict=False))
-
-        def _picked_from_list() -> None:
-            choice = st.session_state.get("stop_pick_list")
-            if choice in label_to_id:
-                st.session_state["stop_id"] = label_to_id[choice]
-
-        st.selectbox(
-            "Or pick any stop",
-            ["—"] + all_stops["label"].tolist(),
-            index=0,
-            key="stop_pick_list",
-            on_change=_picked_from_list,
-        )
-        # before a stop is chosen, the all-stops map further down does this job
-        if chosen:
-            st.caption("Or pick a stop on the map:")
-            pts = q(f"""
-                select stop_id, stop_code, stop_name, stop_lat as lat, stop_lon as lon from gtfs.stops
-                where feed_version_id = {FV} and location_type = 0
-            """)
-            pts["code"] = pts["stop_code"].map(lambda c: f"#{c}" if c else "")
-            picked_map = st.pydeck_chart(
-                pdk.Deck(
-                    layers=[
-                        pdk.Layer(
-                            "ScatterplotLayer",
-                            id="stops",
-                            data=pts,
-                            get_position="[lon, lat]",
-                            get_fill_color=[11, 110, 79, 200],
-                            get_line_color=[255, 255, 255],
-                            stroked=True,
-                            line_width_min_pixels=1,
-                            get_radius=12,
-                            radius_min_pixels=4,
-                            radius_max_pixels=9,
-                            pickable=True,
-                        )
-                    ],
-                    initial_view_state=pdk.ViewState(latitude=44.05, longitude=-123.09, zoom=12),
-                    map_style=None,
-                    tooltip={"html": "<b>{stop_name}</b> {code}<br/>click to open this stop"},
-                ),
-                height=420,
-                on_select="rerun",
-                selection_mode="single-object",
-                key="stop_pick_map",
-            )
-            objs = (
-                (picked_map.selection.objects or {}).get("stops")
-                if picked_map is not None
-                else None
-            )
-            clicked = objs[0]["stop_id"] if objs else None
-            # only a new click counts, so it doesn't override later picks made another way
-            if clicked and clicked != st.session_state.get("stop_pick_map_last"):
-                st.session_state["stop_pick_map_last"] = clicked
-                st.session_state["stop_id"] = clicked
-                st.rerun()
 
 stop_id = st.session_state.get("stop_id")
 if not stop_id:
-    all_stops_view()
+    # no stop yet: all stops together first, then ways to pick one, then the map and lists
+    start, wt, per = all_stops_summary()
+    if not query:
+        st.markdown("#### Find your stop")
+        stop_pickers(with_map=False)
+    all_stops_details(start, wt, per)
+    st.divider()
+    data_note(start)
     st.stop()
+if not query:
+    with st.expander("Choose a different stop"):
+        stop_pickers(with_map=True)
 st.query_params["stop"] = stop_id
 stop = q(
     f"select stop_id, stop_code, stop_name, stop_lat, stop_lon from gtfs.stops where stop_id = %s and feed_version_id = {FV}",
@@ -662,48 +672,64 @@ stop_right_now()
 st.markdown("**Is it getting better?**")
 trend = q(
     """
-    select date_trunc('week', service_date)::date as week, sum(n_events) as n, sum(n_on_time) as on_time
-    from marts.mart_stop_route_daily where stop_id = %s group by 1 order by 1
+    select date_trunc('week', service_date)::date as week, count(*) as n,
+           count(*) filter (where status = 'early') as early,
+           count(*) filter (where status = 'late') as late,
+           percentile_cont(0.5) within group (order by delay_s) as median_delay
+    from marts.fct_stop_events
+    where stop_id = %s and status is not null group by 1 order by 1
     """,
     (stop_id,),
 )
 if len(trend) >= 2:
-    trend["On time"] = trend["on_time"] / trend["n"]
+    trend["Typical bus"] = trend["median_delay"].astype(float) / 60
     trend["Week of"] = trend["week"].map(fmt_date)
+    trend["Early (1+ min)"] = trend["early"] / trend["n"]
+    trend["5+ min late"] = trend["late"] / trend["n"]
     trend["Arrivals"] = trend["n"].astype(int)
     fig = px.line(
         trend,
         x="Week of",
-        y="On time",
+        y="Typical bus",
         markers=True,
-        hover_data={"Arrivals": True, "On time": ":.0%"},
+        hover_data={
+            "Typical bus": ":+.1f",
+            "Early (1+ min)": ":.0%",
+            "5+ min late": ":.0%",
+            "Arrivals": True,
+        },
     )
-    fig.update_layout(yaxis_tickformat=".0%", xaxis_title="")
+    fig.add_hline(y=0, line_width=1, line_color="#999", line_dash="dot")
+    fig.update_layout(
+        xaxis_title="", yaxis_title="typical bus, minutes late", yaxis_tickformat="+.1f"
+    )
     st.plotly_chart(fit_phone(fig), width="stretch")
+    st.caption("The typical bus here each week, all routes and days; below zero = early.")
 else:
     st.caption("A trend needs at least two weeks of data.")
 
 # ---- nearby stops ---------------------------------------------------------------
-st.markdown("**Nearby stops that do better**")
+st.markdown("**Nearby stops where the same route keeps better time**")
 near = q(
     f"""
     with here as (select geom from gtfs.stops where stop_id = %s and feed_version_id = {FV}),
     mine as (
-        select route_id, sum(n_on_time)::float / nullif(sum(n_events), 0) as on_time
+        select route_id, sum(n_early + n_late)::float / nullif(sum(n_events), 0) as off
         from marts.mart_stop_route_daily where stop_id = %s and service_date >= %s group by 1
     )
     select s.stop_id, s.stop_name, s.stop_code, round(ST_Distance(s.geom, here.geom)) as metres,
            m.route_short_name as route,
-           sum(m.n_on_time)::float / nullif(sum(m.n_events), 0) as on_time, mine.on_time as on_time_here
+           sum(m.n_early + m.n_late)::float / nullif(sum(m.n_events), 0) as off, mine.off as off_here
     from gtfs.stops s
     cross join here
     join marts.mart_stop_route_daily m on m.stop_id = s.stop_id
     join mine on mine.route_id = m.route_id
     where s.feed_version_id = {FV} and s.stop_id <> %s and ST_DWithin(s.geom, here.geom, 500)
       and m.service_date >= %s
-    group by 1, 2, 3, 4, 5, mine.on_time
-    having sum(m.n_events) >= 20 and sum(m.n_on_time)::float / sum(m.n_events) > mine.on_time + 0.05
-    order by on_time desc limit 8
+    group by 1, 2, 3, 4, 5, mine.off
+    having sum(m.n_events) >= 20
+       and sum(m.n_early + m.n_late)::float / sum(m.n_events) < mine.off - 0.05
+    order by off limit 8
     """,
     (stop_id, stop_id, start, stop_id, start),
 )
@@ -721,8 +747,8 @@ else:
                 ],
                 "Distance": near["metres"].astype(float),
                 "Route": near["route"],
-                "On time there": 100 * near["on_time"].astype(float),
-                "On time here": 100 * near["on_time_here"].astype(float),
+                "There": 100 * near["off"].astype(float),
+                "Here": 100 * near["off_here"].astype(float),
             }
         ),
         hide_index=True,
@@ -730,9 +756,13 @@ else:
         column_config={
             "Stop": col_stop("Stop"),
             "Distance": col_minutes("Distance", fmt="%.0f m"),
-            "On time there": col_pct("On time there", bar=True),
-            "On time here": col_pct("On time here", bar=True),
+            "There": col_pct("Early or 5+ late there", bar=True),
+            "Here": col_pct("Early or 5+ late here", bar=True),
         },
+    )
+    st.caption(
+        "Stops within 500 m where the same route's buses were at least 5 points less often early "
+        f"(1+ min) or 5+ min late than here, all days since {fmt_date(start)}."
     )
 
 with st.expander("Details"):

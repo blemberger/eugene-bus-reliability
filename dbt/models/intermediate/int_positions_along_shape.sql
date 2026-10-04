@@ -4,9 +4,7 @@
 -- bus had got to, within the distance it could have travelled since its previous report. On
 -- routes that use the same street twice (out and back, or a loop), the nearest point on the
 -- whole shape could be the other pass, which would mark stops in between as passed too early.
--- The expensive step, so it is built incrementally: each build recomputes only the latest two
--- service days and keeps the rest (positions don't change after the fact). The first build,
--- or `dbt build --full-refresh`, computes the whole lookback window.
+-- Built incrementally (macros/incremental.sql): each build recomputes the latest two service days.
 
 {{ config(
     materialized='incremental',
@@ -23,7 +21,7 @@ with trip_shape as (
     from {{ ref('int_feed_version_by_date') }} fv
     join {{ ref('stg_gtfs__trips') }} t on t.feed_version_id = fv.feed_version_id
     join {{ ref('int_shape_lines') }} l on l.shape_id = t.shape_id and l.feed_version_id = t.feed_version_id
-    where fv.service_date between current_date - {{ var('lookback_days') }} and current_date
+    where {{ recent_days('fv.service_date') }} and fv.service_date <= current_date
 ),
 
 per_trip as (
@@ -34,11 +32,7 @@ per_trip as (
         array_agg(ST_Transform(geom::geometry, 32610) order by position_timestamp, vehicle_id) as pts
     from {{ ref('stg_rt__vehicle_positions') }}
     where trip_id is not null and service_date is not null
-    {% if is_incremental() %}
-      and service_date >= (select coalesce(max(service_date), date '2000-01-01') - 1 from {{ this }})
-    {% else %}
-      and service_date >= current_date - {{ var('lookback_days') }}
-    {% endif %}
+      and {{ recent_days() }}
     group by 1, 2
 )
 

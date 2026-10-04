@@ -3,7 +3,12 @@
 -- was first asserted). error_s: observed − predicted; positive = bus came later
 -- than the sign said. Only stops with a bounded, plausible, precise observed arrival are scored.
 
+-- Built incrementally (macros/incremental.sql): each build recomputes the latest two service days.
+
 {{ config(
+    materialized='incremental',
+    incremental_strategy='delete+insert',
+    unique_key='service_date',
     indexes=[
         {'columns': ['service_date']},
         {'columns': ['route_id', 'horizon_min']},
@@ -15,7 +20,7 @@ with preds as (
            predicted_delay as arrival_delay
     from {{ ref('stg_rt__predictions') }}
     where predicted_time is not null
-      and service_date >= current_date - {{ var('lookback_days') }}
+      and {{ recent_days() }}
 ),
 
 obs as (
@@ -23,6 +28,7 @@ obs as (
            scheduled_arrival, observed_arrival, uncertainty_s, is_timepoint
     from {{ ref('int_observed_arrivals') }}
     where is_bounded and is_plausible and uncertainty_s <= {{ var('max_uncertainty_seconds') }}
+      and {{ recent_days() }}
 )
 
 select

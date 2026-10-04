@@ -1,5 +1,9 @@
 -- Reliability at each stop, per route serving it, per service date (all stops, not
 -- just timepoints: riders wait at every stop).
+-- Built incrementally (macros/incremental.sql): each build recomputes the latest two service days.
+
+{{ config(materialized='incremental', incremental_strategy='delete+insert', unique_key='service_date') }}
+
 
 select
     stop_id, route_id, route_short_name, direction_id, service_date, weekday_type,
@@ -11,5 +15,5 @@ select
     percentile_cont(0.05) within group (order by delay_s) as p05_delay_s,
     percentile_cont(0.95) within group (order by delay_s) as p95_delay_s
 from {{ ref('fct_stop_events') }}
-where status is not null
+where status is not null and {{ recent_days() }}
 group by 1, 2, 3, 4, 5, 6

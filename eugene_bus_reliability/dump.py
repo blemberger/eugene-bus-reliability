@@ -355,8 +355,46 @@ def main(settings: Settings, raw: bool = False) -> None:
             cur,
             """
             select started_at, finished_at, round(extract(epoch from finished_at - started_at)) seconds,
-                   n_errors errors, n_warnings warnings
-            from analytics.build_log order by started_at desc limit 3
+                   n_errors errors, n_warnings warnings, full_refresh
+            from analytics.build_log order by started_at desc limit 4
+        """,
+        )
+        print("Share of the last 24 h the database spent on builds, and the typical build:")
+        show(
+            cur,
+            """
+            select count(*) builds,
+                   round(100 * sum(extract(epoch from finished_at - started_at)) / 86400) pct_of_day_building,
+                   round(percentile_cont(0.5) within group (order by extract(epoch from finished_at - started_at))) median_s,
+                   round(max(extract(epoch from finished_at - started_at))) max_s
+            from analytics.build_log
+            where started_at > now() - interval '24 hours' and finished_at is not null
+              and not coalesce(full_refresh, false)
+        """,
+        )
+        print("Slowest steps of the latest build (models and tests):")
+        show(
+            cur,
+            """
+            select node, kind, round(seconds::numeric, 1) seconds, status
+            from analytics.build_step_log
+            where invocation_id = (select invocation_id from analytics.build_log
+                                   where finished_at is not null order by started_at desc limit 1)
+            order by seconds desc limit 12
+        """,
+        )
+        print(
+            "Anything other than a build that the database has been running for over 1 minute (normally empty):"
+        )
+        show(
+            cur,
+            """
+            select pid, usename login, date_trunc('second', now() - xact_start) running_for, state,
+                   left(regexp_replace(query, '\\s+', ' ', 'g'), 80) query
+            from pg_stat_activity
+            where pid <> pg_backend_pid() and xact_start < now() - interval '1 minute'
+              and query not ilike '%%dbt%%' and backend_type = 'client backend'
+            order by xact_start
         """,
         )
         show(

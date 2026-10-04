@@ -1,4 +1,4 @@
-"""One route's report card: on-time by hour, delay along the line, headways, comparison.
+"""One route's report card: lateness by hour, delay along the line, headways, comparison.
 
 Reached from the Routes table or directly at /route?route=<route_id> (bookmarkable).
 """
@@ -6,13 +6,12 @@ Reached from the Routes table or directly at /route?route=<route_id> (bookmarkab
 from __future__ import annotations
 
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 from common import (
     EARLY_HELP,
     LATE_HELP,
-    STATUS_COLOR,
+    LATENESS_CHART_NOTE,
     TYPICAL_HELP,
     col_count,
     col_hour,
@@ -29,8 +28,11 @@ from common import (
     fmt_pct,
     hour_label,
     hour_time,
+    lateness,
+    lateness_chart,
     page_filters,
     q,
+    recomputing_note,
     require_db,
     require_marts,
     route_rank,
@@ -48,7 +50,10 @@ FV = str(current_fv())  # schedule version in force today
 wt_clause, wt_params = day_sql(wt)
 rank = route_rank(start, wt)
 if rank.empty:
-    st.info("No scored arrivals in the selected period yet.")
+    if lateness("timepoints", start, None, "overall").empty:
+        recomputing_note()
+    else:
+        st.info("No scored arrivals in the selected period yet.")
     st.stop()
 names = q(
     f"select route_id, route_short_name, route_long_name from gtfs.routes where feed_version_id = {FV}"
@@ -143,47 +148,40 @@ if dir_labels:
 dir_clause = "and direction_id = %s" if direction is not None else ""
 dir_params: tuple = (direction,) if direction is not None else ()
 
-# by hour
+# ---- by hour: this route against all routes ------------------------------------------------
+wt_e = day_sql(wt, "e.service_date", "e.weekday_type")[0]
 hourly = q(
     f"""
-    select hour_local, sum(n_events) as n, sum(n_on_time) as on_time, sum(n_early) as early, sum(n_late) as late
-    from marts.mart_route_daily where route_id = %s and service_date >= %s {wt_clause} {dir_clause}
+    select e.hour_local, count(*) as n,
+           count(*) filter (where e.status = 'early') as n_early,
+           count(*) filter (where e.status = 'late') as n_late,
+           percentile_cont(0.5) within group (order by e.delay_s) as median_delay_s,
+           percentile_cont(0.1) within group (order by e.delay_s) as p10_delay_s,
+           percentile_cont(0.9) within group (order by e.delay_s) as p90_delay_s,
+           count(distinct e.service_date) as n_days
+    from marts.fct_stop_events e
+    where e.route_id = %s and e.service_date >= %s and e.status is not null and e.is_timepoint
+      {wt_e} {dir_clause.replace("direction_id", "e.direction_id")}
     group by 1 order by 1
     """,
     (route_id, start, *wt_params, *dir_params),
 )
-if not hourly.empty:
-    hourly["Hour"] = hourly["hour_local"].map(hour_label)
-    long = hourly.melt(
-        id_vars=["Hour", "hour_local"],
-        value_vars=["early", "on_time", "late"],
-        var_name="status",
-        value_name="count",
-    )
-    long["share"] = long["count"] / long.groupby("hour_local")["count"].transform("sum")
-    long["status"] = long["status"].map(
-        {"early": "Early (1+ min)", "on_time": "On time", "late": "5+ min late"}
-    )
-    long["Arrivals"] = long["count"].astype(int)
-    fig = px.bar(
-        long,
-        x="Hour",
-        y="share",
-        hover_data={"Arrivals": True, "share": ":.0%"},
-        color="status",
-        barmode="stack",
-        color_discrete_map={
-            "Early (1+ min)": STATUS_COLOR["early"],
-            "On time": STATUS_COLOR["on_time"],
-            "5+ min late": STATUS_COLOR["late"],
-        },
-        category_orders={"Hour": list(hourly["Hour"])},
-    )
-    fig.update_layout(yaxis_tickformat=".0%", yaxis_title="", xaxis_title="", legend_title="")
+for c in ("median_delay_s", "p10_delay_s", "p90_delay_s"):
+    hourly[c] = hourly[c].astype(float)
+st.markdown(f"**When is route {route_name} late?**")
+fig = lateness_chart(
+    hourly,
+    f"route {route_name}",
+    reference=lateness("timepoints", start, wt, "hour"),
+    min_n=5,
+)
+if fig is None:
+    st.caption("Not enough arrivals yet for an hour-by-hour view (needs 5 in an hour).")
+else:
     st.plotly_chart(fit_phone(fig), width="stretch")
     st.caption(
-        f"Route {route_name}: share of timepoint arrivals by hour that came more than 1 min early, "
-        "on time (between those), or more than 5 min late."
+        LATENESS_CHART_NOTE + f" Timepoint arrivals, {day_label(wt)}, in the direction chosen "
+        "above; the dashed grey line is the typical bus on all routes together."
     )
 
 # delay along the route

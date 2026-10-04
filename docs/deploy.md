@@ -71,7 +71,9 @@ make deploy
 It checks that the laptop matches GitHub, then on the server: pulls the code, applies any
 new migrations, rebuilds and restarts what changed, and reloads Caddy. The database and
 the raw archive are untouched. Model changes take effect at the next 15-minute build, or
-immediately with `make server-dbt-build` run on the server.
+immediately with `make server-dbt-build` run on the server. When the analysis code changed,
+that build recomputes every day (a full refresh, 10-20 minutes); other builds recompute only
+the last two days.
 
 ## 5. Checking on it
 
@@ -84,6 +86,10 @@ immediately with `make server-dbt-build` run on the server.
   computer, and a random id per browser tab; no IP addresses or cookies.
 - **Site:** the Status page shows what came in during the last few minutes and when the
   analysis last ran.
+- **Server:** `make server-db-busy` lists anything the database has been running for more
+  than 5 seconds. Closing a terminal (or Ctrl+C on `ssh`) does not stop a query already
+  running on the server; this shows it, and its `pid` stops it with
+  `select pg_terminate_backend(<pid>)`.
 
 ## 6. Backups
 

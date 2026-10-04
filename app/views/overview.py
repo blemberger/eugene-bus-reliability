@@ -4,13 +4,12 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-import plotly.express as px
 import streamlit as st
 from common import (
     EARLY_HELP,
     LATE_HELP,
+    LATENESS_CHART_NOTE,
     LIVE_CHECK_SECONDS,
-    STATUS_COLOR,
     TYPICAL_HELP,
     col_pct,
     col_route,
@@ -22,13 +21,15 @@ from common import (
     fmt_date,
     fmt_delay,
     fmt_pct,
-    hour_label,
+    lateness,
+    lateness_chart,
     live_marker,
     live_status_line,
     local_today,
     marts_ready,
     q,
     q_fresh,
+    recomputing_note,
     require_db,
     route_colors,
     route_link,
@@ -62,37 +63,31 @@ start = collection_start()
 week_ago = local_today() - timedelta(days=7)
 
 if marts_ready():
-    kpi = q(
-        """
-        select count(*) as n, count(*) filter (where status = 'on_time') as on_time,
-               count(*) filter (where status = 'early') as early,
-               count(*) filter (where status = 'late') as late,
-               percentile_cont(0.5) within group (order by delay_s) as median_delay
-        from marts.fct_stop_events
-        where status is not null and is_timepoint and service_date >= %s
-        """,
-        (week_ago,),
-    )
+    kpi = lateness("timepoints", week_ago, None, "overall")
     cal = q("""
         select n_predictions, n_within_1min from marts.mart_calibration
         where route_id is null and horizon_min = 5
     """)
-    n = int(kpi["n"][0] or 0)
+    n = int(kpi["n"].iloc[0]) if len(kpi) else 0
     c1, c2, c3b, c3, c4 = st.columns(5)
     c1.metric(
         "Typical bus, last 7 days",
-        fmt_delay(kpi["median_delay"][0]) if n else "—",
+        fmt_delay(kpi["median_delay_s"].iloc[0]) if n else "—",
         help=TYPICAL_HELP + " Timepoints, last 7 days.",
     )
-    c2.metric("Early (1+ min)", fmt_pct(int(kpi["early"][0] or 0), n), help=EARLY_HELP)
-    c3b.metric("5+ min late", fmt_pct(int(kpi["late"][0] or 0), n), help=LATE_HELP)
+    c2.metric(
+        "Early (1+ min)", fmt_pct(int(kpi["n_early"].iloc[0]) if n else 0, n), help=EARLY_HELP
+    )
+    c3b.metric("5+ min late", fmt_pct(int(kpi["n_late"].iloc[0]) if n else 0, n), help=LATE_HELP)
     c3.metric(
         "Sign accurate 5 min out",
         fmt_pct(int(cal["n_within_1min"][0]), int(cal["n_predictions"][0])) if len(cal) else "—",
         help="Share of 'arriving in 5 minutes' predictions that were right to within one minute.",
     )
     c4.metric("Buses reporting now", buses_now, fmt_ago(last_fetch), delta_color="off")
-    if n == 0:
+    if n == 0 and kpi.empty and marts_ready():
+        recomputing_note()
+    elif n == 0:
         st.info(
             "No arrivals have been scored yet. They appear once the analysis has run on a few hours of collected bus positions; it refreshes every 15 minutes."
         )
@@ -104,71 +99,28 @@ else:
         "Reliability numbers appear once the analysis has run on a few hours of collected bus positions. Live data is on the Live map page."
     )
 
-# ---- on-time by hour ------------------------------------------------------------
+# ---- lateness by hour ------------------------------------------------------------
 if marts_ready():
     st.subheader("When are buses least reliable?")
-    by_hour = q(
-        """
-        select hour_local, sum(n_events) as n, sum(n_on_time) as on_time, sum(n_early) as early, sum(n_late) as late
-        from marts.mart_route_daily where service_date >= %s group by 1 order by 1
-        """,
-        (week_ago,),
-    )
-    if not by_hour.empty:
-        by_hour["Hour"] = by_hour["hour_local"].map(hour_label)
-        long = by_hour.melt(
-            id_vars=["Hour", "hour_local"],
-            value_vars=["early", "on_time", "late"],
-            var_name="status",
-            value_name="count",
-        )
-        long["share"] = long["count"] / long.groupby("hour_local")["count"].transform("sum")
-        long["status"] = long["status"].map(
-            {"early": "Early (1+ min)", "on_time": "On time", "late": "5+ min late"}
-        )
-        long["Arrivals"] = long["count"].astype(int)
-        fig = px.bar(
-            long,
-            x="Hour",
-            y="share",
-            hover_data={"Arrivals": True, "share": ":.0%"},
-            color="status",
-            barmode="stack",
-            color_discrete_map={
-                "Early (1+ min)": STATUS_COLOR["early"],
-                "On time": STATUS_COLOR["on_time"],
-                "5+ min late": STATUS_COLOR["late"],
-            },
-            category_orders={"Hour": list(by_hour["Hour"])},
-        )
-        fig.update_layout(
-            yaxis_tickformat=".0%",
-            yaxis_title="share of timepoint arrivals",
-            xaxis_title="",
-            legend_title="",
-        )
+    fig = lateness_chart(lateness("timepoints", week_ago, None, "hour"), "all routes")
+    if fig is not None:
         st.plotly_chart(fit_phone(fig), width="stretch")
         st.caption(
-            "Share of timepoint arrivals by hour of day that came more than 1 min early, on time "
-            "(between those), or more than 5 min late, last 7 days."
+            LATENESS_CHART_NOTE + " Timepoint arrivals, all routes, last 7 days. "
+            "By route and by stop, with a choice of days: the Routes and Stops pages."
         )
 
     # ---- best / worst routes ----------------------------------------------------
-    routes = q(
-        """
-        select route_id, route_short_name as route, count(*) as n,
-               count(*) filter (where status = 'early') as early,
-               count(*) filter (where status = 'late') as late,
-               percentile_cont(0.5) within group (order by delay_s) as median_delay
-        from marts.fct_stop_events
-        where status is not null and is_timepoint and service_date >= %s
-        group by 1, 2 having count(*) >= 50
-        order by count(*) filter (where status <> 'on_time')::float / count(*)
-        """,
-        (week_ago,),
-    )
+    routes = lateness("timepoints", week_ago, None, "route")
     if not routes.empty:
-        routes["Typical bus"] = routes["median_delay"].astype(float) / 60
+        routes = routes[routes["n"] >= 50].rename(
+            columns={"route_short_name": "route", "n_early": "early", "n_late": "late"}
+        )
+        routes = routes.assign(off=(routes["early"] + routes["late"]) / routes["n"]).sort_values(
+            "off"
+        )
+    if not routes.empty:
+        routes["Typical bus"] = routes["median_delay_s"] / 60
         routes["Early"] = share_pct(routes["early"], routes["n"]).to_numpy()
         routes["Late"] = share_pct(routes["late"], routes["n"]).to_numpy()
         routes["Route"] = [

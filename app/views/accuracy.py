@@ -237,17 +237,19 @@ ahead = (
     or "5 min"
 )
 lo, hi = AHEAD_CHOICES[ahead]
-tod = q(
-    """
-    select hour_local, count(*) as n,
-           count(*) filter (where abs(error_s) <= 60) as within1,
-           count(*) filter (where abs(error_s) <= 120) as within2,
-           count(*) filter (where abs(error_s) <= 180) as within3
-    from marts.fct_prediction_errors
-    where horizon_min between %s and %s and (%s::text is null or route_id = %s)
+tod = (
+    q(
+        """
+    select hour_local, sum(n)::bigint as n, sum(n_within_1min)::bigint as within1,
+           sum(n_within_2min)::bigint as within2, sum(n_within_3min)::bigint as within3
+    from marts.mart_accuracy_by_hour
+    where horizon_min between %s and %s and route_id is not distinct from %s
     group by 1 order by 1
     """,
-    (lo, hi, route_id, route_id),
+        (lo, hi, route_id),
+    )
+    if q("select to_regclass('marts.mart_accuracy_by_hour') is not null as ok")["ok"][0]
+    else pd.DataFrame()
 )
 tod = tod[tod["n"] >= 20].copy() if not tod.empty else tod
 if tod.empty:

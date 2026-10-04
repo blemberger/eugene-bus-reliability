@@ -7,12 +7,16 @@ models:
       - dbt_utils.unique_combination_of_columns:
           arguments:
             combination_of_columns: [service_date, trip_id, stop_sequence]
+          config:
+            where: "service_date >= current_date - 3"
     columns:
       - name: status
         tests:
           - accepted_values:
               arguments:
                 values: ['early', 'on_time', 'late']
+              config:
+                where: "service_date >= current_date - 3"
       - name: delay_s
         # Scored events must lie inside the plausibility window by construction; anything
         # outside it is flagged is_plausible = false and counted in mart_daily_coverage.
@@ -22,7 +26,7 @@ models:
                 min_value: "{{ -var('plausible_early_seconds') }}"
                 max_value: "{{ var('plausible_late_seconds') }}"
               config:
-                where: "status is not null"
+                where: "status is not null and service_date >= current_date - 3"
       - name: uncertainty_s
         # Scored events are precise by construction; imprecise ones are counted in mart_daily_coverage.
         tests:
@@ -31,21 +35,29 @@ models:
                 min_value: 0
                 max_value: "{{ var('max_uncertainty_seconds') }}"
               config:
-                where: "status is not null"
+                where: "status is not null and service_date >= current_date - 3"
 
   - name: fct_prediction_errors
     description: Every prediction scored against the observed arrival.
     columns:
       - name: horizon_s
-        tests: [not_null]
+        tests:
+          - not_null:
+              config:
+                where: "service_date >= current_date - 3"
       - name: error_s
-        tests: [not_null]
+        tests:
+          - not_null:
+              config:
+                where: "service_date >= current_date - 3"
 
   - name: mart_route_daily
     tests:
       - dbt_utils.unique_combination_of_columns:
           arguments:
             combination_of_columns: [route_id, direction_id, service_date, hour_local]
+          config:
+            where: "service_date >= current_date - 3"
 
   - name: mart_stop_route_hourly
     tests:
@@ -68,6 +80,8 @@ models:
       - dbt_utils.unique_combination_of_columns:
           arguments:
             combination_of_columns: [service_date, route_id]
+          config:
+            where: "service_date >= current_date - 3"
 
   - name: mart_daily_coverage
     columns:
@@ -83,3 +97,19 @@ models:
           - accepted_values:
               arguments:
                 values: [1, 3, 6, 10, 15, 20, 30]
+
+  - name: mart_lateness
+    description: Typical lateness and early / 5+ min late shares for every combination of the pages' filters.
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [scope, period, days, route_id, stop_id, hour_local]
+    columns:
+      - name: n
+        tests: [not_null]
+
+  - name: mart_accuracy_by_hour
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [route_id, horizon_min, hour_local]

@@ -8,6 +8,10 @@
 -- prediction, not an observation. So the geometric method is the reference for
 -- every stop, and the feed is the cross-check at timepoints. Both sets of
 -- columns are kept here so that claim stays checkable as data accumulates.
+-- Built incrementally (macros/incremental.sql): each build recomputes the latest two service days.
+
+{{ config(materialized='incremental', incremental_strategy='delete+insert', unique_key='service_date') }}
+
 
 select
     service_date,
@@ -29,5 +33,5 @@ select
         filter (where is_timepoint)                                        as median_abs_diff_timepoints_s,
     count(*) filter (where abs(methods_diff_s) <= 60 and is_timepoint)     as n_within_1min_timepoints
 from {{ ref('fct_stop_events') }}
-where trip_had_realtime
+where trip_had_realtime and {{ recent_days() }}
 group by 1, 2, 3

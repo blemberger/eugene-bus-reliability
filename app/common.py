@@ -11,6 +11,7 @@ from datetime import time as dtime
 from urllib.parse import quote
 
 import pandas as pd
+import plotly.graph_objects as go
 import psycopg
 import streamlit as st
 
@@ -203,9 +204,8 @@ def search_stops(query: str, limit: int = 12) -> pd.DataFrame:
     )
 
 
-@st.cache_data(ttl=60)
-def q(sql: str, params: tuple = ()) -> pd.DataFrame:
-    """Run a read-only query and return a DataFrame. Cached for 60 s."""
+def _run(sql: str, params: tuple = ()) -> pd.DataFrame:
+    """Run one read-only query and return a DataFrame (no caching)."""
     with psycopg.connect(DATABASE_URL) as conn, conn.transaction(), conn.cursor() as cur:
         cur.execute("SET TRANSACTION READ ONLY")
         cur.execute(sql, params)
@@ -213,10 +213,42 @@ def q(sql: str, params: tuple = ()) -> pd.DataFrame:
         return readable_stop_names(pd.DataFrame(cur.fetchall(), columns=cols))
 
 
-@st.cache_data(ttl=10)
+@st.cache_data(ttl=30, show_spinner=False)
+def build_marker() -> str:
+    """When the latest analysis build finished. Everything the pages read from the analysis
+    (and the schedule) changes only then, so those queries are cached until the next build."""
+    try:
+        df = _run("select max(finished_at)::text as at from analytics.build_log")
+        return str(df["at"][0])
+    except psycopg.Error:
+        return ""
+
+
+_RAW_TABLES = re.compile(r"\brt\.")
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _q_raw(sql: str, params: tuple) -> pd.DataFrame:
+    return _run(sql, params)
+
+
+@st.cache_data(ttl=3600, show_spinner=False, max_entries=2000)
+def _q_built(sql: str, params: tuple, marker: str) -> pd.DataFrame:
+    return _run(sql, params)
+
+
+def q(sql: str, params: tuple = ()) -> pd.DataFrame:
+    """Run a read-only query and return a DataFrame. Queries on the raw realtime tables (rt.*)
+    are cached for 60 s; everything else until the next analysis build (at most an hour)."""
+    if _RAW_TABLES.search(sql):
+        return _q_raw(sql, params)
+    return _q_built(sql, params, build_marker())
+
+
+@st.cache_data(ttl=10, show_spinner=False)
 def q_live(sql: str, params: tuple = ()) -> pd.DataFrame:
     """Same as q() with a 10 s cache, for parts of the page that refresh themselves."""
-    return q.__wrapped__(sql, params)
+    return _run(sql, params)
 
 
 def run_explorer_query(sql: str, max_rows: int = EXPLORER_MAX_ROWS) -> tuple[pd.DataFrame, bool]:
@@ -240,10 +272,10 @@ POLL_SECONDS = 30
 LIVE_CHECK_SECONDS = 2
 
 
-@st.cache_data(ttl=1)
+@st.cache_data(ttl=1, show_spinner=False)
 def live_marker() -> dict:
     """Id and arrival time of the newest realtime message stored."""
-    row = q.__wrapped__(
+    row = _run(
         """
         with recent as (
             select fetch_id, fetched_at from rt.fetch
@@ -280,10 +312,10 @@ def data_now() -> pd.Timestamp:
     return pd.Timestamp(m["at"]).tz_convert("UTC")
 
 
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=600, show_spinner=False)
 def q_fresh(sql: str, params: tuple = (), marker: int | None = None) -> pd.DataFrame:
     """q() for live data, re-run only when `marker` (live_marker()['fid']) changes."""
-    return q.__wrapped__(sql, params)
+    return _run(sql, params)
 
 
 def _countdown_html() -> str:
@@ -399,7 +431,7 @@ def day_part(hour: int) -> str:
     )
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=300, show_spinner=False)
 def error_ranges() -> dict:
     """{(route_id|None, day_part|None, is_timepoint, band): (p10, p50, p90) seconds}."""
     if not marts_ready():
@@ -478,7 +510,7 @@ def hex_to_rgb(h: str) -> list[int]:
     return [int(h[i : i + 2], 16) for i in (0, 2, 4)]
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=300, show_spinner=False)
 def marts_ready() -> bool:
     df = q(
         "select count(*) as n from information_schema.tables where table_schema = 'marts' and table_name = 'fct_stop_events'"
@@ -486,7 +518,7 @@ def marts_ready() -> bool:
     return int(df["n"][0]) > 0
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=300, show_spinner=False)
 def current_fv() -> int:
     """feed_version_id of the schedule in force on today's service date (rolls over at 3 am)."""
     if marts_ready():
@@ -501,7 +533,7 @@ def current_fv() -> int:
     return int(df["fv"][0])
 
 
-@st.cache_data(ttl=15)
+@st.cache_data(ttl=15, show_spinner=False)
 def feed_status() -> dict:
     """Facts about LTD's live feed right now; see explain_feed()."""
     row = q(
@@ -999,38 +1031,180 @@ def clean_headsigns(
     )
 
 
-def route_rank(start: date, wt: str | None) -> pd.DataFrame:
-    """Every route's on-time record for a period: the report-card table on Routes and the
-    comparison on each route's page. True medians, from the stop events."""
-    clause, params = day_sql(wt)
-    return q(
-        f"""
-        with ev as (
-            select route_id, route_short_name, hour_local, status, delay_s
-            from marts.fct_stop_events
-            where status is not null and is_timepoint and service_date >= %s {clause}
-        ),
-        worst as (
-            select distinct on (route_id) route_id, hour_local as worst_hour
-            from (
-                select route_id, hour_local, count(*) as n,
-                       count(*) filter (where status = 'on_time') as on_time
-                from ev group by 1, 2
-            ) h
-            where n >= 10 order by route_id, on_time::float / n asc
-        )
-        select e.route_id, e.route_short_name, count(*) as n,
-               count(*) filter (where e.status = 'on_time') as on_time,
-               count(*) filter (where e.status = 'early') as early,
-               count(*) filter (where e.status = 'late') as late,
-               percentile_cont(0.5) within group (order by e.delay_s) as median_delay,
-               max(w.worst_hour) as worst_hour
-        from ev e left join worst w using (route_id)
-        group by 1, 2
-        order by count(*) filter (where e.status = 'on_time')::float / count(*) desc
-        """,
-        (start, *params),
+# ------------------------------------------------ precomputed lateness (mart_lateness) ----
+
+
+def period_key(start: date) -> str:
+    """page_filters()' period as mart_lateness names it."""
+    today = local_today()
+    if start == today - timedelta(days=7):
+        return "7d"
+    if start == today - timedelta(days=30):
+        return "30d"
+    return "all"
+
+
+def days_key(wt: str | None) -> str:
+    """page_filters()' day filter as mart_lateness names it: all, weekday, saturday, sunday, dowN."""
+    if not wt:
+        return "all"
+    return "dow" + wt[4:] if wt.startswith("dow:") else wt
+
+
+_LEVELS = {
+    "overall": "route_id is null and stop_id is null and hour_local is null",
+    "hour": "route_id is null and stop_id is null and hour_local is not null",
+    "route": "route_id is not null and hour_local is null",
+    "route_hour": "route_id is not null and hour_local is not null",
+    "stop": "stop_id is not null",
+}
+
+
+def lateness(scope: str, start: date, wt: str | None, level: str) -> pd.DataFrame:
+    """Rows of marts.mart_lateness for a page's filters. scope: 'timepoints' or 'all_stops';
+    level: overall, hour, route, route_hour (timepoints) or stop (all_stops). Empty while the
+    table is being created (the first analysis build after an update)."""
+    if not q("select to_regclass('marts.mart_lateness') is not null as ok")["ok"][0]:
+        return pd.DataFrame()
+    df = q(
+        f"select * from marts.mart_lateness where scope = %s and period = %s and days = %s "
+        f"and {_LEVELS[level]} order by route_id, stop_id, hour_local",
+        (scope, period_key(start), days_key(wt)),
     )
+    for c in ("median_delay_s", "p10_delay_s", "p90_delay_s"):
+        df[c] = df[c].astype(float)
+    return df
+
+
+def recomputing_note() -> None:
+    st.info(
+        "The numbers are being recomputed after an update to the site. "
+        "They'll be back within about 20 minutes."
+    )
+
+
+def route_rank(start: date, wt: str | None) -> pd.DataFrame:
+    """Every route's record for a period (timepoint arrivals): the report-card table on Routes
+    and the comparison on each route's page. worst_hour: the hour with the largest share of
+    buses early or 5+ min late (at least 10 arrivals)."""
+    r = lateness("timepoints", start, wt, "route")
+    if r.empty:
+        return r
+    h = lateness("timepoints", start, wt, "route_hour")
+    h = h[h["n"] >= 10]
+    worst = (
+        h.assign(share=h["n_on_time"] / h["n"])
+        .sort_values(["route_id", "share", "hour_local"])
+        .drop_duplicates("route_id")[["route_id", "hour_local"]]
+        .rename(columns={"hour_local": "worst_hour"})
+    )
+    out = r.rename(
+        columns={
+            "n_on_time": "on_time",
+            "n_early": "early",
+            "n_late": "late",
+            "median_delay_s": "median_delay",
+        }
+    ).merge(worst, on="route_id", how="left")
+    out = out.assign(share=out["on_time"] / out["n"]).sort_values("share", ascending=False)
+    return out.drop(columns=["share"]).reset_index(drop=True)
+
+
+LATENESS_CHART_NOTE = (
+    "The line is the typical bus (the median) in each hour, in minutes behind the timetable; "
+    "below zero = early. The shaded range is where 8 in 10 buses fell, and the green band is on "
+    "time (from 1 min early to 5 min late). By scheduled hour; hover a point for details."
+)
+
+
+def lateness_chart(
+    hourly: pd.DataFrame,
+    label: str,
+    color: str = "#1f5f9e",
+    reference: pd.DataFrame | None = None,
+    reference_label: str = "all routes",
+    min_n: int = 10,
+) -> go.Figure | None:
+    """Typical minutes late by hour of day with the range 8 in 10 buses fall in, from rows with
+    hour_local, n, n_early, n_late, median_delay_s, p10_delay_s, p90_delay_s (and n_days).
+    reference, if given, is drawn as a thin grey line for comparison."""
+    d = hourly[hourly["n"] >= min_n].sort_values("hour_local") if len(hourly) else hourly
+    if d is None or d.empty:
+        return None
+    hours = sorted(set(d["hour_local"].astype(int)))
+    ref = None
+    if reference is not None and len(reference):
+        ref = reference[reference["n"] >= min_n].sort_values("hour_local")
+        hours = sorted(set(hours) | set(ref["hour_local"].astype(int)))
+    x_of = {h: hour_label(h) for h in hours}
+    x = [x_of[int(h)] for h in d["hour_local"]]
+    fig = go.Figure()
+    fig.add_hrect(y0=-1, y1=5, fillcolor="#2e8b57", opacity=0.08, line_width=0)
+    fig.add_hline(y=0, line_width=1, line_color="#999", line_dash="dot")
+    fig.add_trace(
+        go.Scatter(
+            x=x + x[::-1],
+            y=list(d["p90_delay_s"] / 60) + list(d["p10_delay_s"] / 60)[::-1],
+            fill="toself",
+            fillcolor=color,
+            opacity=0.18,
+            line_width=0,
+            hoverinfo="skip",
+            name="8 in 10 buses",
+        )
+    )
+    if ref is not None and len(ref):
+        fig.add_trace(
+            go.Scatter(
+                x=[x_of[int(h)] for h in ref["hour_local"]],
+                y=ref["median_delay_s"] / 60,
+                name=f"Typical bus, {reference_label}",
+                mode="lines",
+                line={"color": "#888", "width": 1.5, "dash": "dash"},
+                hovertemplate="%{x}: typically %{y:+.1f} min<extra>" + reference_label + "</extra>",
+            )
+        )
+    days = d["n_days"] if "n_days" in d else pd.Series([None] * len(d), index=d.index)
+    hover = [
+        (
+            f"<b>{label}</b>, {xx}<br>typical bus {m / 60:+.1f} min"
+            f"<br>8 in 10 buses: {lo / 60:+.0f} to {hi / 60:+.0f} min"
+            f"<br>early (1+ min) {100 * e / n:.0f}% · 5+ min late {100 * la / n:.0f}%"
+            f"<br>{int(n):,} arrivals" + (f" over {int(nd)} days" if pd.notna(nd) else "")
+        )
+        for xx, m, lo, hi, e, la, n, nd in zip(
+            x,
+            d["median_delay_s"],
+            d["p10_delay_s"],
+            d["p90_delay_s"],
+            d["n_early"],
+            d["n_late"],
+            d["n"],
+            days,
+            strict=False,
+        )
+    ]
+    fig.add_trace(
+        go.Scatter(
+            x=x,
+            y=d["median_delay_s"] / 60,
+            name=f"Typical bus, {label}",
+            mode="lines+markers",
+            line={"color": color, "width": 2.5},
+            hovertext=hover,
+            hoverinfo="text",
+        )
+    )
+    fig.update_layout(
+        xaxis={"type": "category", "categoryorder": "array", "categoryarray": list(x_of.values())},
+        yaxis_title="minutes late",
+        yaxis_tickformat="+d",
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0, "xanchor": "left"},
+        legend_title="",
+        margin={"t": 30},
+        height=380,
+    )
+    return fig
 
 
 def route_picker(

@@ -16,7 +16,12 @@
 -- longer changes; int_feed_settled_times captures that as a second, independent
 -- observation and fct_stop_events carries both so they can be compared.
 
+-- Built incrementally (macros/incremental.sql): each build recomputes the latest two service days.
+
 {{ config(
+    materialized='incremental',
+    incremental_strategy='delete+insert',
+    unique_key='service_date',
     indexes=[
         {'columns': ['service_date', 'trip_id', 'stop_sequence'], 'unique': True},
         {'columns': ['observed_arrival']},
@@ -26,7 +31,7 @@
 with positions as (
     select trip_id, service_date, vehicle_id, ts, frac, off_route_m
     from {{ ref('int_positions_along_shape') }}
-    where service_date between current_date - {{ var('lookback_days') }} and current_date
+    where {{ recent_days() }} and service_date <= current_date
 ),
 
 stepped as (
@@ -56,7 +61,7 @@ sched as (
     join {{ ref('int_stop_shape_fractions') }} f
       on f.feed_version_id = e.feed_version_id and f.trip_id = e.trip_id and f.stop_sequence = e.stop_sequence
     where f.is_usable
-      and e.service_date between current_date - {{ var('lookback_days') }} and current_date
+      and {{ recent_days('e.service_date') }} and e.service_date <= current_date
 ),
 
 matched as (

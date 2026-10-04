@@ -17,16 +17,26 @@ models:
       - dbt_utils.unique_combination_of_columns:
           arguments:
             combination_of_columns: [trip_id, service_date, stop_sequence, first_seen_at]
+          config:
+            where: "service_date >= current_date - 3"
     columns:
       - name: first_seen_at
-        tests: [not_null]
+        tests:
+          - not_null:
+              config:
+                where: "service_date >= current_date - 3"
       - name: last_seen_at
-        tests: [not_null]
+        tests:
+          - not_null:
+              config:
+                where: "service_date >= current_date - 3"
   - name: stg_rt__vehicle_positions
     tests:
       - dbt_utils.unique_combination_of_columns:
           arguments:
             combination_of_columns: [vehicle_id, position_timestamp]
+          config:
+            where: "service_date >= current_date - 3"
     columns:
       - name: latitude
         tests:
@@ -34,9 +44,13 @@ models:
               arguments:
                 min_value: 43.5      # Lane County
                 max_value: 44.6
+              config:
+                where: "service_date >= current_date - 3"
       - name: longitude
         tests:
           - dbt_utils.accepted_range:
               arguments:
                 min_value: -124.2
                 max_value: -122.0
+              config:
+                where: "service_date >= current_date - 3"

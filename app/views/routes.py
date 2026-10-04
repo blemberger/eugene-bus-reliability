@@ -1,4 +1,5 @@
-"""Routes: every route's report card in one table; pick a route to open its own page."""
+"""Routes: how late the buses run by hour, all routes together; every route's report card in one
+table; pick a route to open its own page."""
 
 from __future__ import annotations
 
@@ -7,6 +8,7 @@ import streamlit as st
 from common import (
     EARLY_HELP,
     LATE_HELP,
+    LATENESS_CHART_NOTE,
     col_count,
     col_hour,
     col_pct,
@@ -16,10 +18,15 @@ from common import (
     data_note,
     day_label,
     download_button,
+    fit_phone,
     hour_time,
     late_minutes,
+    lateness,
+    lateness_chart,
+    marts_ready,
     page_filters,
     q,
+    recomputing_note,
     require_db,
     require_marts,
     route_link,
@@ -35,8 +42,22 @@ start, wt = page_filters()
 FV = str(current_fv())  # schedule version in force today
 rank = route_rank(start, wt)
 if rank.empty:
-    st.info("No scored arrivals in the selected period yet.")
+    if marts_ready() and lateness("timepoints", start, None, "overall").empty:
+        recomputing_note()
+    else:
+        st.info("No scored arrivals in the selected period yet.")
     st.stop()
+
+# ---- when are buses late: all routes together ---------------------------------------------
+st.markdown(f"#### When are buses late? All routes, {day_label(wt)}")
+fig = lateness_chart(lateness("timepoints", start, wt, "hour"), "all routes")
+if fig is None:
+    st.caption("Not enough arrivals yet for an hour-by-hour view.")
+else:
+    st.plotly_chart(fit_phone(fig), width="stretch")
+    st.caption(
+        LATENESS_CHART_NOTE + " Timepoint arrivals. Open a route below to see it on its own."
+    )
 
 names = q(
     f"select route_id, route_short_name, route_long_name from gtfs.routes where feed_version_id = {FV}"

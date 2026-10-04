@@ -1,6 +1,10 @@
 -- Observed and scheduled headways: the time since the previous bus of the same
 -- route and direction at the same stop. Used for frequent routes, where riders
 -- don't consult a timetable and "on time" is the wrong measure; evenness is.
+-- Built incrementally (macros/incremental.sql): each build recomputes the latest two service days.
+
+{{ config(materialized='incremental', incremental_strategy='delete+insert', unique_key='service_date') }}
+
 
 with obs as (
     select
@@ -14,6 +18,7 @@ with obs as (
         ) as prev_scheduled
     from {{ ref('int_observed_arrivals') }}
     where is_bounded and is_plausible and uncertainty_s <= {{ var('max_uncertainty_seconds') }}
+      and {{ recent_days() }}
 )
 
 select

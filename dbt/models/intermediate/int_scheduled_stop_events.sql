@@ -7,7 +7,12 @@
 -- int_stop_times_filled (interpolated). This is the spine every realtime
 -- observation is matched to.
 
+-- Built incrementally (macros/incremental.sql): each build recomputes the latest two service days.
+
 {{ config(
+    materialized='incremental',
+    incremental_strategy='delete+insert',
+    unique_key='service_date',
     indexes=[
         {'columns': ['service_date', 'trip_id', 'stop_sequence'], 'unique': True},
         {'columns': ['scheduled_arrival']},
@@ -17,6 +22,7 @@
 
 with active as (
     select * from {{ ref('int_active_services') }}
+    where {{ recent_days() }}
 ),
 
 trips as (

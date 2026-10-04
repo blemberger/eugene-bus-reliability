@@ -36,11 +36,19 @@ models:
       - dbt_utils.unique_combination_of_columns:
           arguments:
             combination_of_columns: [service_date, trip_id, stop_sequence]
+          config:
+            where: "service_date >= current_date - 3"
     columns:
       - name: scheduled_arrival
-        tests: [not_null]
+        tests:
+          - not_null:
+              config:
+                where: "service_date >= current_date - 3"
       - name: route_id
-        tests: [not_null]
+        tests:
+          - not_null:
+              config:
+                where: "service_date >= current_date - 3"
 
   - name: int_shape_lines
     columns:
@@ -72,12 +80,16 @@ models:
               arguments:
                 min_value: 0
                 max_value: 1
+              config:
+                where: "service_date >= current_date - 3"
 
   - name: int_feed_settled_times
     tests:
       - dbt_utils.unique_combination_of_columns:
           arguments:
             combination_of_columns: [service_date, trip_id, stop_sequence]
+          config:
+            where: "service_date >= current_date - 3"
 
   - name: int_observed_arrivals
     description: Observed arrival per trip-stop, derived geometrically from vehicle positions along the route shape.
@@ -85,18 +97,31 @@ models:
       - dbt_utils.unique_combination_of_columns:
           arguments:
             combination_of_columns: [service_date, trip_id, stop_sequence]
+          config:
+            where: "service_date >= current_date - 3"
     columns:
       - name: observed_arrival
-        tests: [not_null]
+        tests:
+          - not_null:
+              config:
+                where: "service_date >= current_date - 3"
       - name: is_plausible
-        tests: [not_null]
+        tests:
+          - not_null:
+              config:
+                where: "service_date >= current_date - 3"
       - name: uncertainty_s
         tests:
           - dbt_utils.accepted_range:
               arguments:
                 min_value: 0
+              config:
+                where: "service_date >= current_date - 3"
 
   - name: int_headways
     columns:
       - name: observed_headway_s
-        tests: [not_null]
+        tests:
+          - not_null:
+              config:
+                where: "service_date >= current_date - 3"

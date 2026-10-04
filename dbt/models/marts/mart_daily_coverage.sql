@@ -10,6 +10,10 @@
 --     to its next trip before passing it, so including them would cap the measure near 93%.
 --     A shortfall here is our measurement missing stops: GPS gaps, detours, a trip that started
 --     reporting part-way along.
+-- Built incrementally (macros/incremental.sql): each build recomputes the latest two service days.
+
+{{ config(materialized='incremental', incremental_strategy='delete+insert', unique_key='service_date') }}
+
 
 with fetches as (
     select
@@ -21,6 +25,8 @@ with fetches as (
         select feed, fetched_at,
                extract(epoch from fetched_at - lag(fetched_at) over (partition by feed order by fetched_at)) as gap_s
         from {{ source('rt', 'fetch') }}
+        -- from a day before the first day computed, so that day's first gap is measured too
+        where fetched_at >= ({{ recent_start() }}::timestamp - interval '1 day') at time zone '{{ var("timezone") }}'
     ) f
     where feed in ('trip_updates', 'vehicle_positions')
     group by 1, 2
@@ -54,6 +60,7 @@ events as (
                scheduled_arrival < now() - interval '2 hours' as due,
                not is_first_stop and not is_last_stop as mid_trip
         from {{ ref('fct_stop_events') }}
+        where {{ recent_days() }}
     ) e
     group by 1
 ),
@@ -61,7 +68,8 @@ events as (
 vehicles as (
     select service_date, count(distinct vehicle_id) as vehicles_reporting
     from {{ ref('stg_rt__vehicle_positions') }}
-    where service_date is not null
+    where service_date is not null and {{ recent_days() }}
+      and position_timestamp >= ({{ recent_start() }}::timestamp - interval '1 day') at time zone '{{ var("timezone") }}'
     group by 1
 )
 

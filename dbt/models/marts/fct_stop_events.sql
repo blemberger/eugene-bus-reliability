@@ -6,7 +6,12 @@
 -- methods_diff_s are left empty for unbounded arrivals, whose "time" is only the trip's
 -- first report.
 
+-- Built incrementally (macros/incremental.sql): each build recomputes the latest two service days.
+
 {{ config(
+    materialized='incremental',
+    incremental_strategy='delete+insert',
+    unique_key='service_date',
     indexes=[
         {'columns': ['service_date']},
         {'columns': ['route_id', 'service_date']},
@@ -17,25 +22,28 @@
 with sched as (
     select * from {{ ref('int_scheduled_stop_events') }}
     where service_date >= (select min(fetched_at at time zone '{{ var("timezone") }}')::date from {{ source('rt', 'fetch') }})
-      and service_date >= current_date - {{ var('lookback_days') }}
+      and {{ recent_days() }}
       -- today's service date in Eugene; like the poller, the service day rolls over at 3 am
       and service_date <= ((now() at time zone '{{ var("timezone") }}') - interval '3 hours')::date
 ),
 
 settled as (
     select service_date, trip_id, stop_sequence, settled_time, feed_scheduled_time, was_skipped
-    from {{ ref('int_feed_settled_times') }} where is_settled
+    from {{ ref('int_feed_settled_times') }} where is_settled and {{ recent_days() }}
 ),
 
 obs as (
     select service_date, trip_id, stop_sequence, vehicle_id, observed_arrival, uncertainty_s,
            is_bounded, is_plausible
     from {{ ref('int_observed_arrivals') }}
+    where {{ recent_days() }}
 ),
 
 seen_trips as (
     select distinct trip_id, service_date from {{ ref('stg_rt__vehicle_positions') }}
-    where trip_id is not null and service_date is not null
+    where trip_id is not null and service_date is not null and {{ recent_days() }}
+      -- a day's reports start the evening before at the earliest (uses the timestamp index)
+      and position_timestamp >= ({{ recent_start() }}::timestamp - interval '1 day') at time zone '{{ var("timezone") }}'
 ),
 
 routes as (

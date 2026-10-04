@@ -5,7 +5,13 @@
 -- shape could be the wrong pass. Stops still out of order, or more than 60 m from the shape,
 -- are flagged and excluded from arrival matching.
 
-{{ config(indexes=[{'columns': ['feed_version_id', 'trip_id', 'stop_sequence'], 'unique': True}]) }}
+-- A schedule version never changes once loaded, so each build only adds versions not yet here.
+
+{{ config(
+    materialized='incremental',
+    incremental_strategy='append',
+    indexes=[{'columns': ['feed_version_id', 'trip_id', 'stop_sequence'], 'unique': True}]
+) }}
 
 with trip_stops as (
     select
@@ -17,6 +23,9 @@ with trip_stops as (
     join {{ ref('stg_gtfs__stops') }} s on s.stop_id = st.stop_id and s.feed_version_id = st.feed_version_id
     join {{ ref('int_stop_times_filled') }} f
       on f.feed_version_id = st.feed_version_id and f.trip_id = st.trip_id and f.stop_sequence = st.stop_sequence
+    {% if is_incremental() %}
+    where st.feed_version_id > (select coalesce(max(feed_version_id), 0) from {{ this }})
+    {% endif %}
 ),
 
 per_trip as (

@@ -4,7 +4,14 @@
 -- after the moment it refers to, is taken as the feed's settled time. This is
 -- independent of the position-based derivation and is used to check it.
 
-{{ config(indexes=[{'columns': ['service_date', 'trip_id', 'stop_sequence'], 'unique': True}]) }}
+-- Built incrementally (macros/incremental.sql): each build recomputes the latest two service days.
+
+{{ config(
+    materialized='incremental',
+    incremental_strategy='delete+insert',
+    unique_key='service_date',
+    indexes=[{'columns': ['service_date', 'trip_id', 'stop_sequence'], 'unique': True}]
+) }}
 
 with final_value as (
     select distinct on (trip_id, service_date, stop_sequence)
@@ -12,7 +19,7 @@ with final_value as (
            first_seen_at, last_seen_at, schedule_relationship
     from {{ ref('stg_rt__predictions') }}
     where predicted_time is not null
-      and service_date >= current_date - {{ var('lookback_days') }}
+      and {{ recent_days() }}
     order by trip_id, service_date, stop_sequence, first_seen_at desc
 )
 

@@ -1,5 +1,9 @@
 -- Reliability by route, direction, service date and hour. Timepoints only, bounded
 -- observations only. Small enough to filter and re-aggregate in the app.
+-- Built incrementally (macros/incremental.sql): each build recomputes the latest two service days.
+
+{{ config(materialized='incremental', incremental_strategy='delete+insert', unique_key='service_date') }}
+
 
 select
     route_id, route_short_name, direction_id, service_date, weekday_type, hour_local,
@@ -11,5 +15,5 @@ select
     percentile_cont(0.9) within group (order by delay_s) as p90_delay_s,
     percentile_cont(0.1) within group (order by delay_s) as p10_delay_s
 from {{ ref('fct_stop_events') }}
-where status is not null and is_timepoint
+where status is not null and is_timepoint and {{ recent_days() }}
 group by 1, 2, 3, 4, 5, 6

@@ -57,8 +57,14 @@ Plan, in order of when it bites:
    half the disk, then moves monthly to object storage (S3/B2, cents per GB per month).
    `make replay` can rebuild any table from it, so the archive is the backup of the
    realtime layer; the schedule reloads from LTD; the analysis layer is recomputed.
-2. **`lookback_days` (dbt var, 120) bounds the analysis rebuild.** Older stop events are
-   not recomputed each run; when incremental models arrive, they stay in the fact table.
+2. **The analysis is built incrementally.** The heavy models (positions along the route,
+   observed arrivals, stop events, prediction errors and the daily marts) recompute only the
+   latest two service days each build and keep the rest (`dbt/macros/incremental.sql`), so a
+   build's cost stays flat as history grows. When the dbt code changes, the scheduler's next
+   build is a full refresh over `lookback_days` (dbt var, 120); `make server-full-refresh`
+   forces one. Each build logs its steps' times in `analytics.build_step_log`, shown in the
+   dump. The site reads precomputed tables (`mart_lateness`, `mart_accuracy_by_hour`) and
+   caches anything from the analysis until the next build.
 3. **Retention on `rt.vehicle_position` and `rt.prediction_history`** (delete rows older
    than N days after they have been scored and are in the archive) is the lever that keeps
    the database small. Not enabled yet; it becomes necessary at a few months of data on a
