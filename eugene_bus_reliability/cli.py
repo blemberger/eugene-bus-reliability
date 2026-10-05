@@ -44,6 +44,12 @@ def main(argv: list[str] | None = None) -> None:
     )
     p.add_argument("--once", action="store_true", help="run dbt build once and exit (for testing)")
 
+    p = sub.add_parser(
+        "wait-ready",
+        help="wait until the analysis is rebuilt for the current code, printing progress",
+    )
+    p.add_argument("--timeout", type=int, default=60, help="give up after this many minutes")
+
     args = parser.parse_args(argv)
     logging.basicConfig(
         level=logging.INFO,
@@ -103,3 +109,7 @@ def main(argv: list[str] | None = None) -> None:
             scheduler.run_dbt_build(settings)
         else:
             scheduler.main(settings)
+    elif args.cmd == "wait-ready":
+        from eugene_bus_reliability import scheduler
+
+        sys.exit(scheduler.wait_ready(settings, timeout_minutes=args.timeout))

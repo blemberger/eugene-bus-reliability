@@ -372,6 +372,21 @@ def main(settings: Settings, raw: bool = False) -> None:
               and not coalesce(full_refresh, false)
         """,
         )
+        print(
+            "Slowest steps of an ordinary build (median over the last 24 h, full rebuilds left out):"
+        )
+        show(
+            cur,
+            """
+            select s.node, s.kind,
+                   round(percentile_cont(0.5) within group (order by s.seconds)::numeric, 1) median_s,
+                   round(max(s.seconds)::numeric, 1) max_s, count(*) builds
+            from analytics.build_step_log s
+            join analytics.build_log b using (invocation_id)
+            where b.started_at > now() - interval '24 hours' and not coalesce(b.full_refresh, false)
+            group by 1, 2 order by 3 desc limit 12
+        """,
+        )
         print("Slowest steps of the latest build (models and tests):")
         show(
             cur,

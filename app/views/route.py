@@ -116,9 +116,9 @@ st.caption(
 )
 me = rank[rank["route_id"].astype(str) == route_id].iloc[0]
 m1, m2, m3, m4 = st.columns(4)
-m1.metric("Typical bus", fmt_delay(me["median_delay"]), help=TYPICAL_HELP)
-m2.metric("Early (1+ min)", fmt_pct(int(me["early"]), int(me["n"])), help=EARLY_HELP)
-m3.metric("5+ min late", fmt_pct(int(me["late"]), int(me["n"])), help=LATE_HELP)
+m1.metric("Typical bus vs timetable", fmt_delay(me["median_delay"]), help=TYPICAL_HELP)
+m2.metric("Early vs timetable (1+ min)", fmt_pct(int(me["early"]), int(me["n"])), help=EARLY_HELP)
+m3.metric("5+ min late vs timetable", fmt_pct(int(me["late"]), int(me["n"])), help=LATE_HELP)
 m4.metric("Timepoint arrivals", f"{int(me['n']):,}")
 
 dirs = q(
@@ -226,7 +226,7 @@ else:
             line={"width": 0},
             fill="tonexty",
             fillcolor="rgba(31,119,180,0.15)",
-            name="10th–90th percentile",
+            name="8 in 10 buses",
         )
     )
     fig.add_trace(
@@ -234,7 +234,7 @@ else:
             x=along["Stop"],
             y=along["median_delay"],
             mode="lines+markers",
-            name="Typical (median)",
+            name="Typical bus",
             line={"color": "#1f77b4"},
             customdata=along["n"].astype(int),
             hovertemplate="%{x}<br>typical %{y:+.1f} min · %{customdata} arrivals<extra></extra>",
@@ -243,15 +243,17 @@ else:
     fig.add_hline(y=0, line_dash="dot", line_color="grey")
     fig.add_hrect(y0=-1, y1=5, fillcolor="rgba(46,139,87,0.08)", line_width=0)
     fig.update_layout(
-        yaxis_title="minutes late (negative = early)",
+        yaxis_title="min behind the timetable",
         xaxis_title="",
         xaxis_tickangle=-45,
         height=450,
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0, "xanchor": "left"},
         legend_title="",
     )
     st.plotly_chart(fit_phone(fig), width="stretch")
     st.caption(
-        "Lateness at each stop along the trip. The green band is the on-time window. A rising line means the schedule loses time along the route; a drop means the timetable has slack there."
+        "Lateness against the timetable at each stop along the trip, in stop order (negative = "
+        "early); the shaded range is where 8 in 10 buses fell. The green band is the on-time window. A rising line means the schedule loses time along the route; a drop means the timetable has slack there."
     )
 
     worst = along.sort_values("median_delay", ascending=False).head(5)
@@ -277,7 +279,7 @@ else:
         width="stretch",
         column_config={
             "Stop": col_stop("Stop"),
-            "Typical bus": col_late("Typical bus (min late)"),
+            "Typical bus": col_late("Typical bus vs timetable"),
             "Arrivals": col_count("Arrivals"),
         },
     )
@@ -370,9 +372,9 @@ cmp = rank[rank["route_id"].isin([route_id, other_id])].set_index("route_short_n
 cmp_tbl = pd.DataFrame(
     {
         r: {
-            "Typical bus": fmt_delay(cmp.loc[r, "median_delay"]),
-            "Early (1+ min)": fmt_pct(int(cmp.loc[r, "early"]), int(cmp.loc[r, "n"])),
-            "5+ min late": fmt_pct(int(cmp.loc[r, "late"]), int(cmp.loc[r, "n"])),
+            "Typical bus vs timetable": fmt_delay(cmp.loc[r, "median_delay"]),
+            "Early vs timetable (1+ min)": fmt_pct(int(cmp.loc[r, "early"]), int(cmp.loc[r, "n"])),
+            "5+ min late vs timetable": fmt_pct(int(cmp.loc[r, "late"]), int(cmp.loc[r, "n"])),
             "Worst hour": hour_label(cmp.loc[r, "worst_hour"])
             if pd.notna(cmp.loc[r, "worst_hour"])
             else "—",

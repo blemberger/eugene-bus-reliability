@@ -63,8 +63,10 @@ Plan, in order of when it bites:
    build's cost stays flat as history grows. When the dbt code changes, the scheduler's next
    build is a full refresh over `lookback_days` (dbt var, 120); `make server-full-refresh`
    forces one. Each build logs its steps' times in `analytics.build_step_log`, shown in the
-   dump. The site reads precomputed tables (`mart_lateness`, `mart_accuracy_by_hour`) and
-   caches anything from the analysis until the next build.
+   dump. Summaries over all history (medians, percentiles: `mart_lateness`,
+   `mart_told_vs_actual`, the prediction-accuracy marts) are recomputed at most hourly
+   (`dbt/macros/hourly.sql`). The site reads those precomputed tables and caches anything from
+   the analysis until the next build.
 3. **Retention on `rt.vehicle_position` and `rt.prediction_history`** (delete rows older
    than N days after they have been scored and are in the archive) is the lever that keeps
    the database small. Not enabled yet; it becomes necessary at a few months of data on a

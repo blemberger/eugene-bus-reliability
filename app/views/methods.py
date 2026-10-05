@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -17,6 +19,7 @@ from common import (
     fit_phone,
     fmt_date,
     fmt_pct,
+    local_today,
     marts_ready,
     q,
     q_live,
@@ -100,7 +103,10 @@ with tab_cov:
             cov["Stops we timed on them"] = cov["mid_stops_timed"] / cov["mid_stops_due"].where(
                 cov["mid_stops_due"] > 0
             )
-            week = cov.tail(7)
+            # today is still in progress: its measures move all day, so charts and the 7-day
+            # numbers use finished days only
+            done = cov[pd.to_datetime(cov["service_date"]).dt.date < local_today()]
+            week = done.tail(7)
             c1, c2, c3 = st.columns(3)
             c1.metric(
                 "Trips LTD reported, last 7 days",
@@ -114,18 +120,36 @@ with tab_cov:
                 "trip's first and last stop.",
             )
             c3.metric("Stop events scored, all days", f"{int(cov['stop_events_observed'].sum()):,}")
-            long = cov.melt(
+            long = done.melt(
                 id_vars=["Date"],
                 value_vars=["Trips LTD reported", "Stops we timed on them"],
                 var_name="Measure",
                 value_name="Share",
             )
-            fig = px.line(long, x="Date", y="Share", color="Measure", markers=True)
+            fig = px.line(
+                long,
+                x="Date",
+                y="Share",
+                color="Measure",
+                markers=True,
+                color_discrete_sequence=["#1f5f9e", "#e07b00"],
+            )
+            # both measures sit in the high 90s: the axis spans the data (at most 95% to 100%,
+            # wider only if a day dips lower), so a one-point drop is visible
+            low = min(0.95, math.floor((float(long["Share"].min()) - 0.005) * 100) / 100)
             fig.update_layout(
                 yaxis_tickformat=".0%",
-                yaxis_range=[0, 1.02],
+                yaxis_range=[low, 1.003],
+                yaxis_dtick=0.01 if low >= 0.9 else None,
                 yaxis_title="",
                 xaxis_title="",
+                legend={
+                    "orientation": "h",
+                    "yanchor": "bottom",
+                    "y": 1.02,
+                    "x": 0,
+                    "xanchor": "left",
+                },
                 legend_title="",
             )
             st.plotly_chart(fit_phone(fig), width="stretch")
@@ -137,8 +161,8 @@ with tab_cov:
                 "or a trip that started reporting part-way along. Each trip's first and last stop "
                 "are left out of that measure because the method can't time them reliably: at the "
                 "first stop the bus is already sitting there when it starts reporting the trip, "
-                "and at the last it often switches to its next trip first. Stops due in the last "
-                "two hours are not counted yet."
+                "and at the last it often switches to its next trip first. Finished days only; "
+                "today is in the table below."
             )
             table(
                 pd.DataFrame(

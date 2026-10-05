@@ -11,7 +11,7 @@ HOST_PGPORT := $(or $(POSTGRES_PORT),5432)
 TUNNEL_PORT := $(or $(TUNNEL_PORT),55439)
 VPS_DIR := $(or $(VPS_DIR),/opt/eugene-bus-reliability)
 
-.PHONY: help setup lock up down reset logs load-static poll-once poll scheduler run migrate check-db replay rebuild fingerprint report dump server-dump server-dbt-build server-full-refresh server-db-busy server-drop-before server-visitors visitors deploy fetch-dump app tunnel test test-all lint format dbt-deps dbt-build dbt-docs
+.PHONY: help setup lock up down reset logs load-static poll-once poll scheduler run migrate check-db replay rebuild fingerprint report dump server-dump server-dbt-build server-full-refresh server-wait-ready wait-ready server-db-busy server-drop-before server-visitors visitors deploy fetch-dump app tunnel test test-all lint format dbt-deps dbt-build dbt-docs
 
 help:             ## list these commands
 	@grep -hE '^[a-z-]+:.*## ' $(firstword $(MAKEFILE_LIST)) | awk 'BEGIN {FS = ":.*## "} {printf "  %-17s %s\n", $$1, $$2}'
@@ -103,9 +103,16 @@ server-dump:      ## on the server (no venv there): the same dump, run inside th
 server-dbt-build: ## on the server: rebuild the analysis layer now instead of waiting for the next 15-minute build
 	docker compose exec -T scheduler python -m eugene_bus_reliability schedule --once
 
-server-full-refresh: ## on the server: make the next analysis build recompute every day (normally it does only the last two)
+server-full-refresh: ## on the server: make the next analysis build recompute every day (normally it does only the last two), and wait for it
 	docker compose exec -T db psql -U $(POSTGRES_USER) -d $(POSTGRES_DB) -q -c "delete from analytics.build_code"
-	@echo "the next 15-minute build recomputes every day (10-20 minutes)"
+	@$(MAKE) -s server-wait-ready
+
+server-wait-ready: ## on the server: wait until the analysis is rebuilt for the deployed code; ends with READY (Ctrl+C only stops the waiting)
+	@docker compose exec -T scheduler python -m eugene_bus_reliability wait-ready
+
+wait-ready:       ## from the laptop: the same wait, on the server (needs VPS_HOST in .env)
+	@test -n "$(VPS_HOST)" || { echo "add VPS_HOST=root@<server ip> to .env first"; exit 1; }
+	@ssh $(VPS_HOST) 'cd $(VPS_DIR) && make -s server-wait-ready'
 
 server-db-busy:   ## on the server: what the database is doing right now (anything running longer than 5 seconds)
 	@docker compose exec -T db psql -U $(POSTGRES_USER) -d $(POSTGRES_DB) -P pager=off -c "select pid, usename as login, now() - query_start as running_for, state, wait_event_type as waiting_on, left(regexp_replace(query, '\\s+', ' ', 'g'), 90) as query from pg_stat_activity where state <> 'idle' and pid <> pg_backend_pid() and now() - query_start > interval '5 seconds' order by query_start"
@@ -118,6 +125,7 @@ server-drop-before: ## on the server: DELETE everything collected before BEFORE=
 	  find . -mindepth 1 -type d -empty -delete
 	@echo "raw files from before $(BEFORE) moved to data/raw-before-$(BEFORE) ($$(find data/raw-before-$(BEFORE) -name '*.pb.gz' | wc -l) files)"
 	docker compose exec -T db psql -U $(POSTGRES_USER) -d $(POSTGRES_DB) -v before=$(BEFORE) -f - < sql/maintenance/drop_before.sql
+	@echo; echo "waiting for the analysis to be rebuilt without those days..."; $(MAKE) -s server-wait-ready
 
 server-visitors:  ## on the server: the site's visitors (per day, pages, stops looked up) and where they came from
 	@docker compose exec -T db psql -U $(POSTGRES_USER) -d $(POSTGRES_DB) -q -P pager=off -f - < sql/reports/visitors.sql
@@ -128,11 +136,11 @@ visitors:         ## from the laptop: the server's visitor report (needs VPS_HOS
 	@test -n "$(VPS_HOST)" || { echo "add VPS_HOST=root@<server ip> to .env first"; exit 1; }
 	@ssh $(VPS_HOST) 'cd $(VPS_DIR) && make -s server-visitors'
 
-deploy:           ## from the laptop: bring the server up to date with GitHub, apply migrations, restart what changed, delete replaced images and old build cache (needs VPS_HOST in .env)
+deploy:           ## from the laptop: bring the server up to date with GitHub, apply migrations, restart what changed, delete replaced images and old build cache, then wait until the analysis is rebuilt (needs VPS_HOST in .env)
 	@test -n "$(VPS_HOST)" || { echo "add VPS_HOST=root@<server ip> to .env first"; exit 1; }
 	@test -z "$$(git status --porcelain)" || { echo "you have unsaved changes here: commit and push them first"; exit 1; }
 	@git fetch -q && test "$$(git rev-parse HEAD)" = "$$(git rev-parse @{u})" || { echo "this laptop and GitHub differ: git push (or git pull) first"; exit 1; }
-	ssh $(VPS_HOST) 'cd $(VPS_DIR) && git pull --ff-only && docker compose up -d --wait db && make migrate && docker compose --profile web up -d --build db poller scheduler app caddy && docker compose --profile web exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile && docker image prune -f && docker builder prune -f --filter until=24h && docker compose --profile web ps'
+	ssh $(VPS_HOST) 'cd $(VPS_DIR) && git pull --ff-only && docker compose up -d --wait db && make migrate && docker compose --profile web up -d --build db poller scheduler app caddy && docker compose --profile web exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile && docker image prune -f && docker builder prune -f --filter until=24h && docker compose --profile web ps && echo && echo "waiting for the analysis to catch up with this code (Ctrl+C only stops the waiting)..." && make -s server-wait-ready'
 
 fetch-dump:       ## from the laptop: make the server's dump and copy it here as dump.txt (needs VPS_HOST in .env)
 	@test -n "$(VPS_HOST)" || { echo "add VPS_HOST=root@<server ip> to .env first"; exit 1; }

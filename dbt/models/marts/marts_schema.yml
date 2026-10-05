@@ -113,3 +113,10 @@ models:
       - dbt_utils.unique_combination_of_columns:
           arguments:
             combination_of_columns: [route_id, horizon_min, hour_local]
+
+  - name: mart_told_vs_actual
+    description: How much later than the timetable, or than the sign N minutes out, the bus came.
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [basis, ahead_min, route_id, stop_id]

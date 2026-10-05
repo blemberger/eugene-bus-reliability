@@ -1,10 +1,8 @@
--- Observed arrivals must not go backwards along a trip (they are derived from a
--- running maximum, so a failure here means the derivation is wrong).
-select service_date, trip_id, stop_sequence
+-- Interpolated times must not go backwards along a trip.
+select feed_version_id, trip_id, stop_sequence
 from (
-    select service_date, trip_id, stop_sequence, observed_arrival,
-           lag(observed_arrival) over (partition by service_date, trip_id order by stop_sequence) as prev
-    from {{ ref('int_observed_arrivals') }}
-    where service_date >= current_date - 3  -- the days a build recomputes; older ones were checked when built
+    select feed_version_id, trip_id, stop_sequence, arrival_seconds,
+           lag(arrival_seconds) over (partition by feed_version_id, trip_id order by stop_sequence) as prev
+    from {{ ref('int_stop_times_filled') }}
 ) s
-where prev is not null and observed_arrival < prev
+where prev is not null and arrival_seconds < prev

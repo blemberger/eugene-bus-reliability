@@ -9,7 +9,11 @@
 -- Horizons run to 60 minutes. That limit is ours: LTD publishes a time for every
 -- remaining stop of a trip in progress, so its horizons reach the length of a trip, but
 -- beyond an hour there are few predictions per horizon and they are timetable-like.
+-- Recomputed at most hourly (macros/hourly.sql).
 
+{{ config(**hourly_config()) }}
+
+{{ hourly_start() }}
 select
     case when grouping(route_id) = 1 then null else route_id end as route_id,
     horizon_min,
@@ -36,3 +40,4 @@ from (
 ) e
 where horizon_min between 0 and 60
 group by grouping sets ((horizon_min), (route_id, horizon_min))
+{{ hourly_end() }}

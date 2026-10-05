@@ -1,7 +1,11 @@
 -- How often the sign was right, by route, minutes ahead and hour of day: the Accuracy page's
 -- time-of-day chart, which adds these counts up over a range of minutes ahead. Rows with
 -- route_id null are all routes together.
+-- Recomputed at most hourly (macros/hourly.sql).
 
+{{ config(**hourly_config()) }}
+
+{{ hourly_start() }}
 select
     case when grouping(route_id) = 1 then null else route_id end as route_id,
     horizon_min,
@@ -13,3 +17,4 @@ select
 from {{ ref('fct_prediction_errors') }}
 where horizon_min between 0 and 30
 group by grouping sets ((horizon_min, hour_local), (route_id, horizon_min, hour_local))
+{{ hourly_end() }}

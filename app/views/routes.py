@@ -117,8 +117,8 @@ table(
     column_config={
         "Route": col_route("Route"),
         "Typical bus": col_typical(max_minutes=max(5.0, float(typical.max() or 0))),
-        "Early": col_pct("Early (1+ min)", help=EARLY_HELP),
-        "Late": col_pct("5+ min late", help=LATE_HELP),
+        "Early": col_pct("Early vs timetable (1+ min)", help=EARLY_HELP),
+        "Late": col_pct("5+ min late vs timetable", help=LATE_HELP),
         "Worst hour": col_hour(
             "Worst hour", help="The hour with the most buses early or 5+ min late."
         ),

@@ -73,7 +73,8 @@ new migrations, rebuilds and restarts what changed, and reloads Caddy. The datab
 the raw archive are untouched. Model changes take effect at the next 15-minute build, or
 immediately with `make server-dbt-build` run on the server. When the analysis code changed,
 that build recomputes every day (a full refresh, 10-20 minutes); other builds recompute only
-the last two days.
+the last two days. `make deploy` waits for that and ends with `READY`; `make wait-ready` from
+the laptop does the same wait at any time. Ctrl+C stops only the waiting, never the rebuild.
 
 ## 5. Checking on it
 

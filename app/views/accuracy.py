@@ -1,11 +1,14 @@
-"""Accuracy: how much should you trust the countdown sign?"""
+"""Accuracy: how much should you trust the countdown sign, and how does it compare with the\ntimetable?"""
 
 from __future__ import annotations
+
+import math
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from common import (
+    TOLD_CHART_NOTE,
     busy_stop_buttons,
     col_count,
     col_pct,
@@ -25,6 +28,8 @@ from common import (
     share_pct,
     stop_buttons,
     table,
+    told_chart,
+    told_vs_actual,
 )
 
 require_db()
@@ -67,6 +72,18 @@ if not at15.empty:
     )
 c3.metric("Predictions scored", f"{int(cal['n_predictions'].sum()):,}")
 
+# ---- timetable vs the sign -----------------------------------------------------------
+st.subheader("How much later than you were told did the bus come?")
+fig0 = told_chart(told_vs_actual(route_id=route_id))
+if fig0 is None:
+    st.caption("Not enough measured arrivals yet.")
+else:
+    st.plotly_chart(fit_phone(fig0), width="stretch")
+    st.caption(
+        TOLD_CHART_NOTE + " Everywhere else on this site, “minutes late” means against the "
+        "timetable (the left point); this page is about the live prediction."
+    )
+
 # ---- calibration curve --------------------------------------------------------------
 st.subheader("Accuracy by how far out the prediction is")
 cal = cal[(cal["horizon_min"] <= 30) & (cal["n_predictions"] >= 30)]
@@ -89,7 +106,7 @@ hover = (
     "<br>%{customdata[2]} to %{customdata[3]}<extra>%{fullData.name}</extra>"
 )
 fig = go.Figure()
-for k, color in (("1", "#2e8b57"), ("2", "#1f77b4"), ("5", "#9467bd")):
+for k, color in (("1", "#2e8b57"), ("2", "#1f77b4")):
     fig.add_trace(
         go.Scatter(
             x=cal["horizon_min"],
@@ -111,17 +128,30 @@ for k, color in (("1", "#2e8b57"), ("2", "#1f77b4"), ("5", "#9467bd")):
             hovertemplate="%{x} min out: %{y:.0%}<extra>%{fullData.name}</extra>",
         )
     )
+shares = pd.concat(
+    [
+        cal[f"n{w}_within_{k}min"] / cal["n_predictions"]
+        for k in ("1", "2")
+        for w in ("", "_schedule")
+    ]
+)
 fig.update_layout(
     xaxis_title="minutes ahead the sign said the bus would arrive",
-    yaxis_title="share of predictions that were right",
+    yaxis_title="share right",
     yaxis_tickformat=".0%",
-    yaxis_range=[0, 1],
+    # fitted to the data, to the nearest 10%: the differences are what matter here
+    yaxis_range=[
+        max(0.0, math.floor(shares.min() * 10) / 10),
+        min(1.0, math.ceil(shares.max() * 10) / 10),
+    ],
     xaxis_range=[0, 30.5],
+    legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0, "xanchor": "left"},
     legend_title="",
+    margin={"t": 30},
 )
 st.plotly_chart(fit_phone(fig), width="stretch")
 st.caption(
-    "Solid lines: how often the bus came within 1, 2 or 5 minutes of what the sign said, by how far ahead "
+    "Solid lines: how often the bus came within 1 or 2 minutes of what the sign said, by how far ahead "
     "the sign said it. Dashed lines, same colors: for the same buses, how often the printed timetable was "
     "that close. Where a solid line is above its dashed twin, the live prediction is worth checking; where "
     "they meet, the timetable would have done as well. Click a legend entry to hide or show a line. "
@@ -132,57 +162,6 @@ st.markdown(
     "the trip's remaining stops, so its predictions reach as far ahead as the end of the trip. This page "
     "shows up to 30 minutes, the range in which people use a countdown to decide when to leave; further "
     "ahead, people plan from the timetable. That cut is ours, not LTD's."
-)
-
-# ---- bias ------------------------------------------------------------------------------
-st.subheader("Does the sign run optimistic or pessimistic?")
-fig2 = go.Figure()
-fig2.add_trace(
-    go.Scatter(
-        x=cal["horizon_min"],
-        y=cal["p90_error_s"] / 60,
-        mode="lines",
-        line={"width": 0},
-        showlegend=False,
-        hoverinfo="skip",
-    )
-)
-fig2.add_trace(
-    go.Scatter(
-        x=cal["horizon_min"],
-        y=cal["p10_error_s"] / 60,
-        mode="lines",
-        line={"width": 0},
-        fill="tonexty",
-        fillcolor="rgba(31,119,180,0.15)",
-        name="10th–90th percentile",
-    )
-)
-fig2.add_trace(
-    go.Scatter(
-        x=cal["horizon_min"],
-        y=cal["median_error_s"] / 60,
-        mode="lines+markers",
-        name="Typical (median)",
-        line={"color": "#1f77b4"},
-        customdata=custom,
-        hovertemplate="%{x} min out: %{y:+.1f} min<br>%{customdata[0]:,} predictions over %{customdata[1]} day(s)<extra></extra>",
-    )
-)
-fig2.add_hline(y=0, line_dash="dot", line_color="grey")
-fig2.update_layout(
-    xaxis_title="minutes ahead",
-    yaxis_title="bus arrived this many minutes AFTER the sign said",
-    legend_title="",
-)
-st.plotly_chart(fit_phone(fig2), width="stretch")
-st.caption(
-    "Above zero: the bus came later than predicted (the sign was optimistic). Below: earlier (you might miss it)."
-)
-late_share = cal["n_bus_later_than_sign"].sum() / cal["n_predictions"].sum()
-early_share = cal["n_bus_earlier_than_sign"].sum() / cal["n_predictions"].sum()
-st.write(
-    f"Across all horizons, the bus came more than a minute **later** than the sign {late_share:.0%} of the time and more than a minute **earlier** {early_share:.0%} of the time."
 )
 
 # ---- by route at 5 and 10 min ------------------------------------------------------------

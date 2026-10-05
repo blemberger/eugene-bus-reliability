@@ -4,7 +4,11 @@
 -- percentiles of the error (observed − predicted; positive = later than the sign).
 -- GROUPING SETS adds coarser rows (all times of day; all routes) so the app can fall
 -- back to them when a specific combination has too few predictions.
+-- Recomputed at most hourly (macros/hourly.sql).
 
+{{ config(**hourly_config()) }}
+
+{{ hourly_start() }}
 with e as (
     select
         route_id,
@@ -32,3 +36,4 @@ group by grouping sets (
     (route_id, is_timepoint, horizon_band),
     (is_timepoint, horizon_band)
 )
+{{ hourly_end() }}

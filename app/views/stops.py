@@ -15,6 +15,7 @@ from common import (
     LATENESS_CHART_NOTE,
     LIVE_CHECK_SECONDS,
     STOP_ROWS_PER_ROUTE,
+    TOLD_CHART_NOTE,
     TYPICAL_HELP,
     busy_stops,
     clean_headsigns,
@@ -47,6 +48,7 @@ from common import (
     require_marts,
     route_colors,
     search_stops,
+    service_hour_key,
     share_pct,
     show_coming,
     show_left,
@@ -54,6 +56,8 @@ from common import (
     stop_buttons,
     stop_link,
     table,
+    told_chart,
+    told_vs_actual,
 )
 
 require_db()
@@ -65,10 +69,10 @@ FV = str(current_fv())  # schedule version in force today
 
 # map colours for a stop's typical lateness (minutes behind the timetable)
 LATENESS_BANDS = [
-    (-1e9, -1, "#e6a100", "early (more than 1 min ahead)"),
-    (-1, 2, "#2e8b57", "on schedule (1 min early to 2 late)"),
-    (2, 5, "#e57373", "2 to 5 min late"),
-    (5, 1e9, "#b71c1c", "more than 5 min late"),
+    (-1e9, -1, "#e6a100", "typically more than 1 min early"),
+    (-1, 2, "#2e8b57", "typically within 1 min early to 2 min late"),
+    (2, 5, "#e57373", "typically 2 to 5 min late"),
+    (5, 1e9, "#b71c1c", "typically more than 5 min late"),
 ]
 
 
@@ -102,9 +106,11 @@ def all_stops_summary() -> tuple:
     n = int(t["n"])
     per = lateness("all_stops", start, wt, "stop")
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Typical bus, all stops", fmt_delay(t["median_delay_s"]), help=TYPICAL_HELP)
-    c2.metric("Early (1+ min)", fmt_pct(int(t["n_early"]), n), help=EARLY_HELP)
-    c3.metric("5+ min late", fmt_pct(int(t["n_late"]), n), help=LATE_HELP)
+    c1.metric(
+        "Typical bus vs timetable, all stops", fmt_delay(t["median_delay_s"]), help=TYPICAL_HELP
+    )
+    c2.metric("Early vs timetable (1+ min)", fmt_pct(int(t["n_early"]), n), help=EARLY_HELP)
+    c3.metric("5+ min late vs timetable", fmt_pct(int(t["n_late"]), n), help=LATE_HELP)
     c4.metric("Stops measured", f"{len(per):,}", f"{n:,} arrivals", delta_color="off")
     return start, wt, per
 
@@ -161,7 +167,7 @@ def all_stops_details(start, wt, per: pd.DataFrame) -> None:
         key="stop_overview_map",
     )
     st.caption(
-        "Each dot is a stop, coloured by how late its typical bus is: "
+        "Each dot is a stop, coloured by how late its typical bus is against the timetable: "
         + " · ".join(f"{label}" for _, _, _, label in LATENESS_BANDS)
         + f" (amber, green, light red, dark red). {period}; stops with at least 20 arrivals. "
         "Click a stop to open it."
@@ -177,8 +183,8 @@ def all_stops_details(start, wt, per: pd.DataFrame) -> None:
     cols = {
         "Stop": col_stop("Stop"),
         "Typical bus": col_typical(max_minutes=max(5.0, float(worst["typical"].max() or 0))),
-        "Early": col_pct("Early (1+ min)", help=EARLY_HELP),
-        "Late": col_pct("5+ min late", help=LATE_HELP),
+        "Early": col_pct("Early vs timetable (1+ min)", help=EARLY_HELP),
+        "Late": col_pct("5+ min late vs timetable", help=LATE_HELP),
         "Arrivals": col_count("Arrivals"),
     }
 
@@ -461,7 +467,8 @@ elif chart.empty:
     st.caption("Not enough arrivals yet for an hour-by-hour view (needs 5 in an hour).")
 else:
     colors = route_colors()
-    hours = sorted(chart["hour_local"].unique())
+    hours = sorted(chart["hour_local"].unique(), key=service_hour_key)
+    chart = chart.assign(_k=chart["hour_local"].map(service_hour_key)).sort_values("_k")
     x_of = {h: hour_label(h) for h in hours}
     fig = go.Figure()
     fig.add_hrect(
@@ -490,6 +497,7 @@ else:
                     fill="toself",
                     fillcolor=color,
                     opacity=0.18,
+                    mode="lines",
                     line_width=0,
                     hoverinfo="skip",
                     showlegend=False,
@@ -529,7 +537,7 @@ else:
             "categoryorder": "array",
             "categoryarray": [x_of[h] for h in hours],
         },
-        yaxis_title="minutes late (typical bus)",
+        yaxis_title="typical bus, min behind the timetable",
         yaxis_tickformat="+d",
         legend_title="",
         showlegend=not one,
@@ -537,8 +545,9 @@ else:
     )
     st.plotly_chart(fit_phone(fig), width="stretch")
     st.caption(
-        "The line is the typical bus (the median) in each hour, in minutes behind the timetable; "
-        "below zero = early. The green band is on time (up to 1 min early, 5 min late)."
+        "Measured against the printed timetable. The line is the typical bus (the median) in "
+        "each hour, in minutes behind the timetable; below zero = early. The green band is on "
+        "time (up to 1 min early, 5 min late)."
         + (
             " The shaded range is where 8 in 10 buses fell."
             if one
@@ -559,9 +568,11 @@ here = q(
     (stop_id, start, *wt_params),
 )
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("Typical bus here", fmt_delay(here["median_delay"][0]), help=TYPICAL_HELP)
-c2.metric("Early (1+ min)", fmt_pct(int(by_route["early"].sum()), total_n), help=EARLY_HELP)
-c3.metric("5+ min late", fmt_pct(int(by_route["late"].sum()), total_n), help=LATE_HELP)
+c1.metric("Typical bus here vs timetable", fmt_delay(here["median_delay"][0]), help=TYPICAL_HELP)
+c2.metric(
+    "Early vs timetable (1+ min)", fmt_pct(int(by_route["early"].sum()), total_n), help=EARLY_HELP
+)
+c3.metric("5+ min late vs timetable", fmt_pct(int(by_route["late"].sum()), total_n), help=LATE_HELP)
 c4.metric(
     "Scored arrivals",
     f"{total_n:,}",
@@ -585,11 +596,23 @@ table(
         "Typical bus": col_typical(
             max_minutes=max(5.0, float(late_minutes(tbl["median_delay"]).max() or 0))
         ),
-        "Early": col_pct("Early (1+ min)", help=EARLY_HELP),
-        "Late": col_pct("5+ min late", help=LATE_HELP),
+        "Early": col_pct("Early vs timetable (1+ min)", help=EARLY_HELP),
+        "Late": col_pct("5+ min late vs timetable", help=LATE_HELP),
         "Arrivals": col_count("Arrivals"),
     },
 )
+
+# ---- timetable or the sign? ---------------------------------------------------------
+st.markdown("**The timetable or the countdown sign: which to go by here?**")
+fig = told_chart(told_vs_actual(stop_id=stop_id))
+if fig is None:
+    st.caption("Not enough measured arrivals and predictions at this stop yet.")
+else:
+    st.plotly_chart(fit_phone(fig), width="stretch")
+    st.caption(
+        TOLD_CHART_NOTE + " All routes at this stop, all days; a point needs 20 to show. More "
+        "on the Accuracy page."
+    )
 
 # ---- arrive-by guidance ---------------------------------------------------
 st.markdown("**How early should I be at the stop?**")
@@ -701,10 +724,13 @@ if len(trend) >= 2:
     )
     fig.add_hline(y=0, line_width=1, line_color="#999", line_dash="dot")
     fig.update_layout(
-        xaxis_title="", yaxis_title="typical bus, minutes late", yaxis_tickformat="+.1f"
+        xaxis_title="", yaxis_title="typical bus, min behind the timetable", yaxis_tickformat="+.1f"
     )
     st.plotly_chart(fit_phone(fig), width="stretch")
-    st.caption("The typical bus here each week, all routes and days; below zero = early.")
+    st.caption(
+        "The typical bus here each week against the timetable, all routes and days; below zero "
+        "= early."
+    )
 else:
     st.caption("A trend needs at least two weeks of data.")
 
@@ -779,7 +805,7 @@ with st.expander("Details"):
                 "On time": by_route["on_time"],
                 "Early": by_route["early"],
                 "Late": by_route["late"],
-                "Typical bus (min late)": late_minutes(by_route["median_delay"]),
+                "Typical bus vs timetable (min)": late_minutes(by_route["median_delay"]),
                 "First day": by_route["first_day"],
                 "Last day": by_route["last_day"],
                 "Days": by_route["n_days"],
@@ -787,7 +813,9 @@ with st.expander("Details"):
         ),
         hide_index=True,
         width="stretch",
-        column_config={"Typical bus (min late)": col_late("Typical bus (min late)")},
+        column_config={
+            "Typical bus vs timetable (min)": col_late("Typical bus vs timetable (min)")
+        },
     )
 
 st.divider()

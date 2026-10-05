@@ -22,6 +22,7 @@ import subprocess
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import psycopg
 
@@ -101,6 +102,75 @@ def run_dbt_build(settings: Settings) -> None:
                 "insert into analytics.build_code (version, refreshed_at) values (%s, now())",
                 (version,),
             )
+
+
+LOCAL_TZ = ZoneInfo("America/Los_Angeles")
+
+
+def _clock(ts: datetime) -> str:
+    return ts.astimezone(LOCAL_TZ).strftime("%-I:%M %p").lower()
+
+
+def wait_ready(settings: Settings, timeout_minutes: int = 60, poll_seconds: int = 15) -> int:
+    """Block until the analysis has been fully rebuilt for the code now deployed (the
+    scheduler's full refresh after a code change or `make server-full-refresh`), printing what
+    it is doing about once a minute. Returns 0 when ready, 1 if a rebuild failed or on timeout.
+    Safe to stop with Ctrl+C at any time: it only watches."""
+    version = analysis_code_version()
+    began = datetime.now(tz=UTC)
+    last_print = None
+    while True:
+        if refreshed_version(settings) == version:
+            with psycopg.connect(settings.database_url) as conn:
+                row = conn.execute(
+                    "select max(finished_at) from analytics.build_log where full_refresh"
+                ).fetchone()
+            when = f" (rebuilt at {_clock(row[0])})" if row and row[0] else ""
+            print(f"READY: the analysis is up to date with the deployed code{when}.", flush=True)
+            return 0
+        with psycopg.connect(settings.database_url) as conn:
+            running = conn.execute(
+                """select started_at from analytics.build_log
+                   where finished_at is null and full_refresh and started_at > now() - interval '3 hours'
+                   order by started_at desc limit 1"""
+            ).fetchone()
+            failed = conn.execute(
+                """select finished_at, n_errors from analytics.build_log
+                   where full_refresh and finished_at > %s and n_errors > 0
+                   order by finished_at desc limit 1""",
+                (began,),
+            ).fetchone()
+            previous = conn.execute(
+                """select percentile_cont(0.5) within group (order by extract(epoch from finished_at - started_at))
+                   from analytics.build_log where full_refresh and finished_at is not null"""
+            ).fetchone()
+        if failed:
+            print(
+                f"FAILED: the full rebuild that finished at {_clock(failed[0])} had {failed[1]} "
+                "error(s). Run make fetch-dump and look at LOG LINES.",
+                flush=True,
+            )
+            return 1
+        now = datetime.now(tz=UTC)
+        if (now - began).total_seconds() > timeout_minutes * 60:
+            print(f"GAVE UP after {timeout_minutes} minutes: still not rebuilt.", flush=True)
+            return 1
+        if last_print is None or (now - last_print).total_seconds() >= 60:
+            last_print = now
+            typical = (
+                f"; a full rebuild usually takes about {round(previous[0] / 60)} min"
+                if previous and previous[0]
+                else ""
+            )
+            if running:
+                mins = int((now - running[0]).total_seconds() // 60)
+                print(
+                    f"rebuilding: started {mins} min ago{typical} (checking every {poll_seconds} s)",
+                    flush=True,
+                )
+            else:
+                print(f"waiting for the rebuild to start{typical}", flush=True)
+        time.sleep(poll_seconds)
 
 
 def run_source_freshness(settings: Settings) -> None:

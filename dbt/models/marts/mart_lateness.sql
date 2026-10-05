@@ -1,16 +1,18 @@
 -- How late the buses are, ready for the site's pages: every combination of the pages' filters
 -- (period: last 7 days, last 30 days, all data; days: all, weekdays, Saturdays, Sundays, or
 -- one weekday) at the levels the pages show. Medians can't be added up from smaller pieces,
--- so they are computed here once per build instead of on every page view.
+-- so they are computed here instead of on every page view.
 --
 -- scope 'timepoints' (Overview, Routes, a route's page): all routes, by hour, by route, by
 --   route and hour.
 -- scope 'all_stops' (Stops): all stops, by hour, by stop.
 -- A null route_id / stop_id / hour_local means "all of them".
 -- Periods count back from today in Eugene, as the pages do (page_filters in app/common.py).
+-- Recomputed at most hourly (macros/hourly.sql).
 
-{{ config(indexes=[{'columns': ['scope', 'period', 'days']}]) }}
+{{ config(indexes=[{'columns': ['scope', 'period', 'days']}], **hourly_config()) }}
 
+{{ hourly_start() }}
 with ev as (
     select service_date, weekday_type, extract(isodow from service_date)::int as dow,
            route_id, route_short_name, stop_id, hour_local, is_timepoint, status, delay_s
@@ -75,3 +77,4 @@ select
     count(distinct service_date)
 from expanded
 group by period, days, grouping sets ((), (hour_local), (stop_id))
+{{ hourly_end() }}

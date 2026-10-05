@@ -71,14 +71,20 @@ if marts_ready():
     n = int(kpi["n"].iloc[0]) if len(kpi) else 0
     c1, c2, c3b, c3, c4 = st.columns(5)
     c1.metric(
-        "Typical bus, last 7 days",
+        "Typical bus vs timetable, last 7 days",
         fmt_delay(kpi["median_delay_s"].iloc[0]) if n else "—",
         help=TYPICAL_HELP + " Timepoints, last 7 days.",
     )
     c2.metric(
-        "Early (1+ min)", fmt_pct(int(kpi["n_early"].iloc[0]) if n else 0, n), help=EARLY_HELP
+        "Early vs timetable (1+ min)",
+        fmt_pct(int(kpi["n_early"].iloc[0]) if n else 0, n),
+        help=EARLY_HELP,
     )
-    c3b.metric("5+ min late", fmt_pct(int(kpi["n_late"].iloc[0]) if n else 0, n), help=LATE_HELP)
+    c3b.metric(
+        "5+ min late vs timetable",
+        fmt_pct(int(kpi["n_late"].iloc[0]) if n else 0, n),
+        help=LATE_HELP,
+    )
     c3.metric(
         "Sign accurate 5 min out",
         fmt_pct(int(cal["n_within_1min"][0]), int(cal["n_predictions"][0])) if len(cal) else "—",
@@ -130,8 +136,8 @@ if marts_ready():
         cfg = {
             "Route": col_route("Route"),
             "Typical bus": col_typical(max_minutes=max(5.0, float(routes["Typical bus"].max()))),
-            "Early": col_pct("Early (1+ min)", help=EARLY_HELP),
-            "Late": col_pct("5+ min late", help=LATE_HELP),
+            "Early": col_pct("Early vs timetable (1+ min)", help=EARLY_HELP),
+            "Late": col_pct("5+ min late vs timetable", help=LATE_HELP),
         }
         left, right = st.columns(2)
         left.subheader("Most reliable routes")

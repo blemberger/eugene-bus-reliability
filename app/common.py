@@ -395,7 +395,7 @@ EARLY_HELP = (
 LATE_HELP = "Share of buses more than 5 minutes behind the timetable."
 
 
-def col_typical(label: str = "Typical bus (min late)", max_minutes: float = 5.0):
+def col_typical(label: str = "Typical bus vs timetable", max_minutes: float = 5.0):
     """Typical minutes late, drawn as a bar from 0 (on schedule) up to max_minutes."""
     return st.column_config.ProgressColumn(
         label, format="%+.1f min", min_value=0.0, max_value=float(max_minutes), help=TYPICAL_HELP
@@ -773,9 +773,11 @@ def col_hour(label: str = "Hour", help: str | None = None):
     return st.column_config.TimeColumn(label, format="h a", help=help)
 
 
-def col_late(label: str = "Min late", help: str | None = None):
+def col_late(label: str = "Min late (vs timetable)", help: str | None = None):
     return st.column_config.NumberColumn(
-        label, format="%+.1f", help=help or "Minutes behind schedule; negative = early."
+        label,
+        format="%+.1f",
+        help=help or "Minutes behind the printed timetable; negative = early.",
     )
 
 
@@ -1110,7 +1112,134 @@ def route_rank(start: date, wt: str | None) -> pd.DataFrame:
     return out.drop(columns=["share"]).reset_index(drop=True)
 
 
+# ------------------------------------------- what you were told vs when the bus came ----
+
+TOLD_AHEAD = (30, 20, 15, 10, 5, 3, 2, 1)  # minutes the sign showed; must match mart_told_vs_actual
+
+
+def told_vs_actual(route_id: str | None = None, stop_id: str | None = None) -> pd.DataFrame:
+    """Rows of marts.mart_told_vs_actual for all routes and stops, one route, or one stop."""
+    if not q("select to_regclass('marts.mart_told_vs_actual') is not null as ok")["ok"][0]:
+        return pd.DataFrame()
+    df = q(
+        "select * from marts.mart_told_vs_actual "
+        "where route_id is not distinct from %s and stop_id is not distinct from %s",
+        (route_id, stop_id),
+    )
+    for c in ("median_s", "p10_s", "p90_s", "median_abs_s"):
+        df[c] = df[c].astype(float)
+    return df
+
+
+TOLD_CHART_NOTE = (
+    "Left: the printed timetable. Right of it: LTD's live prediction (the countdown on signs and "
+    "apps) when it said the bus was that many minutes away. The line is how much later than that "
+    "the typical bus came (below zero = earlier); the shaded range is where 8 in 10 buses fell. "
+    "The narrower the range, the more you can rely on it. Hover a point for how often it was "
+    "right to within a minute."
+)
+
+
+def told_chart(df: pd.DataFrame, min_n: int = 20) -> go.Figure | None:
+    """One chart: how much later than the timetable, and than the sign N minutes out, the bus
+    came. From told_vs_actual() rows (basis, ahead_min, n, median_s, p10_s, p90_s, ...)."""
+    if df.empty:
+        return None
+    tt = df[(df["basis"] == "timetable") & (df["n"] >= min_n)]
+    sign = df[(df["basis"] == "sign") & (df["n"] >= min_n)].copy()
+    sign = sign.sort_values("ahead_min", ascending=False)
+    if tt.empty and sign.empty:
+        return None
+    x_tt = "Timetable"
+    x_sign = [f"{int(m)} min" for m in sign["ahead_min"]]
+
+    def hover(r, what: str) -> str:
+        return (
+            f"<b>{what}</b><br>typical bus {r.median_s / 60:+.1f} min vs this"
+            f"<br>8 in 10 buses: {r.p10_s / 60:+.1f} to {r.p90_s / 60:+.1f} min"
+            f"<br>right to within 1 min: {r.n_within_1min / r.n:.0%}"
+            f" · within 2 min: {r.n_within_2min / r.n:.0%}"
+            f"<br>typically off by {r.median_abs_s / 60:.1f} min · {int(r.n):,} "
+            + ("arrivals" if what == "Timetable" else "predictions")
+        )
+
+    fig = go.Figure()
+    fig.add_hline(y=0, line_width=1, line_color="#999", line_dash="dot")
+    if not tt.empty:
+        r = tt.iloc[0]
+        fig.add_trace(
+            go.Scatter(
+                x=[x_tt],
+                y=[r.median_s / 60],
+                mode="markers",
+                name="Timetable",
+                marker={"size": 13, "color": "#6b6b6b", "symbol": "diamond"},
+                error_y={
+                    "type": "data",
+                    "symmetric": False,
+                    "array": [(r.p90_s - r.median_s) / 60],
+                    "arrayminus": [(r.median_s - r.p10_s) / 60],
+                    "color": "#6b6b6b",
+                    "thickness": 6,
+                    "width": 0,
+                },
+                hovertext=[hover(r, "Timetable")],
+                hoverinfo="text",
+            )
+        )
+    if not sign.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=x_sign + x_sign[::-1],
+                y=list(sign["p90_s"] / 60) + list(sign["p10_s"] / 60)[::-1],
+                fill="toself",
+                fillcolor="#1f5f9e",
+                opacity=0.18,
+                mode="lines",
+                line_width=0,
+                hoverinfo="skip",
+                name="8 in 10 buses",
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=x_sign,
+                y=sign["median_s"] / 60,
+                mode="lines+markers",
+                name="LTD's live prediction",
+                line={"color": "#1f5f9e", "width": 2.5},
+                hovertext=[
+                    hover(r, f"When the sign said {int(r.ahead_min)} min")
+                    for r in sign.itertuples()
+                ],
+                hoverinfo="text",
+            )
+        )
+    lo = min(0.0, float(df["p10_s"].min()) / 60) - 0.5
+    hi = max(0.0, float(df["p90_s"].max()) / 60) + 0.5
+    fig.update_layout(
+        xaxis={
+            "type": "category",
+            "categoryorder": "array",
+            "categoryarray": [x_tt, *[f"{m} min" for m in TOLD_AHEAD]],
+            "title": "what you were told",
+        },
+        yaxis={"title": "minutes later than told", "range": [lo, hi], "tickformat": "+.0f"},
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0, "xanchor": "left"},
+        margin={"t": 30},
+        height=380,
+    )
+    return fig
+
+
+def service_hour_key(h) -> int:
+    """Sort key for hours of the day in service order: 4 am first, the after-midnight hours of
+    late trips (12 am to 3 am) last, where they belong in a service day."""
+    return (int(h) - 4) % 24
+
+
 LATENESS_CHART_NOTE = (
+    "Measured against the printed timetable. "
     "The line is the typical bus (the median) in each hour, in minutes behind the timetable; "
     "below zero = early. The shaded range is where 8 in 10 buses fell, and the green band is on "
     "time (from 1 min early to 5 min late). By scheduled hour; hover a point for details."
@@ -1131,11 +1260,13 @@ def lateness_chart(
     d = hourly[hourly["n"] >= min_n].sort_values("hour_local") if len(hourly) else hourly
     if d is None or d.empty:
         return None
-    hours = sorted(set(d["hour_local"].astype(int)))
+    d = d.assign(_k=d["hour_local"].map(service_hour_key)).sort_values("_k")
+    hours = sorted(set(d["hour_local"].astype(int)), key=service_hour_key)
     ref = None
     if reference is not None and len(reference):
-        ref = reference[reference["n"] >= min_n].sort_values("hour_local")
-        hours = sorted(set(hours) | set(ref["hour_local"].astype(int)))
+        ref = reference[reference["n"] >= min_n]
+        ref = ref.assign(_k=ref["hour_local"].map(service_hour_key)).sort_values("_k")
+        hours = sorted(set(hours) | set(ref["hour_local"].astype(int)), key=service_hour_key)
     x_of = {h: hour_label(h) for h in hours}
     x = [x_of[int(h)] for h in d["hour_local"]]
     fig = go.Figure()
@@ -1148,6 +1279,7 @@ def lateness_chart(
             fill="toself",
             fillcolor=color,
             opacity=0.18,
+            mode="lines",
             line_width=0,
             hoverinfo="skip",
             name="8 in 10 buses",
@@ -1197,7 +1329,7 @@ def lateness_chart(
     )
     fig.update_layout(
         xaxis={"type": "category", "categoryorder": "array", "categoryarray": list(x_of.values())},
-        yaxis_title="minutes late",
+        yaxis_title="minutes behind the timetable",
         yaxis_tickformat="+d",
         legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0, "xanchor": "left"},
         legend_title="",

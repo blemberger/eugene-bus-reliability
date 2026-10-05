@@ -10,7 +10,7 @@ How reliable are **Lane Transit District**'s buses (Eugene–Springfield, Oregon
 - **Prediction accuracy**: every prediction LTD publishes is kept, with every revision, and scored against when the bus actually arrived, as a function of how far ahead it was made.
 - **An "honest countdown"**: LTD's live prediction corrected by how far off it has usually been for that route, time of day and horizon.
 
-Collecting since September 18, 2026. The site rebuilds its numbers every 15 minutes.
+Collecting since September 26, 2026. The analysis updates every 15 minutes; summaries over all history (typical lateness by route, stop and hour; prediction accuracy) at most hourly.
 
 ## How it works
 
