@@ -269,6 +269,7 @@ else:
             f"{int(r['fetches_last_hour'])} / {expected} last hour",
             f"last {fmt_ago(r['last_fetch'])}",
             delta_color="off",
+            delta_arrow="off",
         )
     st.caption(
         "At a 30 s poll, a healthy hour is ~120 fetches for trip_updates and vehicle_positions and ~12 for alerts. Fewer means the feed didn't change (discarded polls) or the poller was down."
@@ -446,6 +447,7 @@ else:
                     else ""
                 ),
                 delta_color="off",
+                delta_arrow="off",
             )
         elif running is not None:
             st.metric(
@@ -453,6 +455,7 @@ else:
                 "running",
                 f"started {fmt_ago(running['started_at'])}",
                 delta_color="off",
+                delta_arrow="off",
             )
         table(
             pd.DataFrame(

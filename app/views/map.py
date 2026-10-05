@@ -14,6 +14,7 @@ import pydeck as pdk
 import streamlit as st
 from common import (
     LIVE_CHECK_SECONDS,
+    LOCAL_TZ,
     STATUS_COLOR,
     STATUS_LABEL,
     STOP_ROWS_PER_ROUTE,
@@ -64,7 +65,7 @@ FV = str(current_fv())  # schedule version in force today
 
 
 BUS_DOT_PX = 7
-STOP_DOT_PX = 5  # the red next-stop markers
+STOP_DOT_PX = 6  # the next-stop markers (white, red ring)
 HALO_PX = 15  # the ring around a selected bus
 ARROW_ICON_PX = 44
 _ARROW_SVG = (
@@ -243,6 +244,8 @@ def live_map() -> None:
 
     live["status"] = live["delay_s"].map(status_from_delay)
     live["color"] = live["status"].map(lambda k: hex_to_rgb(STATUS_COLOR[k]))
+    # a bus whose trip isn't in the schedule (LTD's "swap" and the like) has no route name
+    live["in_schedule"] = live["route"].notna()
     live["route"] = live["route"].fillna(live["route_id"]).astype(str)
     live = live.assign(
         running=live["delay_s"].map(
@@ -294,18 +297,18 @@ def live_map() -> None:
             st.session_state["live_bus_pick"] = bus["label"].iloc[0]
 
     st.write(
-        "Pick a route (or click a bus on the map) to see the route and its buses' next stops; "
-        "pick a bus to zoom to it."
+        "Click a bus on the map, or pick a route, to see the route and where its buses go next."
     )
     present = (
-        live.assign(route_id=live["route_id"].fillna(live["route"]).astype(str))[
-            ["route_id", "route"]
-        ]
+        live[live["in_schedule"]]
+        .assign(route_id=live["route_id"].fillna(live["route"]).astype(str))[["route_id", "route"]]
         .drop_duplicates("route_id")
         .rename(columns={"route": "route_short_name"})
     )
     sel_route = route_picker(present, key="live_route")
-    shown = live[live["route_id"].astype(str) == sel_route] if sel_route else live
+    # every bus stays on the map (and clickable); with a route chosen the others are faded
+    on_route = live[live["route_id"].astype(str) == sel_route] if sel_route else live
+    shown = on_route
 
     sel_bus = None
     if sel_route:
@@ -319,7 +322,11 @@ def live_map() -> None:
         st.selectbox("Zoom to a bus", ["(pick a route first)"], disabled=True)
 
     # ---- geometry ----
-    arrows = shown[shown["bearing"].notna()].copy()
+    faded = live[~live["vehicle_id"].isin(on_route["vehicle_id"])].copy() if sel_route else None
+    if faded is not None:
+        faded["color"] = faded["color"].map(lambda c: [*c[:3], 70])
+    everyone = pd.concat([on_route, faded]) if faded is not None else live
+    arrows = everyone[everyone["bearing"].notna()].copy()
     arrows["icon"] = [ARROW_ICON] * len(arrows)
     arrows["angle"] = -arrows["bearing"].astype(float)  # deck.gl turns counter-clockwise
     focus = shown if sel_route else shown.iloc[0:0]  # next-stop lines only when a route is chosen
@@ -409,10 +416,21 @@ def live_map() -> None:
     along = paths_to_next_stops(focus) if len(focus) else pd.DataFrame()
     dash_next: list[dict] = []
     dash_then: list[dict] = []
+    casing: list[dict] = []  # a pale line under the red dashes, so they read over the route
+    here = {str(r.vehicle_id): ([float(r.lon), float(r.lat)], r) for r in focus.itertuples()}
     for _, r in along.iterrows():
-        dash_next += [{"path": d} for d in dashed(coords(r["to_next"]), zoom_now)]
-        dash_then += [{"path": d} for d in dashed(coords(r["to_then"]), zoom_now)]
-    have_paths = set(along["vehicle_id"]) if len(along) else set()
+        dot, bus = here.get(str(r["vehicle_id"]), (None, None))
+        if dot is None:
+            continue
+        # from the bus's own dot (its GPS position is usually a few metres off the route's
+        # line), along the route to the next stop; straight to the stop if the bus is already
+        # level with it
+        path = coords(r["to_next"]) or [[float(bus.next_lon), float(bus.next_lat)]]
+        path = [dot, *path]
+        casing.append({"path": path})
+        dash_next += [{"path": d} for d in dashed(path, zoom_now, on_px=11, off_px=6)]
+        dash_then += [{"path": d} for d in dashed(coords(r["to_then"]), zoom_now, 7, 6)]
+    have_paths = set(along["vehicle_id"].astype(str)) if len(along) else set()
     # straight lines only for buses whose route path couldn't be worked out
     to_stop = to_stop[~to_stop["vehicle_id"].astype(str).isin(have_paths)]
     to_then = to_then[~to_then["vehicle_id"].astype(str).isin(have_paths)]
@@ -423,10 +441,23 @@ def live_map() -> None:
             id="route_path",
             data=route_paths,
             get_path="path",
-            get_color=[40, 90, 160, 55],  # faint: the buses and their lines stay in front
-            get_width=4,
+            get_color=[90, 140, 210, 80],  # light: the buses and their red lines stay in front
+            get_width=3,
             width_min_pixels=3,
-            width_max_pixels=5,
+            width_max_pixels=3,
+            pickable=False,
+        ),
+        pdk.Layer(
+            "PathLayer",
+            id="casing",
+            data=casing,
+            get_path="path",
+            get_color=[255, 255, 255, 220],
+            get_width=7,
+            width_min_pixels=7,
+            width_max_pixels=7,
+            joint_rounded=True,
+            cap_rounded=True,
             pickable=False,
         ),
         pdk.Layer(
@@ -445,10 +476,10 @@ def live_map() -> None:
             id="to_next",
             data=dash_next,
             get_path="path",
-            get_color=[230, 30, 30, 230],
-            get_width=3,
-            width_min_pixels=3,
-            width_max_pixels=3,
+            get_color=[215, 20, 20, 255],
+            get_width=4,
+            width_min_pixels=4,
+            width_max_pixels=4,
             pickable=False,
         ),
         pdk.Layer(
@@ -473,7 +504,11 @@ def live_map() -> None:
             "ScatterplotLayer",
             data=stops_pts,
             get_position="[slon, slat]",
-            get_fill_color=[230, 30, 30, 230],
+            # white with a red ring, so a stop never looks like a (red) late bus
+            get_fill_color=[255, 255, 255, 255],
+            get_line_color=[215, 20, 20, 255],
+            stroked=True,
+            line_width_min_pixels=2,
             get_radius=26,
             radius_min_pixels=STOP_DOT_PX,  # min = max: fixed pixel size, like the buses
             radius_max_pixels=STOP_DOT_PX,
@@ -492,10 +527,10 @@ def live_map() -> None:
         pdk.Layer(
             "ScatterplotLayer",
             id="buses",
-            data=shown,
+            data=everyone,
             get_position="[lon, lat]",
             get_fill_color="color",
-            get_line_color=[255, 255, 255],
+            get_line_color=[255, 255, 255, 200],
             line_width_min_pixels=1,
             stroked=True,
             get_radius=40,
@@ -545,10 +580,12 @@ def live_map() -> None:
         deck, height=map_h, on_select="rerun", selection_mode="single-object", key="live_map"
     )
     st.caption(
-        "Hover a bus or a stop for details. Click a bus to choose its route and that bus: the map shows the route, "
-        "zooms to the bus and draws its next stop and the one after. 'All routes' goes back to every bus. "
-        "The arrow shows which way the bus is heading. With a route chosen, its path is drawn and every bus on it gets its next-stop lines. "
-        "Green on time · amber early · red late · dark red 10+ min late · grey unknown."
+        "Hover a bus or a stop for details. Click a bus to choose it: the map draws its route in "
+        "light blue, zooms to it, and draws a red dashed line from the bus along the route to "
+        "its next stop, then a fainter one to the stop after. Other buses stay on the map, "
+        "faded, and you can click any of them. 'All routes' goes back to every bus. The arrow "
+        "shows which way a bus is heading. Colour is lateness against the timetable: green on "
+        "time · amber early · red late · dark red 10+ min late · grey unknown."
     )
     with st.expander("Table"):
         table(
@@ -597,69 +634,112 @@ def stop_arrivals(stop_id: str) -> None:
 
 
 # ---- stop lookup -----------------------------------------------------------------
-st.subheader("Next buses at a stop")
-example = q(f"""
-    select stop_code, stop_name from gtfs.stops
-    where feed_version_id = {FV} and location_type = 0 and stop_code is not null and stop_code <> ''
-    order by stop_name limit 1
-""")
-hint = (
-    f"e.g. {example['stop_name'][0]}, or {example['stop_code'][0]}"
-    if not example.empty
-    else "stop name or number"
-)
-query = st.text_input("Stop name or the number on the sign", placeholder=hint)
-if not query:
-    st.write("Or start with a busy stop:")
-    picked = busy_stop_buttons("live_busy")
-    if picked:
-        st.session_state["live_stop_id"] = picked
-        st.session_state["live_stop_name"] = st.session_state.get("live_busy_name", picked)
-if query:
-    matches = search_stops(query)
-    if matches.empty:
-        st.warning("No stop matches that. Try part of a street name.")
-    else:
-        picked = stop_buttons(matches, "live_stop")
+with st.container(border=True):
+    st.subheader("Next buses at a stop")
+    example = q(f"""
+        select stop_code, stop_name from gtfs.stops
+        where feed_version_id = {FV} and location_type = 0 and stop_code is not null and stop_code <> ''
+        order by stop_name limit 1
+    """)
+    hint = (
+        f"e.g. {example['stop_name'][0]}, or {example['stop_code'][0]}"
+        if not example.empty
+        else "stop name or number"
+    )
+    query = st.text_input("Stop name or the number on the sign", placeholder=hint)
+    if not query:
+        st.write("Or start with a busy stop:")
+        picked = busy_stop_buttons("live_busy")
         if picked:
             st.session_state["live_stop_id"] = picked
-            st.session_state["live_stop_name"] = st.session_state.get("live_stop_name", picked)
+            st.session_state["live_stop_name"] = st.session_state.get("live_busy_name", picked)
+    if query:
+        matches = search_stops(query)
+        if matches.empty:
+            st.warning("No stop matches that. Try part of a street name.")
+        else:
+            picked = stop_buttons(matches, "live_stop")
+            if picked:
+                st.session_state["live_stop_id"] = picked
+                st.session_state["live_stop_name"] = st.session_state.get("live_stop_name", picked)
 
-stop_id = st.session_state.get("live_stop_id")
-if "stop" in st.query_params and not stop_id:
-    stop_id = st.query_params["stop"]
-    st.session_state["live_stop_id"] = stop_id
-if stop_id:
-    st.markdown(f"**{st.session_state.get('live_stop_name', stop_id)}**")
-    st.session_state["stop_id"] = stop_id  # so the Stops page opens on the same stop
-    st.page_link("views/stops.py", label="How reliable is this stop? →", icon="🚏")
-    stop_arrivals(stop_id)
+    stop_id = st.session_state.get("live_stop_id")
+    if "stop" in st.query_params and not stop_id:
+        stop_id = st.query_params["stop"]
+        st.session_state["live_stop_id"] = stop_id
+    if stop_id:
+        st.markdown(f"**{st.session_state.get('live_stop_name', stop_id)}**")
+        st.session_state["stop_id"] = stop_id  # so the Stops page opens on the same stop
+        st.page_link("views/stops.py", label="How reliable is this stop? →")
+        stop_arrivals(stop_id)
 
 
 # ---- alerts ----------------------------------------------------------------------
-st.subheader("Service alerts")
-alerts = q(
-    "select payload from rt.alert where fetch_id = (select max(fetch_id) from rt.fetch where feed = 'alerts')"
-)
-if alerts.empty:
-    st.caption("No active alerts.")
-else:
-    for payload in alerts["payload"]:
-        header = next(
-            (
-                t.get("text")
-                for t in payload.get("header_text", {}).get("translation", [])
-                if t.get("text")
-            ),
-            "Alert",
+def _when(ts: pd.Timestamp) -> str:
+    t = ts.tz_convert(LOCAL_TZ)
+    return f"{t:%a %b} {t.day}, " + t.strftime("%I:%M %p").lstrip("0").lower()
+
+
+def alert_times(payload: dict, first_seen: pd.Timestamp | None) -> str:
+    """When an alert applies, from the periods LTD gives it, else when we first saw it."""
+    spans = []
+    for period in payload.get("active_period", []) or []:
+        start, end = period.get("start"), period.get("end")
+        a = pd.Timestamp(int(start), unit="s", tz="UTC") if start else None
+        b = pd.Timestamp(int(end), unit="s", tz="UTC") if end else None
+        if b is not None and b < pd.Timestamp.now(tz="UTC"):
+            continue  # a period that has ended
+        if a and b:
+            spans.append(f"{_when(a)} to {_when(b)}")
+        elif a:
+            spans.append(f"from {_when(a)}")
+        elif b:
+            spans.append(f"until {_when(b)}")
+    if spans:
+        return "; ".join(spans[:2]) + (" …" if len(spans) > 2 else "")
+    if first_seen is not None and not pd.isna(first_seen):
+        return f"posted by {_when(pd.Timestamp(first_seen))}"
+    return ""
+
+
+with st.container(border=True):
+    st.subheader("Service alerts")
+    alerts = q(
+        """
+        with cur as (
+            select alert_id, payload from rt.alert
+            where fetch_id = (select max(fetch_id) from rt.fetch where feed = 'alerts')
         )
-        desc = next(
-            (
-                t.get("text")
-                for t in payload.get("description_text", {}).get("translation", [])
-                if t.get("text")
-            ),
-            "",
+        select cur.alert_id, cur.payload,
+               (select min(f.fetched_at) from rt.alert a join rt.fetch f using (fetch_id)
+                where a.alert_id = cur.alert_id) as first_seen
+        from cur
+        """
+    )
+    if alerts.empty:
+        st.caption("No active alerts.")
+    else:
+        st.caption(
+            "From LTD. Times are when LTD says each alert applies, or, where it doesn't say, the "
+            "first time this site saw the alert."
         )
-        with st.expander(header):
-            st.write(desc or "No details given.")
+        for payload, first_seen in zip(alerts["payload"], alerts["first_seen"], strict=False):
+            header = next(
+                (
+                    t.get("text")
+                    for t in payload.get("header_text", {}).get("translation", [])
+                    if t.get("text")
+                ),
+                "Alert",
+            )
+            desc = next(
+                (
+                    t.get("text")
+                    for t in payload.get("description_text", {}).get("translation", [])
+                    if t.get("text")
+                ),
+                "",
+            )
+            when = alert_times(payload, first_seen)
+            with st.expander(f"{header}  ·  {when}" if when else header):
+                st.write(desc or "No details given.")

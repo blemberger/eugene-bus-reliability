@@ -1,73 +1,69 @@
-"""Routes: how late the buses run by hour, all routes together; every route's report card in one
-table; pick a route to open its own page."""
+"""Routes: how late the buses run by hour, all routes together; every route in one table (click a
+row for its report card)."""
 
 from __future__ import annotations
 
-import pandas as pd
 import streamlit as st
 from common import (
-    EARLY_HELP,
-    LATE_HELP,
     LATENESS_CHART_NOTE,
-    col_count,
-    col_hour,
-    col_pct,
-    col_route,
-    col_typical,
-    current_fv,
+    RANGE_HELP,
+    TYPICAL_HELP,
     data_note,
     day_label,
-    download_button,
     fit_phone,
-    hour_time,
-    late_minutes,
+    fmt_date,
+    fmt_delay,
     lateness,
     lateness_chart,
+    link_table,
     marts_ready,
     page_filters,
-    q,
+    range_cell,
+    range_scale,
     recomputing_note,
     require_db,
     require_marts,
     route_link,
     route_rank,
-    share_pct,
-    table,
+    routes_by_service,
+    today_lateness,
+    worst_hour_label,
 )
 
 require_db()
 st.title("Route report cards")
 require_marts()
 start, wt = page_filters()
-FV = str(current_fv())  # schedule version in force today
 rank = route_rank(start, wt)
 if rank.empty:
-    if marts_ready() and lateness("timepoints", start, None, "overall").empty:
+    if marts_ready() and lateness(start, None, "overall").empty:
         recomputing_note()
     else:
         st.info("No scored arrivals in the selected period yet.")
     st.stop()
 
-# ---- when are buses late: all routes together ---------------------------------------------
-st.markdown(f"#### When are buses late? All routes, {day_label(wt)}")
-fig = lateness_chart(lateness("timepoints", start, wt, "hour"), "all routes")
-if fig is None:
-    st.caption("Not enough arrivals yet for an hour-by-hour view.")
-else:
-    st.plotly_chart(fit_phone(fig), width="stretch")
-    st.caption(
-        LATENESS_CHART_NOTE + " Timepoint arrivals. Open a route below to see it on its own."
-    )
-
-names = q(
-    f"select route_id, route_short_name, route_long_name from gtfs.routes where feed_version_id = {FV}"
+routes = routes_by_service()
+long_names = dict(
+    zip(routes["route_id"].astype(str), routes["route_long_name"].fillna(""), strict=False)
 )
-rank = rank.merge(names[["route_id", "route_long_name"]], on="route_id", how="left")
 rank = rank.assign(rkey=rank["route_short_name"].astype(str).map(lambda v: (len(v), v)))
 rank = rank.sort_values("rkey").reset_index(drop=True)
 
+# ---- when are buses late: all routes together ---------------------------------------------
+with st.container(border=True):
+    st.subheader(f"When are buses late? All routes, {day_label(wt)}")
+    fig = lateness_chart(lateness(start, wt, "hour"), "all routes")
+    if fig is None:
+        st.caption("Not enough arrivals yet for an hour-by-hour view.")
+    else:
+        st.plotly_chart(fit_phone(fig), width="stretch")
+        st.caption(
+            LATENESS_CHART_NOTE + f" Every stop, {day_label(wt)} since {fmt_date(start)}. "
+            "Open a route below to see it on its own."
+        )
 
-# ---- open one route's report card -------------------------------------------------------
+
+# ---- every route ----------------------------------------------------------------------
 def _open_route() -> None:
     rid = st.session_state.get("routes_open")
     if rid:
@@ -78,61 +74,93 @@ def _open_route() -> None:
     st.session_state["routes_open"] = None  # so coming back here doesn't jump away again
 
 
-st.markdown("**Open a route's report card**")
-labels = dict(zip(rank["route_id"].astype(str), rank["route_short_name"].astype(str), strict=False))
-st.pills(
-    "Route",
-    list(labels),
-    format_func=lambda r: labels[r],
-    key="routes_open",
-    on_change=_open_route,
-    label_visibility="collapsed",
-)
-go_to = st.session_state.pop("routes_go", None)
-if go_to:
-    st.switch_page("views/route.py", query_params={"route": go_to})
+with st.container(border=True):
+    st.subheader("Every route")
+    labels = dict(
+        zip(rank["route_id"].astype(str), rank["route_short_name"].astype(str), strict=False)
+    )
+    st.pills(
+        "Open a route's report card",
+        list(labels),
+        format_func=lambda r: labels[r],
+        key="routes_open",
+        on_change=_open_route,
+    )
+    go_to = st.session_state.pop("routes_go", None)
+    if go_to:
+        st.switch_page("views/route.py", query_params={"route": go_to})
 
-# ---- every route ----------------------------------------------------------------------
-st.markdown("**Every route**")
-typical = late_minutes(rank["median_delay"])
-card = pd.DataFrame(
-    {
-        "Route": [
-            route_link(r, s)
-            for r, s in zip(rank["route_id"], rank["route_short_name"], strict=False)
-        ],
-        "Name": rank["route_long_name"].to_numpy(),
-        "Typical bus": typical.to_numpy(),
-        "Early": share_pct(rank["early"], rank["n"]).to_numpy(),
-        "Late": share_pct(rank["late"], rank["n"]).to_numpy(),
-        "Worst hour": [hour_time(h) for h in rank["worst_hour"]],
-        "Arrivals": rank["n"].astype(int).to_numpy(),
+    today_r = today_lateness(group_by_route=True)
+    today_of = {
+        str(r.route_id): (r.median_delay_s if r.n >= 10 else None) for r in today_r.itertuples()
     }
-)
-table(
-    card,
-    hide_index=True,
-    width="stretch",
-    height=min(800, 40 + 35 * len(card)),
-    column_config={
-        "Route": col_route("Route"),
-        "Typical bus": col_typical(max_minutes=max(5.0, float(typical.max() or 0))),
-        "Early": col_pct("Early vs timetable (1+ min)", help=EARLY_HELP),
-        "Late": col_pct("5+ min late vs timetable", help=LATE_HELP),
-        "Worst hour": col_hour(
-            "Worst hour", help="The hour with the most buses early or 5+ min late."
-        ),
-        "Arrivals": col_count("Arrivals"),
-    },
-)
-st.caption(
-    f"Timepoint arrivals only, {day_label(wt)}. Typical bus = the median minutes behind the "
-    "timetable. Click a column header to sort; click a route number to open its report card."
-)
-download_button(
-    card.assign(Route=rank["route_short_name"].to_numpy()),
-    f"eugenebuswatch_route_report_cards_{day_label(wt).replace(' ', '_')}_since_{start}.csv",
-)
+    order = st.segmented_control(
+        "Sort by",
+        ["Route number", "Latest first", "Least predictable first"],
+        default="Route number",
+        key="routes_sort",
+    )
+    if order == "Latest first":
+        rank = rank.sort_values("median_delay", ascending=False)
+    elif order == "Least predictable first":
+        rank = rank.assign(w=rank["p90_delay_s"] - rank["p10_delay_s"]).sort_values(
+            "w", ascending=False
+        )
+    lo, hi = range_scale(rank)
+    link_table(
+        [
+            {
+                "href": route_link(r.route_id, r.route_short_name).split("#")[0],
+                "route": r.route_short_name,
+                "name": long_names.get(str(r.route_id), ""),
+                "typical": fmt_delay(r.median_delay),
+                "range": range_cell(r.p10_delay_s, r.median_delay, r.p90_delay_s, lo, hi),
+                "worst": worst_hour_label(r.worst_hour, r.worst_delay_s),
+                "today": fmt_delay(today_of.get(str(r.route_id))),
+                "n": f"{int(r.n):,}",
+            }
+            for r in rank.itertuples()
+        ],
+        [
+            {"key": "route", "label": "Route", "width": "3.2em", "bold": True},
+            {"key": "name", "label": "Name", "width": "minmax(6em, 1.3fr)", "hide_on_phone": True},
+            {
+                "key": "typical",
+                "label": "Typical bus",
+                "width": "minmax(7em, 0.8fr)",
+                "help": TYPICAL_HELP,
+            },
+            {
+                "key": "range",
+                "label": "8 in 10 buses (vs timetable)",
+                "width": "minmax(13em, 1.6fr)",
+                "phone_width": "minmax(6.8em, 1fr)",
+                "html": True,
+                "help": RANGE_HELP,
+            },
+            {
+                "key": "worst",
+                "label": "Latest hour",
+                "width": "minmax(9.5em, 0.9fr)",
+                "hide_on_phone": True,
+                "help": "The hour of day when the typical bus on this route runs latest, and how "
+                "late it is then (hours with at least 10 arrivals).",
+            },
+            {
+                "key": "today",
+                "label": "Today so far",
+                "width": "minmax(6.5em, 0.7fr)",
+                "hide_on_phone": True,
+            },
+            {"key": "n", "label": "Arrivals", "width": "5em", "num": True, "hide_on_phone": True},
+        ],
+        max_height=900,
+    )
+    st.caption(
+        f"Every scored arrival at every stop, {day_label(wt)} since {fmt_date(start)}. The bar "
+        "shows where 8 in 10 buses fell, with a tick at the typical bus and a faint line at on "
+        "schedule. Click anywhere on a row for that route's report card."
+    )
 
 st.divider()
 data_note(start)

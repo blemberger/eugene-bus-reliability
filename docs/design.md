@@ -27,7 +27,7 @@ Storing every poll's predictions verbatim would be ~3–5M rows/day. That is the
 
 ## Definitions
 
-- **On-time**: arrival no more than 60 s early and no more than 300 s late, at timepoints only (TCRP convention).
+- **Lateness**: `observed_arrival − scheduled arrival`, at every stop (not only timepoints; between timepoints LTD's timetable is interpolated, and lateness was checked to grow smoothly between them). The site reports the median ("typical bus") and the 10th–90th percentile range ("8 in 10 buses"). `fct_stop_events.status` still classifies each arrival by the TCRP on-time window (no more than 60 s early, no more than 300 s late) for the live map's colours.
 - **Prediction horizon**: `arrival_time − first_seen_at` for the prediction row in force at a given moment.
 - **Prediction error**: `observed_arrival − arrival_time`, signed (positive = bus arrived after the prediction).
 - **Observed arrival**: LTD's positions carry no stop fields, so each position is placed along the trip's route shape (a fraction 0–1 along it). Positions are walked in time order, each placed on the first pass of the shape ahead of where the bus had got to and within reach of its previous report (`macros/shape_walk.sql`), because on routes that use a street twice the nearest point on the whole shape can be the wrong pass. The running maximum removes GPS jitter, and the moment that fraction passes a stop is interpolated between the two reports either side (`int_observed_arrivals`). The feed's own "settled" time for stops already passed is recorded independently and the two are compared (`mart_method_agreement`).
@@ -72,8 +72,8 @@ Plan, in order of when it bites:
    the database small. Not enabled yet; it becomes necessary at a few months of data on a
    40 GB server.
 4. **The scored dataset (`fct_stop_events`) is the product** and is kept indefinitely;
-   at ~37k rows/day it is a few GB a year, and it is what the CSV downloads (and a future
-   public data release) export.
+   at ~37k rows/day it is a few GB a year, and it is what a future public data release would
+   export.
 
 ## Operational risks and their mitigations
 

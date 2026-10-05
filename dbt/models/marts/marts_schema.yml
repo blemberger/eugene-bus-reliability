@@ -99,11 +99,11 @@ models:
                 values: [1, 3, 6, 10, 15, 20, 30]
 
   - name: mart_lateness
-    description: Typical lateness and early / 5+ min late shares for every combination of the pages' filters.
+    description: Typical lateness against the timetable, and the range 8 in 10 buses fall in, for every combination of the pages' filters.
     tests:
       - dbt_utils.unique_combination_of_columns:
           arguments:
-            combination_of_columns: [scope, period, days, route_id, stop_id, hour_local]
+            combination_of_columns: [period, days, route_id, stop_id, hour_local]
     columns:
       - name: n
         tests: [not_null]

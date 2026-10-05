@@ -9,6 +9,7 @@ import time
 import uuid
 from datetime import date, datetime, timedelta
 from datetime import time as dtime
+from html import escape as html_escape
 from urllib.parse import quote
 
 import pandas as pd
@@ -23,7 +24,6 @@ def _database_url() -> str:
 
 DATABASE_URL = _database_url()
 LOCAL_TZ = "America/Los_Angeles"
-EXPLORER_MAX_ROWS = 5000
 
 STATUS_LABEL = {"early": "Early", "on_time": "On time", "late": "Late", "very_late": "Very late"}
 STATUS_COLOR = {
@@ -134,7 +134,7 @@ def stop_name_rule(name) -> tuple[str, str | None]:
         m = rx.match(raw)
         if m:
             parts = {k: _tidy_words(v) for k, v in m.groupdict().items()}
-            parts["side"] = _COMPASS[m.group("side").upper()]
+            parts["side"] = m.group("side").upper()  # "(S side)": short, it's on every stop
             if "dir" in parts:
                 parts["dir"] = _COMPASS[m.group("dir").upper()]
             return template.format(**parts), label
@@ -269,20 +269,6 @@ def q_live(sql: str, params: tuple = ()) -> pd.DataFrame:
     return _run(sql, params)
 
 
-def run_explorer_query(sql: str, max_rows: int = EXPLORER_MAX_ROWS) -> tuple[pd.DataFrame, bool]:
-    """Run one visitor-supplied SELECT safely. Returns (rows, truncated)."""
-    sql = sql.strip().rstrip(";").strip()
-    with psycopg.connect(DATABASE_URL) as conn:
-        conn.read_only = True
-        with conn.transaction():
-            conn.execute("SET LOCAL statement_timeout = '15s'")
-            with conn.cursor(name="explorer") as cur:
-                cur.execute(sql)
-                rows = cur.fetchmany(max_rows + 1)
-                cols = [d.name for d in cur.description]
-    return pd.DataFrame(rows[:max_rows], columns=cols), len(rows) > max_rows
-
-
 # Every live view shows the data "as of" the newest message (data_now), not the wall clock,
 # so a page changes only when new data arrives, at the moment the countdown resets. Pages
 # check for new data every LIVE_CHECK_SECONDS; the marker itself is cached for 1 s.
@@ -366,19 +352,23 @@ def _countdown_html() -> str:
             f"No new data from LTD for {int((now - at).total_seconds() // 60)} min",
             "#b35c00",
         )
-    return f"""<div style="display:flex;flex-wrap:wrap;align-items:center;gap:6px 16px;margin:2px 0 6px 0;">
-  <div style="font-size:22px;font-weight:700;color:{colour};min-width:10.5em;">&#9679; {headline}</div>
-  <div style="flex:1 1 160px;height:10px;background:#dfece5;border-radius:5px;overflow:hidden;">
-    <div style="height:100%;width:{done:.0f}%;background:{colour};"></div>
-  </div>
-  <div style="flex-basis:100%;font-size:14px;color:#555;">
-    LTD data from {local(at)} · next update due about {local(due)}</div>
+    # a small ring that fills up toward the next update, on one line with the text
+    # (CSS, not SVG: st.html's sanitiser removes inline SVG)
+    ring = (
+        "<span style='flex:none;display:inline-block;width:22px;height:22px;border-radius:50%;"
+        f"background:conic-gradient({colour} {done:.1f}%, #dfece5 0);"
+        "-webkit-mask:radial-gradient(farthest-side,transparent calc(100% - 5px),#000 calc(100% - 4px));"
+        "mask:radial-gradient(farthest-side,transparent calc(100% - 5px),#000 calc(100% - 4px))'></span>"
+    )
+    return f"""<div style="display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px;margin:0 0 4px 0;">
+  {ring}<span style="font-size:16px;font-weight:700;color:{colour};">{headline}</span>
+  <span style="font-size:14px;color:#666;">LTD data from {local(at)} · next update due about {local(due)}</span>
 </div>"""
 
 
 @st.fragment(run_every="1s")
 def live_status_line() -> None:
-    """A large countdown to LTD's next update, with a progress bar and the time of the data."""
+    """A compact countdown to LTD's next update (a filling ring) and the time of the data."""
     st.html(_countdown_html())
 
 
@@ -402,15 +392,10 @@ def col_route(label: str = "Route"):
     )
 
 
-# The site's three measures of reliability, everywhere the same words:
-#   Typical bus  — the median minutes behind the timetable (negative = early)
-#   Early        — share of buses more than 1 minute ahead of the timetable
-#   5+ min late  — share of buses more than 5 minutes behind it
+# The site's two measures of reliability, everywhere the same words (RANGE_HELP is below):
+#   Typical bus    — the median minutes behind the timetable (negative = early)
+#   8 in 10 buses  — the 10th to 90th percentile of the same, as a range
 TYPICAL_HELP = "Median minutes behind the timetable: half the buses were later than this, half earlier. Negative = early."
-EARLY_HELP = (
-    "Share of buses that came more than 1 minute ahead of the timetable, when you could miss them."
-)
-LATE_HELP = "Share of buses more than 5 minutes behind the timetable."
 
 
 def col_typical(label: str = "Typical bus vs timetable", max_minutes: float = 5.0):
@@ -670,7 +655,11 @@ def log_page_view(page: str) -> None:
 
 def fit_phone(fig):
     """On a phone, move a chart's legend from beside the plot to above it, so the plot keeps the
-    screen's full width."""
+    screen's full width. On every screen, minute axes signed +/− label zero plain "0"."""
+    for axis in ("xaxis", "yaxis"):
+        fmt = getattr(fig.layout, axis).tickformat or ""
+        if fmt.startswith("+"):
+            fig.update_layout({axis: {"labelalias": {"+0": "0", "+0.0": "0"}}})
     if is_mobile():
         fig.update_layout(
             legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0, "xanchor": "left"}
@@ -941,10 +930,15 @@ def page_filters() -> tuple[date, str | None]:
         )
         or "Last 7 days"
     )
-    start = {
-        "Last 7 days": local_today() - timedelta(days=7),
-        "Last 30 days": local_today() - timedelta(days=30),
-    }.get(span, date(2000, 1, 1))
+    # "last 7 days" is today and the 6 days before it, as in marts.mart_lateness
+    start = (
+        {
+            "Last 7 days": local_today() - timedelta(days=6),
+            "Last 30 days": local_today() - timedelta(days=29),
+        }.get(span)
+        or collection_start()
+        or date(2000, 1, 1)
+    )
     day = (
         c2.segmented_control(
             "Days", ["All days", "Weekdays", "Saturdays", "Sundays"], default="All days"
@@ -1039,7 +1033,8 @@ def clean_headsign(headsign, route_short=None) -> str:
         out.pop(0)
     while out and out[-1] in ("to", "via", "→", "-"):
         out.pop()
-    return " ".join(out)
+    # a sign that says only the route's own name: show it as it is rather than nothing
+    return " ".join(out) or " ".join(_headsign_word(w) for w in text.split() if w not in "<>")
 
 
 def clean_headsigns(
@@ -1057,9 +1052,9 @@ def clean_headsigns(
 def period_key(start: date) -> str:
     """page_filters()' period as mart_lateness names it."""
     today = local_today()
-    if start == today - timedelta(days=7):
+    if start == today - timedelta(days=6):
         return "7d"
-    if start == today - timedelta(days=30):
+    if start == today - timedelta(days=29):
         return "30d"
     return "all"
 
@@ -1080,16 +1075,16 @@ _LEVELS = {
 }
 
 
-def lateness(scope: str, start: date, wt: str | None, level: str) -> pd.DataFrame:
-    """Rows of marts.mart_lateness for a page's filters. scope: 'timepoints' or 'all_stops';
-    level: overall, hour, route, route_hour (timepoints) or stop (all_stops). Empty while the
-    table is being created (the first analysis build after an update)."""
+def lateness(start: date, wt: str | None, level: str) -> pd.DataFrame:
+    """Rows of marts.mart_lateness for a page's filters at one level: overall, hour, route,
+    route_hour or stop. Every scored arrival at every stop, against the timetable. Empty while
+    the table is being created (the first analysis build after an update)."""
     if not q("select to_regclass('marts.mart_lateness') is not null as ok")["ok"][0]:
         return pd.DataFrame()
     df = q(
-        f"select * from marts.mart_lateness where scope = %s and period = %s and days = %s "
+        f"select * from marts.mart_lateness where period = %s and days = %s "
         f"and {_LEVELS[level]} order by route_id, stop_id, hour_local",
-        (scope, period_key(start), days_key(wt)),
+        (period_key(start), days_key(wt)),
     )
     for c in ("median_delay_s", "p10_delay_s", "p90_delay_s"):
         df[c] = df[c].astype(float)
@@ -1104,35 +1099,37 @@ def recomputing_note() -> None:
 
 
 def route_rank(start: date, wt: str | None) -> pd.DataFrame:
-    """Every route's record for a period (timepoint arrivals): the report-card table on Routes
-    and the comparison on each route's page. worst_hour: the hour with the largest share of
-    buses early or 5+ min late (at least 10 arrivals)."""
-    r = lateness("timepoints", start, wt, "route")
+    """Every route's record for a period (all its stops): the report-card table on Routes
+    and the comparison on each route's page. worst_hour / worst_delay_s: the hour of day when
+    the typical bus on the route ran latest, and how late (hours with at least 10 arrivals)."""
+    r = lateness(start, wt, "route")
     if r.empty:
         return r
-    h = lateness("timepoints", start, wt, "route_hour")
+    h = lateness(start, wt, "route_hour")
     h = h[h["n"] >= 10]
     worst = (
-        h.assign(share=h["n_on_time"] / h["n"])
-        .sort_values(["route_id", "share", "hour_local"])
-        .drop_duplicates("route_id")[["route_id", "hour_local"]]
-        .rename(columns={"hour_local": "worst_hour"})
+        h.sort_values(["route_id", "median_delay_s", "hour_local"], ascending=[True, False, True])
+        .drop_duplicates("route_id")[["route_id", "hour_local", "median_delay_s"]]
+        .rename(columns={"hour_local": "worst_hour", "median_delay_s": "worst_delay_s"})
     )
-    out = r.rename(
-        columns={
-            "n_on_time": "on_time",
-            "n_early": "early",
-            "n_late": "late",
-            "median_delay_s": "median_delay",
-        }
-    ).merge(worst, on="route_id", how="left")
-    out = out.assign(share=out["on_time"] / out["n"]).sort_values("share", ascending=False)
-    return out.drop(columns=["share"]).reset_index(drop=True)
+    out = r.rename(columns={"median_delay_s": "median_delay"}).merge(
+        worst, on="route_id", how="left"
+    )
+    return out.sort_values("median_delay").reset_index(drop=True)
+
+
+def worst_hour_label(hour, delay_s) -> str:
+    """'5 pm · 4 min late': when a route's typical bus runs latest."""
+    if hour is None or pd.isna(hour):
+        return "—"
+    return f"{hour_label(int(hour))} · {fmt_delay(delay_s)}"
 
 
 # ------------------------------------------- what you were told vs when the bus came ----
 
-TOLD_AHEAD = (30, 20, 15, 10, 5, 3, 2, 1)  # minutes the sign showed; must match mart_told_vs_actual
+# Minutes the countdown showed, shown left to right (far to near). The mart also has 20 and 30;
+# riders decide when to leave within about 15 minutes, so the chart stops there.
+TOLD_AHEAD = (15, 10, 5, 3, 2, 1)
 
 
 def told_vs_actual(route_id: str | None = None, stop_id: str | None = None) -> pd.DataFrame:
@@ -1150,102 +1147,108 @@ def told_vs_actual(route_id: str | None = None, stop_id: str | None = None) -> p
 
 
 TOLD_CHART_NOTE = (
-    "Left: the printed timetable. Right of it: LTD's live prediction (the countdown on signs and "
-    "apps) when it said the bus was that many minutes away. The line is how much later than that "
-    "the typical bus came (below zero = earlier); the shaded range is where 8 in 10 buses fell. "
-    "The narrower the range, the more you can rely on it. Hover a point for how often it was "
-    "right to within a minute."
+    "Blue: LTD's countdown (on signs and in apps) when it said the bus was that many minutes "
+    "away. Grey: the printed timetable, the same at any distance because it never changes. Each "
+    "line is how much later than that the typical bus came (below zero = earlier); each shaded "
+    "band is where 8 in 10 buses fell. The narrower the band, the more you can rely on it."
 )
 
 
 def told_chart(df: pd.DataFrame, min_n: int = 20) -> go.Figure | None:
-    """One chart: how much later than the timetable, and than the sign N minutes out, the bus
-    came. From told_vs_actual() rows (basis, ahead_min, n, median_s, p10_s, p90_s, ...)."""
+    """How much later than the timetable, and than the countdown N minutes out, the bus came.
+    The countdown is a line from 15 minutes out to 1; the timetable a flat band across the same
+    range, so the two compare directly. Countdown points with fewer than min_n predictions are
+    left out (the chart only spans the distances that have data)."""
     if df.empty:
         return None
     tt = df[(df["basis"] == "timetable") & (df["n"] >= min_n)]
-    sign = df[(df["basis"] == "sign") & (df["n"] >= min_n)].copy()
-    sign = sign.sort_values("ahead_min", ascending=False)
-    if tt.empty and sign.empty:
+    sign = df[
+        (df["basis"] == "sign") & (df["n"] >= min_n) & (df["ahead_min"].isin(TOLD_AHEAD))
+    ].sort_values("ahead_min", ascending=False)
+    if sign.empty:
         return None
-    x_tt = "Timetable"
-    x_sign = [f"{int(m)} min" for m in sign["ahead_min"]]
+    x = [f"{int(m)} min" for m in sign["ahead_min"]]
 
-    def hover(r, what: str) -> str:
+    def hover(r, what: str, unit: str) -> str:
         return (
             f"<b>{what}</b><br>typical bus {r.median_s / 60:+.1f} min vs this"
             f"<br>8 in 10 buses: {r.p10_s / 60:+.1f} to {r.p90_s / 60:+.1f} min"
             f"<br>right to within 1 min: {r.n_within_1min / r.n:.0%}"
-            f" · within 2 min: {r.n_within_2min / r.n:.0%}"
-            f"<br>typically off by {r.median_abs_s / 60:.1f} min · {int(r.n):,} "
-            + ("arrivals" if what == "Timetable" else "predictions")
+            f" · within 2 min: {r.n_within_2min / r.n:.0%}<br>{int(r.n):,} {unit}"
         )
 
     fig = go.Figure()
     fig.add_hline(y=0, line_width=1, line_color="#999", line_dash="dot")
+    lo, hi = float(sign["p10_s"].min()), float(sign["p90_s"].max())
     if not tt.empty:
         r = tt.iloc[0]
+        lo, hi = min(lo, r.p10_s), max(hi, r.p90_s)
         fig.add_trace(
             go.Scatter(
-                x=[x_tt],
-                y=[r.median_s / 60],
-                mode="markers",
-                name="Timetable",
-                marker={"size": 13, "color": "#6b6b6b", "symbol": "diamond"},
-                error_y={
-                    "type": "data",
-                    "symmetric": False,
-                    "array": [(r.p90_s - r.median_s) / 60],
-                    "arrayminus": [(r.median_s - r.p10_s) / 60],
-                    "color": "#6b6b6b",
-                    "thickness": 6,
-                    "width": 0,
-                },
-                hovertext=[hover(r, "Timetable")],
-                hoverinfo="text",
-            )
-        )
-    if not sign.empty:
-        fig.add_trace(
-            go.Scatter(
-                x=x_sign + x_sign[::-1],
-                y=list(sign["p90_s"] / 60) + list(sign["p10_s"] / 60)[::-1],
+                x=x + x[::-1],
+                y=[r.p90_s / 60] * len(x) + [r.p10_s / 60] * len(x),
                 fill="toself",
-                fillcolor="#1f5f9e",
-                opacity=0.18,
+                fillcolor="rgba(110,110,110,0.16)",
                 mode="lines",
                 line_width=0,
                 hoverinfo="skip",
-                name="8 in 10 buses",
+                name="Timetable: 8 in 10 buses",
             )
         )
         fig.add_trace(
             go.Scatter(
-                x=x_sign,
-                y=sign["median_s"] / 60,
-                mode="lines+markers",
-                name="LTD's live prediction",
-                line={"color": "#1f5f9e", "width": 2.5},
-                hovertext=[
-                    hover(r, f"When the sign said {int(r.ahead_min)} min")
-                    for r in sign.itertuples()
-                ],
+                x=x,
+                y=[r.median_s / 60] * len(x),
+                mode="lines",
+                name="Timetable: typical bus",
+                line={"color": "#6b6b6b", "width": 2.5, "dash": "dash"},
+                hovertext=[hover(r, "The printed timetable", "arrivals")] * len(x),
                 hoverinfo="text",
             )
         )
-    lo = min(0.0, float(df["p10_s"].min()) / 60) - 0.5
-    hi = max(0.0, float(df["p90_s"].max()) / 60) + 0.5
+    fig.add_trace(
+        go.Scatter(
+            x=x + x[::-1],
+            y=list(sign["p90_s"] / 60) + list(sign["p10_s"] / 60)[::-1],
+            fill="toself",
+            fillcolor="rgba(31,95,158,0.20)",
+            mode="lines",
+            line_width=0,
+            hoverinfo="skip",
+            name="Countdown: 8 in 10 buses",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=x,
+            y=sign["median_s"] / 60,
+            mode="lines+markers",
+            name="Countdown: typical bus",
+            line={"color": "#1f5f9e", "width": 3},
+            hovertext=[
+                hover(r, f"When the countdown said {int(r.ahead_min)} min", "predictions")
+                for r in sign.itertuples()
+            ],
+            hoverinfo="text",
+        )
+    )
+    pad = 0.4
     fig.update_layout(
         xaxis={
             "type": "category",
             "categoryorder": "array",
-            "categoryarray": [x_tt, *[f"{m} min" for m in TOLD_AHEAD]],
-            "title": "what you were told",
+            "categoryarray": x,
+            "title": "what the countdown said",
         },
-        yaxis={"title": "minutes later than told", "range": [lo, hi], "tickformat": "+.0f"},
+        yaxis={
+            "title": "minutes later than told",
+            "range": [min(0.0, lo / 60) - pad, max(0.0, hi / 60) + pad],
+            "tickformat": "+.0f",
+            "zeroline": False,
+        },
         legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0, "xanchor": "left"},
-        margin={"t": 30},
-        height=380,
+        margin={"t": 50},
+        height=400,
     )
     return fig
 
@@ -1257,10 +1260,9 @@ def service_hour_key(h) -> int:
 
 
 LATENESS_CHART_NOTE = (
-    "Measured against the printed timetable. "
-    "The line is the typical bus (the median) in each hour, in minutes behind the timetable; "
-    "below zero = early. The shaded range is where 8 in 10 buses fell, and the green band is on "
-    "time (from 1 min early to 5 min late). By scheduled hour; hover a point for details."
+    "Measured against the printed timetable. The line is the typical bus (the median) in each "
+    "hour, in minutes behind the timetable; below zero = early. The shaded band is where 8 in 10 "
+    "buses fell. By scheduled hour; hover a point for details."
 )
 
 
@@ -1273,9 +1275,9 @@ def lateness_chart(
     min_n: int = 10,
 ) -> go.Figure | None:
     """Typical minutes late by hour of day with the range 8 in 10 buses fall in, from rows with
-    hour_local, n, n_early, n_late, median_delay_s, p10_delay_s, p90_delay_s (and n_days).
-    reference, if given, is drawn as a thin grey line for comparison."""
-    d = hourly[hourly["n"] >= min_n].sort_values("hour_local") if len(hourly) else hourly
+    hour_local, n, median_delay_s, p10_delay_s, p90_delay_s (and n_days). reference, if given,
+    is drawn as a thin grey dashed line for comparison."""
+    d = hourly[hourly["n"] >= min_n] if len(hourly) else hourly
     if d is None or d.empty:
         return None
     d = d.assign(_k=d["hour_local"].map(service_hour_key)).sort_values("_k")
@@ -1288,7 +1290,6 @@ def lateness_chart(
     x_of = {h: hour_label(h) for h in hours}
     x = [x_of[int(h)] for h in d["hour_local"]]
     fig = go.Figure()
-    fig.add_hrect(y0=-1, y1=5, fillcolor="#2e8b57", opacity=0.08, line_width=0)
     fig.add_hline(y=0, line_width=1, line_color="#999", line_dash="dot")
     fig.add_trace(
         go.Scatter(
@@ -1319,16 +1320,13 @@ def lateness_chart(
         (
             f"<b>{label}</b>, {xx}<br>typical bus {m / 60:+.1f} min"
             f"<br>8 in 10 buses: {lo / 60:+.0f} to {hi / 60:+.0f} min"
-            f"<br>early (1+ min) {100 * e / n:.0f}% · 5+ min late {100 * la / n:.0f}%"
             f"<br>{int(n):,} arrivals" + (f" over {int(nd)} days" if pd.notna(nd) else "")
         )
-        for xx, m, lo, hi, e, la, n, nd in zip(
+        for xx, m, lo, hi, n, nd in zip(
             x,
             d["median_delay_s"],
             d["p10_delay_s"],
             d["p90_delay_s"],
-            d["n_early"],
-            d["n_late"],
             d["n"],
             days,
             strict=False,
@@ -1345,16 +1343,242 @@ def lateness_chart(
             hoverinfo="text",
         )
     )
+    values = list(d["p10_delay_s"] / 60) + list(d["p90_delay_s"] / 60) + [0.0]
+    if ref is not None and len(ref):
+        values += list(ref["median_delay_s"] / 60)
     fig.update_layout(
         xaxis={"type": "category", "categoryorder": "array", "categoryarray": list(x_of.values())},
-        yaxis_title="minutes behind the timetable",
-        yaxis_tickformat="+d",
+        yaxis={
+            "title": "minutes behind the timetable",
+            "tickformat": "+d",
+            "range": [min(values) - 0.5, max(values) + 0.5],
+            "zeroline": False,
+        },
         legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0, "xanchor": "left"},
         legend_title="",
         margin={"t": 30},
         height=380,
     )
     return fig
+
+
+def fmt_range(p10, p90) -> str:
+    """The range 8 in 10 buses fell in, in whole minutes against the timetable: '−1 to +6 min'."""
+    if p10 is None or p90 is None or pd.isna(p10) or pd.isna(p90):
+        return ""
+
+    def m(v: float) -> str:
+        r = round(float(v) / 60)
+        return "0" if r == 0 else f"{r:+d}".replace("-", "−")
+
+    return f"{m(p10)} to {m(p90)} min"
+
+
+RANGE_HELP = (
+    "Where 8 in 10 buses fell, in minutes against the timetable (negative = early): the "
+    "earliest tenth and the latest tenth of buses are outside it."
+)
+
+
+def col_range(label: str = "Usual range"):
+    return st.column_config.TextColumn(label, help=RANGE_HELP)
+
+
+# ------------------------------------------------------------- clickable tables ----
+
+_TABLE_CSS = """
+<style>
+.ebw-t { border: 1px solid #e3e6ea; border-radius: 10px; overflow: auto; font-size: 15px; }
+.ebw-r { display: grid; align-items: center; column-gap: 12px; padding: 7px 12px;
+         border-bottom: 1px solid #eef0f2; color: #262730; text-decoration: none; }
+a.ebw-r:hover { background: #eef6f2; }
+.ebw-h { position: sticky; top: 0; background: #f6f8f9; font-weight: 600; font-size: 13px;
+         color: #555; z-index: 1; }
+.ebw-n { text-align: right; font-variant-numeric: tabular-nums; }
+.ebw-k { font-weight: 700; }
+.ebw-s { color: #666; font-size: 14px; }
+.ebw-g { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+.ebw-r { grid-template-columns: var(--cols); }
+@media (max-width: 640px) {
+  .ebw-hide { display: none; } .ebw-t { font-size: 14px; }
+  .ebw-r { grid-template-columns: var(--cols-phone); padding: 7px 8px; column-gap: 8px; }
+  .ebw-g { flex-direction: column; align-items: stretch; gap: 2px; }
+}
+</style>
+"""
+
+
+def range_strip(p10, med, p90, lo: float, hi: float, width: int = 130) -> str:
+    """A small horizontal picture of where 8 in 10 buses fell (p10 to p90, seconds) with a tick at
+    the typical bus and a faint line at 0, on a shared scale lo..hi (minutes)."""
+    if any(v is None or pd.isna(v) for v in (p10, med, p90)):
+        return ""
+
+    def x(v: float) -> float:  # percent of the strip's width
+        return max(0.0, min(100.0, (v / 60 - lo) / (hi - lo) * 100))
+
+    # plain positioned spans (st.html's sanitiser removes inline SVG), placed in percent so the
+    # strip can shrink to fit a phone
+    zero, a, b, m = x(0.0), x(p10), x(p90), x(med)
+    box = "position:absolute;display:block"
+    return (
+        f"<span style='position:relative;display:inline-block;flex:none;width:{width}px;"
+        f"max-width:100%;height:16px'>"
+        f"<span style='{box};left:{zero:.1f}%;top:0;width:1px;height:16px;background:#bbb'></span>"
+        f"<span style='{box};left:{a:.1f}%;top:4px;width:max(2px,{b - a:.1f}%);height:8px;"
+        f"border-radius:3px;background:#9cc0e0'></span>"
+        f"<span style='{box};left:calc({m:.1f}% - 1.5px);top:1px;width:3px;height:14px;"
+        f"border-radius:1px;background:#1f5f9e'></span></span>"
+    )
+
+
+def link_table(rows: list[dict], columns: list[dict], max_height: int = 460) -> None:
+    """A table whose every row is a link (click anywhere on it). rows: dicts with 'href' and one
+    entry per column key; columns: dicts with 'key', 'label', 'width' (CSS grid track), and
+    optionally 'num' (right-aligned), 'bold', 'hide_on_phone', 'phone_width', 'html' (value is
+    HTML)."""
+    tracks = " ".join(c["width"] for c in columns)
+    # on a phone the hidden columns get no track; a column can name a narrower phone_width
+    # (by default flexible columns may shrink as far as their content allows)
+    phone = " ".join(
+        c.get("phone_width", re.sub(r"minmax\([^,]+,", "minmax(min-content,", c["width"]))
+        for c in columns
+        if not c.get("hide_on_phone")
+    )
+    grid = f"--cols:{tracks};--cols-phone:{phone}"
+
+    def cell(c: dict, value) -> str:
+        cls = []
+        if c.get("num"):
+            cls.append("ebw-n")
+        if c.get("bold"):
+            cls.append("ebw-k")
+        if c.get("hide_on_phone"):
+            cls.append("ebw-hide")
+        text = (
+            ""
+            if value is None or (not isinstance(value, str) and pd.isna(value))
+            else (str(value) if c.get("html") else html_escape(str(value)))
+        )
+        return f"<div class='{' '.join(cls)}'>{text}</div>"
+
+    head = "".join(
+        f"<div class='{'ebw-n ' if c.get('num') else ''}{'ebw-hide' if c.get('hide_on_phone') else ''}'"
+        f" title='{html_escape(c.get('help', ''))}'>{html_escape(c['label'])}</div>"
+        for c in columns
+    )
+    body = "".join(
+        f"<a class='ebw-r' href='{html_escape(r['href'])}' target='_self' "
+        f"style='{grid}'>" + "".join(cell(c, r.get(c["key"])) for c in columns) + "</a>"
+        for r in rows
+    )
+    st.html(
+        _TABLE_CSS + f"<div class='ebw-t' style='max-height:{max_height}px'>"
+        f"<div class='ebw-r ebw-h' style='{grid}'>{head}</div>{body}</div>"
+    )
+
+
+def range_cell(p10, med, p90, lo: float, hi: float) -> str:
+    """The 'usual range' cell of a link_table: the strip and the numbers."""
+    return (
+        f"<span class='ebw-g'>{range_strip(p10, med, p90, lo, hi)}"
+        f"<span class='ebw-s'>{html_escape(fmt_range(p10, p90))}</span></span>"
+    )
+
+
+def range_scale(df: pd.DataFrame, lo_col: str = "p10_delay_s", hi_col: str = "p90_delay_s"):
+    """A shared minutes scale for a table's range strips: whole minutes around the data, 0 in."""
+    if df.empty:
+        return -2.0, 8.0
+    lo = math.floor(min(0.0, float(df[lo_col].min()) / 60)) - 0.5
+    hi = math.ceil(max(1.0, float(df[hi_col].quantile(0.95)) / 60)) + 0.5
+    return lo, hi
+
+
+# ----------------------------------------------- lateness for any route / stop choice ----
+
+_HOURLY_SQL = """
+    select hour_local, count(*) as n,
+           percentile_cont(0.5) within group (order by delay_s) as median_delay_s,
+           percentile_cont(0.1) within group (order by delay_s) as p10_delay_s,
+           percentile_cont(0.9) within group (order by delay_s) as p90_delay_s,
+           count(distinct service_date) as n_days
+    from marts.fct_stop_events
+    where status is not null and service_date >= %s {where}
+    group by grouping sets ((), (hour_local))
+"""
+
+
+def selection_lateness(
+    start: date, wt: str | None, route_id: str | None = None, stop_id: str | None = None
+) -> tuple[pd.Series | None, pd.DataFrame]:
+    """(overall row, rows by hour) of lateness against the timetable for the page's filters and
+    an optional route and/or stop. Everything and single routes come from the precomputed
+    table; a stop (with or without a route) is computed from that stop's arrivals."""
+    if stop_id is None:
+        level = ("route", "route_hour") if route_id else ("overall", "hour")
+        tot = lateness(start, wt, level[0])
+        hourly = lateness(start, wt, level[1])
+        if route_id:
+            tot = tot[tot["route_id"].astype(str) == str(route_id)]
+            hourly = hourly[hourly["route_id"].astype(str) == str(route_id)]
+        return (tot.iloc[0] if len(tot) else None), hourly
+    clause, params = day_sql(wt)
+    where = f"and stop_id = %s {clause}"
+    args: tuple = (start, stop_id, *params)
+    if route_id:
+        where += " and route_id = %s"
+        args = (*args, route_id)
+    df = q(_HOURLY_SQL.format(where=where), args)
+    for c in ("median_delay_s", "p10_delay_s", "p90_delay_s"):
+        df[c] = df[c].astype(float)
+    tot = df[df["hour_local"].isna()]
+    hourly = df[df["hour_local"].notna()].astype({"hour_local": int})
+    return (tot.iloc[0] if len(tot) and int(tot["n"].iloc[0]) else None), hourly
+
+
+def service_today() -> date:
+    """Today's service date in Eugene: trips after midnight count to the day before until 3 am."""
+    return (pd.Timestamp.now(tz=LOCAL_TZ) - pd.Timedelta(hours=3)).date()
+
+
+def today_lateness(group_by_route: bool = False, route_id=None, stop_id=None) -> pd.DataFrame:
+    """Lateness against the timetable so far today (as of the latest analysis build), overall or
+    per route, optionally for one route and/or stop."""
+    where, args = "", [service_today()]
+    if route_id:
+        where += " and route_id = %s"
+        args.append(route_id)
+    if stop_id:
+        where += " and stop_id = %s"
+        args.append(stop_id)
+    group = "route_id," if group_by_route else ""
+    df = q(
+        f"""
+        select {group} count(*) as n,
+               percentile_cont(0.5) within group (order by delay_s) as median_delay_s
+        from marts.fct_stop_events
+        where status is not null and service_date = %s {where}
+        {"group by route_id" if group_by_route else ""}
+        """,
+        tuple(args),
+    )
+    df["median_delay_s"] = df["median_delay_s"].astype(float)
+    return df
+
+
+def routes_by_service() -> pd.DataFrame:
+    """Every route in today's schedule, busiest first (trips scheduled), with its names."""
+    fv = current_fv()
+    return q(
+        f"""
+        select r.route_id, r.route_short_name, r.route_long_name, count(t.trip_id) as trips
+        from gtfs.routes r
+        left join gtfs.trips t on t.route_id = r.route_id and t.feed_version_id = r.feed_version_id
+        where r.feed_version_id = {fv}
+        group by 1, 2, 3 order by 4 desc, length(r.route_short_name), r.route_short_name
+        """
+    )
 
 
 def route_picker(
@@ -1471,8 +1695,8 @@ def data_note(start: date | None = None) -> None:
             )
         line += " " + build_status()
     st.caption(
-        line + " Typical bus = the median minutes behind the timetable; early = more than 1 min "
-        "ahead of it; on time = from 1 min early to 5 min late. "
+        line + " Typical bus = the median minutes behind the printed timetable; 8 in 10 buses = "
+        "the range between the earliest and latest tenth. "
         "[Source code on GitHub](https://github.com/blemberger/eugene-bus-reliability)."
     )
 
@@ -1492,12 +1716,6 @@ def build_status() -> str:
             f"The latest analysis build ({ago}) had {int(errors)} error(s); numbers may be stale."
         )
     return f"Analysis last rebuilt {ago}."
-
-
-def download_button(df: pd.DataFrame, filename: str, label: str = "Download CSV") -> None:
-    st.download_button(
-        label, df.to_csv(index=False).encode("utf-8"), file_name=filename, mime="text/csv"
-    )
 
 
 def now_local() -> datetime:

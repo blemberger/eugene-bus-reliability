@@ -14,11 +14,11 @@
 
 {{ hourly_start() }}
 with told as (
-    select 'timetable' as basis, null::int as ahead_min, route_id, stop_id, delay_s as error_s
+    select 'timetable' as basis, null::int as ahead_min, route_id, stop_id, service_date, delay_s as error_s
     from {{ ref('fct_stop_events') }}
     where status is not null
     union all
-    select 'sign', horizon_min, route_id, stop_id, error_s
+    select 'sign', horizon_min, route_id, stop_id, service_date, error_s
     from {{ ref('fct_prediction_errors') }}
     where horizon_min in (1, 2, 3, 5, 10, 15, 20, 30)
 )
@@ -33,7 +33,8 @@ select
     percentile_cont(0.9) within group (order by error_s)      as p90_s,
     percentile_cont(0.5) within group (order by abs(error_s)) as median_abs_s,
     count(*) filter (where abs(error_s) <= 60)                 as n_within_1min,
-    count(*) filter (where abs(error_s) <= 120)                as n_within_2min
+    count(*) filter (where abs(error_s) <= 120)                as n_within_2min,
+    min(service_date)                                          as first_day
 from told
 group by basis, ahead_min, grouping sets ((), (route_id), (stop_id))
 {{ hourly_end() }}

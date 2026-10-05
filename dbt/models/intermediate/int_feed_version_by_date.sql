@@ -34,11 +34,14 @@ span as (
 -- running past midnight on the first day belongs to the previous service date) up to
 -- tomorrow. Dates before collection, or months ahead, can never be matched to realtime
 -- data and would only multiply every downstream table.
+-- The first service day: the day collection started. Trips of the day before that were still
+-- running after midnight (a few minutes of them) are left out, so every day the site counts
+-- was collected from its start.
 first_collected as (
     select coalesce(
         (select min(fetched_at at time zone '{{ var("timezone") }}')::date from {{ source('rt', 'fetch') }}),
         current_date
-    ) - 1 as d
+    ) as d
 ),
 
 dates as (

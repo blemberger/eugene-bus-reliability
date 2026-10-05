@@ -6,7 +6,7 @@
 
 How reliable are **Lane Transit District**'s buses (Eugene–Springfield, Oregon), and how far can you trust the arrival countdown? This project records LTD's public GTFS schedule and GTFS-Realtime feeds every 30 seconds, around the clock, and measures both.
 
-- **On-time performance** by route, stop and hour, from arrivals derived from the buses' own GPS positions.
+- **Lateness against the timetable** by route, stop and hour (the typical bus, and the range 8 in 10 buses fall in), from arrivals at every stop derived from the buses' own GPS positions.
 - **Prediction accuracy**: every prediction LTD publishes is kept, with every revision, and scored against when the bus actually arrived, as a function of how far ahead it was made.
 - **An "honest countdown"**: LTD's live prediction corrected by how far off it has usually been for that route, time of day and horizon.
 
