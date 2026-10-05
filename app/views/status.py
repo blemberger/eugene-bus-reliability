@@ -432,14 +432,28 @@ else:
     if log.empty:
         st.caption("No build log yet: it starts with the scheduler's first build.")
     else:
-        last = log.iloc[0]
-        st.metric(
-            "Last build",
-            fmt_dt(last["finished_at"] or last["started_at"]),
-            f"{fmt_ago(last['finished_at'] or last['started_at'])}"
-            + ("" if last["finished_at"] else " — still running or failed"),
-            delta_color="off",
-        )
+        done = log[log["finished_at"].notna()]
+        running = log.iloc[0] if pd.isna(log.iloc[0]["finished_at"]) else None
+        if not done.empty:
+            last = done.iloc[0]
+            st.metric(
+                "Last finished build",
+                fmt_dt(last["finished_at"]),
+                fmt_ago(last["finished_at"])
+                + (
+                    f" · another started {fmt_ago(running['started_at'])}"
+                    if running is not None
+                    else ""
+                ),
+                delta_color="off",
+            )
+        elif running is not None:
+            st.metric(
+                "First build",
+                "running",
+                f"started {fmt_ago(running['started_at'])}",
+                delta_color="off",
+            )
         table(
             pd.DataFrame(
                 {

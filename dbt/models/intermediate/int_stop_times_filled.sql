@@ -2,7 +2,11 @@
 -- timepoints before and after, by distance along the shape when the feed gives
 -- it, else by stop count. This is what trip planners do with the same data.
 
+-- A schedule version never changes once loaded, so each build only adds versions not yet here.
+
 {{ config(
+    materialized='incremental',
+    incremental_strategy='append',
     indexes=[{'columns': ['feed_version_id', 'trip_id', 'stop_sequence'], 'unique': True}]
 ) }}
 
@@ -13,6 +17,9 @@ with st as (
         shape_dist_traveled,
         row_number() over (partition by feed_version_id, trip_id order by stop_sequence) as rn
     from {{ ref('stg_gtfs__stop_times') }}
+    {% if is_incremental() %}
+    where feed_version_id > (select coalesce(max(feed_version_id), 0) from {{ this }})
+    {% endif %}
 ),
 
 anchored as (

@@ -140,6 +140,10 @@ def wait_ready(settings: Settings, timeout_minutes: int = 60, poll_seconds: int 
                    order by finished_at desc limit 1""",
                 (began,),
             ).fetchone()
+            finished_since = conn.execute(
+                "select 1 from analytics.build_log where full_refresh and finished_at > %s",
+                (began,),
+            ).fetchone()
             previous = conn.execute(
                 """select percentile_cont(0.5) within group (order by extract(epoch from finished_at - started_at))
                    from analytics.build_log where full_refresh and finished_at is not null"""
@@ -168,6 +172,8 @@ def wait_ready(settings: Settings, timeout_minutes: int = 60, poll_seconds: int 
                     f"rebuilding: started {mins} min ago{typical} (checking every {poll_seconds} s)",
                     flush=True,
                 )
+            elif finished_since:
+                print("rebuild finished; recording it...", flush=True)
             else:
                 print(f"waiting for the rebuild to start{typical}", flush=True)
         time.sleep(poll_seconds)

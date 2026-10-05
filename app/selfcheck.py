@@ -143,15 +143,35 @@ def run_page(page: str, label: str, state: dict | None = None) -> None:
 
     quiet_streamlit_logs()
 
-    t0 = time.monotonic()
+    import common
+
     try:
         at = AppTest.from_file(str(APP_DIR / "streamlit_app.py"), default_timeout=120)
         at.run()
         at.switch_page(page)
         for k, v in (state or {}).items():
             at.session_state[k] = v
+        # timed from an empty cache: the worst case, a visitor when nobody else has been
+        # on the site since the last analysis build
+        import streamlit as st
+
+        st.cache_data.clear()
+        common.QUERY_LOG.clear()
+        t0 = time.monotonic()
         at.run()
-        report(at, label, time.monotonic() - t0)
+        first = time.monotonic() - t0
+        queries = sorted(common.QUERY_LOG, reverse=True)
+        report(at, label, first)
+        # the same page again, as a visitor clicking back to it would get it (cached queries)
+        t0 = time.monotonic()
+        at.run()
+        print(
+            f"   speed: {first:.1f} s with nothing cached, {time.monotonic() - t0:.1f} s cached; "
+            f"{len(queries)} queries, {sum(q for q, _ in queries):.1f} s in the database"
+        )
+        for secs, sql in queries[:3]:
+            if secs >= 0.2:
+                print(f"   slow query {secs:.1f} s: {sql}")
     except Exception:  # noqa: BLE001
         print(f"\n-- {label}: the page test itself failed")
         print("   " + traceback.format_exc().replace("\n", "\n   "))

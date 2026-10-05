@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import time
 import uuid
 from datetime import date, datetime, timedelta
 from datetime import time as dtime
@@ -204,13 +205,30 @@ def search_stops(query: str, limit: int = 12) -> pd.DataFrame:
     )
 
 
+# Every query the pages run, with how long it took: app/selfcheck.py reports the slowest per
+# page, and any over SLOW_QUERY_SECONDS is logged (the dump's LOG LINES section shows it).
+QUERY_LOG: list[tuple[float, str]] = []
+SLOW_QUERY_SECONDS = 1.0
+
+
+def _query_label(sql: str) -> str:
+    return " ".join(sql.split())[:110]
+
+
 def _run(sql: str, params: tuple = ()) -> pd.DataFrame:
     """Run one read-only query and return a DataFrame (no caching)."""
+    t0 = time.monotonic()
     with psycopg.connect(DATABASE_URL) as conn, conn.transaction(), conn.cursor() as cur:
         cur.execute("SET TRANSACTION READ ONLY")
         cur.execute(sql, params)
         cols = [d.name for d in cur.description]
-        return readable_stop_names(pd.DataFrame(cur.fetchall(), columns=cols))
+        df = readable_stop_names(pd.DataFrame(cur.fetchall(), columns=cols))
+    seconds = time.monotonic() - t0
+    QUERY_LOG.append((seconds, _query_label(sql)))
+    del QUERY_LOG[:-500]
+    if seconds > SLOW_QUERY_SECONDS:
+        print(f"WARNING slow query {seconds:.1f} s: {_query_label(sql)}", flush=True)
+    return df
 
 
 @st.cache_data(ttl=30, show_spinner=False)

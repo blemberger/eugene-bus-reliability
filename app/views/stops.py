@@ -3,6 +3,8 @@ should I get there?"""
 
 from __future__ import annotations
 
+from datetime import time as dtime
+
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -686,6 +688,78 @@ with st.expander("Hour by hour"):
         st.caption(
             f"Same measure for each hour, {period}. Blank where an hour has fewer than 10 arrivals."
         )
+
+# ---- each scheduled bus ---------------------------------------------------------------------
+st.markdown("**Your usual bus: each scheduled departure here**")
+pairs = list(zip(tbl["route"], tbl["direction_id"], strict=False))
+usual_key = st.selectbox(
+    "Route",
+    pairs,
+    format_func=lambda k: labels.get(k, str(k[0])),
+    key=f"usual_route_{stop_id}",
+)
+usual = q(
+    f"""
+    select to_char(scheduled_arrival at time zone 'America/Los_Angeles', 'HH24:MI') as sched,
+           weekday_type, count(*) as n,
+           percentile_cont(0.5) within group (order by delay_s) as median_delay,
+           count(*) filter (where status = 'early') as early,
+           count(*) filter (where status = 'late') as late
+    from marts.fct_stop_events
+    where stop_id = %s and route_short_name = %s and direction_id is not distinct from %s
+      and status is not null and service_date >= %s {wt_clause}
+    group by 1, 2 having count(*) >= 3
+    """,
+    (
+        stop_id,
+        usual_key[0],
+        None if pd.isna(usual_key[1]) else int(usual_key[1]),
+        start,
+        *wt_params,
+    ),
+)
+if usual.empty:
+    st.caption(
+        "Not enough days yet: a scheduled bus shows once it has been measured on 3 days "
+        f"({period})."
+    )
+else:
+    hhmm = usual["sched"].str.split(":", expand=True).astype(int)
+    usual["minute"] = hhmm[0] * 60 + hhmm[1]
+    # service-day order: 4 am first, after-midnight trips last
+    usual = usual.sort_values(by="minute", key=lambda m: (m - 240) % 1440)
+    days_word = {"weekday": "Weekdays", "saturday": "Saturdays", "sunday": "Sundays"}
+    out = pd.DataFrame(
+        {
+            "Scheduled": [dtime(int(m) // 60 % 24, int(m) % 60) for m in usual["minute"]],
+            "Typical bus": late_minutes(usual["median_delay"]).to_numpy(),
+            "Early": share_pct(usual["early"], usual["n"]).to_numpy(),
+            "Late": share_pct(usual["late"], usual["n"]).to_numpy(),
+            "Days measured": usual["n"].astype(int).to_numpy(),
+        }
+    )
+    if wt is None:  # all days: weekday and weekend timetables differ, so say which
+        out.insert(1, "Runs", usual["weekday_type"].map(days_word).to_numpy())
+    table(
+        out,
+        hide_index=True,
+        width="stretch",
+        height=min(560, 40 + 35 * len(out)),
+        column_config={
+            "Scheduled": st.column_config.TimeColumn("Scheduled here", format="h:mm a"),
+            "Typical bus": col_minutes(
+                "Typical bus vs timetable", fmt="%+.1f min", help=TYPICAL_HELP
+            ),
+            "Early": col_pct("Early vs timetable (1+ min)", help=EARLY_HELP),
+            "Late": col_pct("5+ min late vs timetable", help=LATE_HELP),
+            "Days measured": col_count("Days measured"),
+        },
+    )
+    st.caption(
+        f"Every scheduled departure of this route here, {period}: how its bus usually runs "
+        "against the timetable. A departure shows once it has been measured on 3 days; the more "
+        "days, the more it means."
+    )
 
 # ---- right now ------------------------------------------------------------------------------
 st.markdown("#### Right now at this stop")

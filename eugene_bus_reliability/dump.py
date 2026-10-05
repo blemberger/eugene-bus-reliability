@@ -532,6 +532,48 @@ def main(settings: Settings, raw: bool = False) -> None:
         """,
         )
 
+        section(
+            "BETWEEN-TIMEPOINT CHECK: is our lateness at minor stops in line with the timepoints around it?"
+        )
+        print(
+            "bump = lateness at a minor stop − the average of the timepoints just before and after it on\n"
+            "the same trip (last 3 days). Near 0: our minor-stop times are consistent with the timepoints,\n"
+            "where LTD's own times agree with ours, so LTD's times at minor stops are the ones that are off.\n"
+            "Around +50 s (the gap to LTD's minor-stop times in METHOD AGREEMENT below): ours run late."
+        )
+        show(
+            cur,
+            """
+            with e as (
+                select service_date, trip_id, stop_sequence, is_timepoint, delay_s
+                from marts.fct_stop_events
+                where service_date >= current_date - 3 and status is not null
+            ),
+            g as (
+                select *,
+                       count(*) filter (where is_timepoint) over (
+                           partition by service_date, trip_id order by stop_sequence) as up,
+                       count(*) filter (where is_timepoint) over (
+                           partition by service_date, trip_id order by stop_sequence desc) as down
+                from e
+            ),
+            a as (
+                select *,
+                       first_value(delay_s) over (
+                           partition by service_date, trip_id, up order by stop_sequence) as prev_tp,
+                       first_value(delay_s) over (
+                           partition by service_date, trip_id, down order by stop_sequence desc) as next_tp
+                from g
+            )
+            select count(*) minor_stops,
+                   round(percentile_cont(0.5) within group (order by delay_s - (prev_tp + next_tp) / 2.0)) median_bump_s,
+                   round(percentile_cont(0.25) within group (order by delay_s - (prev_tp + next_tp) / 2.0)) p25_s,
+                   round(percentile_cont(0.75) within group (order by delay_s - (prev_tp + next_tp) / 2.0)) p75_s
+            from a
+            where not is_timepoint and up > 0 and down > 0
+        """,
+        )
+
         section("METHOD AGREEMENT (feed settled − geometric): timepoints are the fair test")
         show(
             cur,
