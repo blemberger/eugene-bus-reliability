@@ -8,6 +8,7 @@ from common import (
     LATENESS_CHART_NOTE,
     RANGE_HELP,
     TYPICAL_HELP,
+    card,
     current_fv,
     data_note,
     day_label,
@@ -17,16 +18,15 @@ from common import (
     fmt_range,
     lateness,
     lateness_chart,
-    link_table,
     marts_ready,
     page_filters,
     q,
-    range_cell,
-    range_scale,
     recomputing_note,
     require_db,
     require_marts,
-    route_link,
+    route_picker,
+    route_rank,
+    route_table,
     routes_by_service,
     selection_lateness,
     today_lateness,
@@ -34,65 +34,18 @@ from common import (
 
 require_db()
 st.title("How reliable are Eugene's buses?")
-st.caption(
-    "Independent measurements from Lane Transit District's public schedule and live bus "
-    "positions: when each bus actually reached each stop, against the printed timetable. "
-    "Not affiliated with LTD."
-)
 require_marts()
 FV = str(current_fv())
-TOP_ROUTES = 10  # route buttons; the rest are in a list next to them
 
 routes = routes_by_service()
 names = dict(
     zip(routes["route_id"].astype(str), routes["route_short_name"].astype(str), strict=False)
 )
-long_names = dict(
-    zip(routes["route_id"].astype(str), routes["route_long_name"].fillna(""), strict=False)
-)
-top = routes["route_id"].astype(str).head(TOP_ROUTES).tolist()
-rest = sorted(
-    routes["route_id"].astype(str).iloc[TOP_ROUTES:].tolist(),
-    key=lambda r: (len(names[r]), names[r]),
-)
-MORE = "More routes…"
-
-
-def _pick_top() -> None:
-    st.session_state["ov_route"] = st.session_state.get("ov_pill")
-    st.session_state["ov_more"] = MORE
-
-
-def _pick_more() -> None:
-    choice = st.session_state.get("ov_more")
-    if choice and choice != MORE:
-        st.session_state["ov_route"] = choice
-        st.session_state["ov_pill"] = None
-
 
 # ---- when are buses late: any route, any stop -----------------------------------------------
-with st.container(border=True):
-    st.subheader("When are buses late?")
-    c_routes, c_more = st.columns([4, 1], vertical_alignment="bottom")
-    with c_routes:
-        st.pills(
-            "Route (busiest first; none picked = all routes)",
-            sorted(top, key=lambda r: (len(names[r]), names[r])),
-            format_func=lambda r: names[r],
-            key="ov_pill",
-            on_change=_pick_top,
-        )
-    with c_more:
-        st.selectbox(
-            "Other routes",
-            [MORE, *rest],
-            format_func=lambda r: r if r == MORE else names[r],
-            key="ov_more",
-            on_change=_pick_more,
-        )
-    route_id = st.session_state.get("ov_route")
-    if route_id not in names:
-        route_id = None
+with card():
+    st.subheader("When are buses late?", help=LATENESS_CHART_NOTE)
+    route_id = route_picker(routes, key="ov_route")
 
     if route_id:
         stops = q(
@@ -116,10 +69,11 @@ with st.container(border=True):
         for r in stops.itertuples()
     }
     ALL_STOPS = "All stops"
+    # a stop that isn't on the newly chosen route goes back to all stops
     if st.session_state.get("ov_stop") not in (ALL_STOPS, *stop_label):
         st.session_state["ov_stop"] = ALL_STOPS
     stop_choice = st.selectbox(
-        "Stop (type to search)" + (f" on route {names[route_id]}" if route_id else ""),
+        "Stop" + (f" on route {names[route_id]}" if route_id else "") + " (type to search)",
         [ALL_STOPS, *stop_label],
         format_func=lambda s: s if s == ALL_STOPS else stop_label[s],
         key="ov_stop",
@@ -145,115 +99,35 @@ with st.container(border=True):
             st.plotly_chart(fit_phone(fig), width="stretch")
         today = today_lateness(route_id=route_id, stop_id=stop_id)
         n_today = int(today["n"].iloc[0]) if len(today) else 0
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Typical bus vs timetable", fmt_delay(tot["median_delay_s"]), help=TYPICAL_HELP)
+        m1, m2, m3 = st.columns(3)
+        m1.metric(
+            "Typical bus vs timetable",
+            fmt_delay(tot["median_delay_s"]),
+            help=TYPICAL_HELP + f" {int(tot['n']):,} arrivals measured since {fmt_date(start)}.",
+        )
         m2.metric(
             "8 in 10 buses", fmt_range(tot["p10_delay_s"], tot["p90_delay_s"]), help=RANGE_HELP
         )
         m3.metric(
             "Today so far",
             fmt_delay(today["median_delay_s"].iloc[0]) if n_today >= 10 else "—",
-            f"{n_today:,} arrivals" if n_today else "none measured yet",
-            delta_color="off",
-            delta_arrow="off",
-            help="The typical bus today, as of the latest update (every 15 minutes).",
-        )
-        m4.metric(
-            "Arrivals measured",
-            f"{int(tot['n']):,}",
-            f"since {fmt_date(start)}",
-            delta_color="off",
-            delta_arrow="off",
-        )
-        st.caption(
-            LATENESS_CHART_NOTE
-            + f" {what[0].upper() + what[1:]}, {day_label(wt)} since {fmt_date(start)}"
-            + ("; the dashed grey line is all routes together." if ref is not None else ".")
-            + " Pick a route and/or a stop above to narrow it down."
+            help="The typical bus today, as of the latest update (every 15 minutes)"
+            + (f", from {n_today:,} arrivals." if n_today else "; none measured yet."),
         )
 
 # ---- every route --------------------------------------------------------------------------
 if marts_ready():
-    per = lateness(start, wt, "route")
+    per = route_rank(start, wt)
     if not per.empty:
-        with st.container(border=True):
-            st.subheader("Every route")
-            today_r = today_lateness(group_by_route=True)
-            today_of = {
-                str(r.route_id): (r.median_delay_s if r.n >= 10 else None)
-                for r in today_r.itertuples()
-            }
-            per = per.assign(rkey=per["route_short_name"].astype(str).map(lambda v: (len(v), v)))
-            order = st.segmented_control(
-                "Sort by",
-                ["Route number", "Latest first", "Least predictable first"],
-                default="Route number",
-                key="ov_sort",
+        with card():
+            st.subheader(
+                "Every route",
+                help=f"{day_label(wt).capitalize()} since {fmt_date(start)}, every stop (the "
+                "filters above). Click a column heading to sort, again to reverse.",
             )
-            if order == "Latest first":
-                per = per.sort_values("median_delay_s", ascending=False)
-            elif order == "Least predictable first":
-                per = per.assign(w=per["p90_delay_s"] - per["p10_delay_s"]).sort_values(
-                    "w", ascending=False
-                )
-            else:
-                per = per.sort_values("rkey")
-            lo, hi = range_scale(per)
-            link_table(
-                [
-                    {
-                        "href": route_link(r.route_id, r.route_short_name).split("#")[0],
-                        "route": r.route_short_name,
-                        "name": long_names.get(str(r.route_id), ""),
-                        "typical": fmt_delay(r.median_delay_s),
-                        "range": range_cell(r.p10_delay_s, r.median_delay_s, r.p90_delay_s, lo, hi),
-                        "today": fmt_delay(today_of.get(str(r.route_id))),
-                        "n": f"{int(r.n):,}",
-                    }
-                    for r in per.itertuples()
-                ],
-                [
-                    {"key": "route", "label": "Route", "width": "3.2em", "bold": True},
-                    {
-                        "key": "name",
-                        "label": "Name",
-                        "width": "minmax(6em, 1.2fr)",
-                        "hide_on_phone": True,
-                    },
-                    {
-                        "key": "typical",
-                        "label": "Typical bus",
-                        "width": "minmax(7em, 0.8fr)",
-                        "help": TYPICAL_HELP,
-                    },
-                    {
-                        "key": "range",
-                        "label": "8 in 10 buses (vs timetable)",
-                        "width": "minmax(13em, 1.6fr)",
-                        "phone_width": "minmax(6.8em, 1fr)",
-                        "html": True,
-                        "help": RANGE_HELP,
-                    },
-                    {
-                        "key": "today",
-                        "label": "Today so far",
-                        "width": "minmax(6.5em, 0.7fr)",
-                        "hide_on_phone": True,
-                    },
-                    {
-                        "key": "n",
-                        "label": "Arrivals",
-                        "width": "5em",
-                        "num": True,
-                        "hide_on_phone": True,
-                    },
-                ],
-            )
-            st.caption(
-                f"Every scored arrival at every stop, {day_label(wt)} since {fmt_date(start)} "
-                "(the filters above). The bar shows where 8 in 10 buses fell, with a tick at the "
-                "typical bus and a faint line at on schedule. Click a route for its report card."
-            )
+            route_table(per, start, key="ov_routes")
+            st.caption("Click a route for its report card.")
+    st.page_link("views/stops.py", label="Every stop, and each stop's report card →")
 
 n_now = q("""
     select count(distinct vehicle_id) as n from rt.vehicle_position

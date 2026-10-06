@@ -18,8 +18,8 @@ from common import (
     TOLD_CHART_NOTE,
     TYPICAL_HELP,
     busy_stops,
+    card,
     clean_headsigns,
-    col_count,
     col_hour,
     col_minutes,
     current_fv,
@@ -32,7 +32,6 @@ from common import (
     fmt_range,
     hour_label,
     hour_time,
-    late_minutes,
     lateness,
     lateness_chart,
     link_table,
@@ -83,46 +82,38 @@ def lateness_color(minutes: float) -> list[int]:
     return [150, 150, 150, 200]
 
 
-def all_stops_summary() -> tuple:
-    """Before a stop is chosen, at the top: how late buses run by hour at all stops together,
-    and the headline numbers. Returns the filters and the per-stop rows for the rest."""
-    with st.container(border=True):
-        st.subheader("When are buses late? All stops together")
-        start, wt = page_filters()
-        tot = lateness(start, wt, "overall")
-        if tot.empty:
-            if marts_ready() and lateness(start, None, "overall").empty:
-                recomputing_note()
-            else:
-                st.info("No scored arrivals in the selected period yet.")
-            return start, wt, pd.DataFrame()
+def all_stops_summary(start, wt) -> None:
+    """Before a stop is chosen, at the bottom: how late buses run by hour at all stops together."""
+    tot = lateness(start, wt, "overall")
+    if tot.empty:
+        return
+    with card():
+        st.subheader(
+            f"All stops together, {day_label(wt)}",
+            help=LATENESS_CHART_NOTE + " The same as all routes together on the Overview.",
+        )
         fig = lateness_chart(lateness(start, wt, "hour"), "all stops")
         if fig is not None:
             st.plotly_chart(fit_phone(fig), width="stretch")
         t = tot.iloc[0]
-        per = lateness(start, wt, "stop")
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Typical bus vs timetable", fmt_delay(t["median_delay_s"]), help=TYPICAL_HELP)
+        c1, c2 = st.columns(2)
+        c1.metric(
+            "Typical bus vs timetable",
+            fmt_delay(t["median_delay_s"]),
+            help=TYPICAL_HELP + f" {int(t['n']):,} arrivals measured since {fmt_date(start)}.",
+        )
         c2.metric("8 in 10 buses", fmt_range(t["p10_delay_s"], t["p90_delay_s"]), help=RANGE_HELP)
-        c3.metric(
-            "Stops measured",
-            f"{len(per):,}",
-            f"{int(t['n']):,} arrivals",
-            delta_color="off",
-            delta_arrow="off",
-        )
-        st.caption(
-            LATENESS_CHART_NOTE + f" Every stop, {day_label(wt)} since {fmt_date(start)}. "
-            "Choose a stop below to see its own, route by route."
-        )
-    return start, wt, per
 
 
-def all_stops_details(start, wt, per: pd.DataFrame) -> None:
-    """Before a stop is chosen, below the pickers: a map of every stop coloured by its typical
-    lateness (click one to open it), and the stops where buses are most often 5+ minutes late
-    or early."""
+def every_stop(start, wt) -> None:
+    """Before a stop is chosen: every stop in one sortable table (click a row to open its report
+    card), and on a map coloured by its typical lateness (click a dot to open it)."""
+    per = lateness(start, wt, "stop")
     if per.empty:
+        if marts_ready() and lateness(start, None, "overall").empty:
+            recomputing_note()
+        else:
+            st.info("No scored arrivals in the selected period yet.")
         return
     period = f"{day_label(wt).capitalize()} since {fmt_date(start)}"
     names = q(f"""
@@ -132,9 +123,68 @@ def all_stops_details(start, wt, per: pd.DataFrame) -> None:
     per = per.merge(names, on="stop_id", how="inner").rename(columns={"routes_here": "routes"})
     per["typical"] = per["median_delay_s"] / 60
 
-    with st.container(border=True):
-        st.subheader("Every stop on a map")
-        shown = per[per["n"] >= 20].copy()
+    enough = per[per["n"] >= 20].sort_values("stop_name")
+    lo, hi = range_scale(enough)
+    with card():
+        st.subheader(
+            "Every stop",
+            help=f"{period}, stops with at least 20 measured arrivals. Click a column heading to "
+            "sort, again to reverse: Typical bus sorts latest first, then earliest first.",
+        )
+        link_table(
+            [
+                {
+                    "href": stop_link(r.stop_id, "").split("#")[0],
+                    "hover": f"{r.stop_name}: {int(r.n):,} arrivals measured",
+                    "stop": f"{r.stop_name}" + (f" · #{r.stop_code}" if r.stop_code else ""),
+                    "routes": r.routes,
+                    "typical": fmt_delay(r.median_delay_s),
+                    "typical_s": float(r.median_delay_s),
+                    "range": range_cell(r.p10_delay_s, r.median_delay_s, r.p90_delay_s, lo, hi),
+                    "spread_s": float(r.p90_delay_s - r.p10_delay_s),
+                }
+                for r in enough.itertuples()
+            ],
+            [
+                {"key": "stop", "label": "Stop", "width": "minmax(10em, 2fr)", "bold": True},
+                {
+                    "key": "routes",
+                    "label": "Routes",
+                    "width": "minmax(4em, 0.7fr)",
+                    "hide_on_phone": True,
+                },
+                {
+                    "key": "typical",
+                    "label": "Typical bus",
+                    "width": "minmax(7em, 0.8fr)",
+                    "help": TYPICAL_HELP,
+                    "sort": "typical_s",
+                    "first": "desc",
+                },
+                {
+                    "key": "range",
+                    "label": "8 in 10 buses (vs timetable)",
+                    "width": "minmax(13em, 1.6fr)",
+                    "phone_width": "minmax(6.8em, 1fr)",
+                    "html": True,
+                    "help": RANGE_HELP + " Sorts by how wide the range is.",
+                    "sort": "spread_s",
+                    "first": "desc",
+                },
+            ],
+            max_height=520,
+            key="every_stop",
+            default_sort="stop:asc",
+        )
+        st.caption("Click a stop for its report card.")
+
+    with card():
+        st.subheader(
+            "Every stop on a map",
+            help="Each dot is a stop, coloured by how late its typical bus is against the "
+            "timetable. " + f"{period}; stops with at least 20 arrivals.",
+        )
+        shown = enough.copy()
         shown["color"] = shown["typical"].map(lateness_color)
         shown["typical_txt"] = shown["typical"].map(lambda m: f"{m:+.1f} min")
         shown["code"] = shown["stop_code"].map(lambda c: f"#{c}" if c else "")
@@ -169,10 +219,13 @@ def all_stops_details(start, wt, per: pd.DataFrame) -> None:
             key="stop_overview_map",
         )
         st.caption(
-            "Each dot is a stop, coloured by how late its typical bus is against the timetable: "
-            + " · ".join(f"{label}" for _, _, _, label in LATENESS_BANDS)
-            + f" (amber, green, light red, dark red). {period}; stops with at least 20 arrivals. "
-            "Click a stop to open it."
+            "Typical bus: "
+            + " · ".join(
+                f"<span style='color:{c}'>●</span> {label.replace('typically ', '')}"
+                for _, _, c, label in LATENESS_BANDS
+            )
+            + ". Click a stop to open it.",
+            unsafe_allow_html=True,
         )
         objs = (picked_map.selection.objects or {}).get("stops") if picked_map is not None else None
         clicked = objs[0]["stop_id"] if objs else None
@@ -180,69 +233,6 @@ def all_stops_details(start, wt, per: pd.DataFrame) -> None:
             st.session_state["stop_overview_last"] = clicked
             st.session_state["stop_id"] = clicked
             st.rerun()
-
-    enough = per[per["n"] >= 30]
-    lo, hi = range_scale(enough)
-
-    def stop_table(df: pd.DataFrame) -> None:
-        link_table(
-            [
-                {
-                    "href": stop_link(r.stop_id, "").split("#")[0],
-                    "stop": f"{r.stop_name}" + (f" · #{r.stop_code}" if r.stop_code else ""),
-                    "routes": r.routes,
-                    "typical": fmt_delay(r.median_delay_s),
-                    "range": range_cell(r.p10_delay_s, r.median_delay_s, r.p90_delay_s, lo, hi),
-                    "n": f"{int(r.n):,}",
-                }
-                for r in df.itertuples()
-            ],
-            [
-                {"key": "stop", "label": "Stop", "width": "minmax(10em, 2fr)", "bold": True},
-                {
-                    "key": "routes",
-                    "label": "Routes",
-                    "width": "minmax(4em, 0.7fr)",
-                    "hide_on_phone": True,
-                },
-                {
-                    "key": "typical",
-                    "label": "Typical bus",
-                    "width": "minmax(7em, 0.8fr)",
-                    "help": TYPICAL_HELP,
-                },
-                {
-                    "key": "range",
-                    "label": "8 in 10 buses (vs timetable)",
-                    "width": "minmax(13em, 1.6fr)",
-                    "phone_width": "minmax(6.8em, 1fr)",
-                    "html": True,
-                    "help": RANGE_HELP,
-                },
-                {
-                    "key": "n",
-                    "label": "Arrivals",
-                    "width": "5em",
-                    "num": True,
-                    "hide_on_phone": True,
-                },
-            ],
-        )
-
-    with st.container(border=True):
-        st.subheader("Where buses run latest")
-        stop_table(enough.sort_values("median_delay_s", ascending=False).head(10))
-        st.caption(
-            f"The 10 stops with the latest typical bus. {period}; stops with at least 30 arrivals."
-        )
-    with st.container(border=True):
-        st.subheader("Where buses run early")
-        stop_table(enough.sort_values("p10_delay_s").head(10))
-        st.caption(
-            "The 10 stops where the earliest buses are earliest (the left end of the bar): where "
-            f"you could miss a bus by arriving on time. {period}; stops with at least 30 arrivals. "
-            "Click a stop to open it."
-        )
 
 
 def stop_button_grid(df: pd.DataFrame, key_prefix: str, show_code: bool = False) -> None:
@@ -256,7 +246,6 @@ def stop_pickers(with_map: bool) -> None:
     """Busy-stop buttons, a list of every stop and (once a stop is chosen) a plain stop map;
     before a stop is chosen, the coloured all-stops map further down does the map's job."""
     busiest = busy_stops(9)
-    st.caption("Start with a busy stop:")
     stop_button_grid(busiest, "busy")
     all_stops = q(f"""
         select stop_id, stop_code, stop_name from gtfs.stops
@@ -350,13 +339,14 @@ if query:
 
 stop_id = st.session_state.get("stop_id")
 if not stop_id:
-    # no stop yet: all stops together first, then ways to pick one, then the map and lists
-    start, wt, per = all_stops_summary()
+    # no stop yet: ways to pick one, every stop in a table and on a map, all stops together
     if not query:
-        with st.container(border=True):
-            st.subheader("Find your stop")
+        with card():
+            st.subheader("Start with a busy stop")
             stop_pickers(with_map=False)
-    all_stops_details(start, wt, per)
+    start, wt = page_filters()
+    every_stop(start, wt)
+    all_stops_summary(start, wt)
     st.divider()
     data_note(start)
     st.stop()
@@ -382,14 +372,6 @@ def stop_right_now() -> None:
     show_coming(coming, "No buses scheduled at this stop in the next 36 hours.")
     st.markdown(f"**Just left (last {JUST_LEFT_MINUTES} minutes)**")
     show_left(left, f"No bus has left this stop in the last {JUST_LEFT_MINUTES} minutes.")
-    st.caption(
-        f"The next {n} buses of each route and direction, however far away, and any that left in "
-        f"the last {JUST_LEFT_MINUTES} minutes. "
-        "Arrives/In are LTD's predictions where it has one; LTD only predicts trips that are about "
-        "to run, so later buses show the timetable. 'Likely in' corrects LTD's prediction by how far "
-        "off it has usually been (same route, time of day, minutes ahead). Min late compares with "
-        "the timetable; negative = early."
-    )
 
 
 with st.expander("Where is this stop?", expanded=False):
@@ -462,9 +444,89 @@ tbl["label"] = [
 tbl = tbl.assign(rkey=tbl["route"].map(route_key)).sort_values(["rkey", "direction_id"])
 labels = dict(zip(zip(tbl["route"], tbl["direction_id"], strict=False), tbl["label"], strict=False))
 
+here = q(
+    f"""
+    select percentile_cont(0.5) within group (order by delay_s) as median_delay,
+           percentile_cont(0.1) within group (order by delay_s) as p10,
+           percentile_cont(0.9) within group (order by delay_s) as p90, count(*) as n
+    from marts.fct_stop_events
+    where stop_id = %s and status is not null and service_date >= %s {wt_clause}
+    """,
+    (stop_id, start, *wt_params),
+).iloc[0]
+today = today_lateness(stop_id=stop_id)
+n_today = int(today["n"].iloc[0]) if len(today) else 0
+with card():
+    st.subheader(
+        "Routes at this stop",
+        help=f"{period[0].upper() + period[1:]}. Click a column heading to sort.",
+    )
+    c1, c2, c3 = st.columns(3)
+    c1.metric(
+        "Typical bus here vs timetable",
+        fmt_delay(here["median_delay"]),
+        help=TYPICAL_HELP
+        + f" {int(here['n']):,} arrivals measured, {fmt_date(by_route['first_day'].min())} to "
+        f"{fmt_date(by_route['last_day'].max())}.",
+    )
+    c2.metric("8 in 10 buses", fmt_range(here["p10"], here["p90"]), help=RANGE_HELP)
+    c3.metric(
+        "Today so far",
+        fmt_delay(today["median_delay_s"].iloc[0]) if n_today >= 10 else "—",
+        help="The typical bus here today, as of the latest update (every 15 minutes)"
+        + (f", from {n_today:,} arrivals." if n_today else "; none measured yet."),
+    )
+    for c in ("median_delay", "p10", "p90"):
+        tbl[c] = tbl[c].astype(float)
+    lo, hi = range_scale(tbl, "p10", "p90")
+    link_table(
+        [
+            {
+                "href": route_link(r.route_id, r.route).split("#")[0],
+                "hover": f"Route {r.route} here: {int(r.n):,} arrivals measured",
+                "route": r.route,
+                "toward": r.headsign if isinstance(r.headsign, str) else "",
+                "typical": fmt_delay(r.median_delay),
+                "typical_s": float(r.median_delay),
+                "range": range_cell(r.p10, r.median_delay, r.p90, lo, hi),
+                "spread_s": float(r.p90 - r.p10),
+            }
+            for r in tbl.itertuples()
+        ],
+        [
+            {"key": "route", "label": "Route", "width": "3.4em", "bold": True},
+            {"key": "toward", "label": "Toward", "width": "minmax(6em, 1.2fr)"},
+            {
+                "key": "typical",
+                "label": "Typical bus",
+                "width": "minmax(7em, 0.8fr)",
+                "help": TYPICAL_HELP,
+                "sort": "typical_s",
+            },
+            {
+                "key": "range",
+                "label": "8 in 10 buses (vs timetable)",
+                "width": "minmax(13em, 1.6fr)",
+                "phone_width": "minmax(6.8em, 1fr)",
+                "html": True,
+                "help": RANGE_HELP + " Sorts by how wide the range is.",
+                "sort": "spread_s",
+            },
+        ],
+        key="stop_routes",
+        default_sort="route:asc",
+    )
+    st.caption("Click a route for its report card.")
+
 # ---- when are buses late here: by hour, one line per route --------------------------------
-with st.container(border=True):
-    st.subheader("When are buses late here?")
+with card():
+    st.subheader(
+        "When are buses late here?",
+        help="Against the printed timetable, by the hour the bus was scheduled. Each line is "
+        "the typical bus (the median) on one route; below zero = early. Pick one route to see "
+        f"the band where 8 in 10 of its buses fell. {period[0].upper() + period[1:]}; an hour "
+        "needs 5 arrivals to show. Hover a point for the numbers.",
+    )
     hourly = q(
         f"""
         select route_id, route_short_name as route, direction_id, hour_local, count(*) as n,
@@ -486,7 +548,7 @@ with st.container(border=True):
     options = tbl["label"].tolist()
     busiest = tbl.sort_values("n", ascending=False)["label"].head(6).tolist()
     picked = st.pills(
-        "Routes",
+        "Routes (pick one for its range)",
         options,
         selection_mode="multi",
         default=[o for o in options if o in busiest],
@@ -568,142 +630,82 @@ with st.container(border=True):
             margin={"t": 30},
         )
         st.plotly_chart(fit_phone(fig), width="stretch")
-        st.caption(
-            "Measured against the printed timetable. The line is the typical bus (the median) in "
-            "each hour, in minutes behind the timetable; below zero = early."
-            + (
-                " The shaded range is where 8 in 10 buses fell."
-                if one
-                else " Pick one route to see the range where most of its buses fall."
-            )
-            + f" Scheduled hour, {period}; an hour needs 5 arrivals to show. Hover a point for details."
-        )
 
-
-here = q(
-    f"""
-    select percentile_cont(0.5) within group (order by delay_s) as median_delay,
-           percentile_cont(0.1) within group (order by delay_s) as p10,
-           percentile_cont(0.9) within group (order by delay_s) as p90, count(*) as n
-    from marts.fct_stop_events
-    where stop_id = %s and status is not null and service_date >= %s {wt_clause}
-    """,
-    (stop_id, start, *wt_params),
-).iloc[0]
-today = today_lateness(stop_id=stop_id)
-n_today = int(today["n"].iloc[0]) if len(today) else 0
-with st.container(border=True):
-    st.subheader("Routes at this stop")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Typical bus here vs timetable", fmt_delay(here["median_delay"]), help=TYPICAL_HELP)
-    c2.metric("8 in 10 buses", fmt_range(here["p10"], here["p90"]), help=RANGE_HELP)
-    c3.metric(
-        "Today so far",
-        fmt_delay(today["median_delay_s"].iloc[0]) if n_today >= 10 else "—",
-        f"{n_today:,} arrivals" if n_today else "none measured yet",
-        delta_color="off",
-        delta_arrow="off",
-        help="The typical bus here today, as of the latest update (every 15 minutes).",
-    )
-    c4.metric(
-        "Arrivals measured",
-        f"{int(here['n']):,}",
-        f"{fmt_date(by_route['first_day'].min())}–{fmt_date(by_route['last_day'].max())}",
-        delta_color="off",
-        delta_arrow="off",
-    )
-    for c in ("median_delay", "p10", "p90"):
-        tbl[c] = tbl[c].astype(float)
-    lo, hi = range_scale(tbl, "p10", "p90")
-    link_table(
-        [
-            {
-                "href": route_link(r.route_id, r.route).split("#")[0],
-                "route": r.route,
-                "toward": r.headsign if isinstance(r.headsign, str) else "",
-                "typical": fmt_delay(r.median_delay),
-                "range": range_cell(r.p10, r.median_delay, r.p90, lo, hi),
-                "n": f"{int(r.n):,}",
-            }
-            for r in tbl.itertuples()
-        ],
-        [
-            {"key": "route", "label": "Route", "width": "3.2em", "bold": True},
-            {"key": "toward", "label": "Toward", "width": "minmax(6em, 1.2fr)"},
-            {
-                "key": "typical",
-                "label": "Typical bus",
-                "width": "minmax(7em, 0.8fr)",
-                "help": TYPICAL_HELP,
-            },
-            {
-                "key": "range",
-                "label": "8 in 10 buses (vs timetable)",
-                "width": "minmax(13em, 1.6fr)",
-                "phone_width": "minmax(6.8em, 1fr)",
-                "html": True,
-                "help": RANGE_HELP,
-            },
-            {"key": "n", "label": "Arrivals", "width": "5em", "num": True, "hide_on_phone": True},
-        ],
-    )
-    st.caption(f"{period[0].upper() + period[1:]}. Click a route for its report card.")
 
 # ---- timetable or the sign? ---------------------------------------------------------
-with st.container(border=True):
-    st.subheader("The timetable or the countdown: which to go by here?")
+with card():
     told = told_vs_actual(stop_id=stop_id)
+    since = told["first_day"].min() if len(told) else None
+    st.subheader(
+        "The timetable or the countdown: which to go by here?",
+        help=TOLD_CHART_NOTE
+        + (f" All routes here, all days since {fmt_date(since)}." if since is not None else "")
+        + " A point needs 20 predictions to show. More on the Countdown page.",
+    )
     fig = told_chart(told)
     if fig is None:
         st.caption("Not enough measured arrivals and predictions at this stop yet.")
     else:
         st.plotly_chart(fit_phone(fig), width="stretch")
-        since = told["first_day"].min()
-        st.caption(
-            TOLD_CHART_NOTE + f" All routes at this stop, all days since {fmt_date(since)} (it "
-            "doesn't follow the filters above); a point needs 20 predictions to show. More on "
-            "the Countdown page."
-        )
+        st.caption("All data; doesn't follow the period and days filters.")
 
 # ---- arrive-by guidance ---------------------------------------------------
-with st.container(border=True):
-    st.subheader("How early should I be at the stop?")
+with card():
+    st.subheader(
+        "How early should I be at the stop?",
+        help="Minutes before the scheduled time to be at the stop to catch 19 buses in 20 "
+        "(0 = arriving on time is enough). Blank until a route has 20 arrivals here. "
+        f"{period[0].upper() + period[1:]}.",
+    )
     early_all = q(
         f"""
-        select route_short_name as route, direction_id, count(*) as n,
+        select route_id, route_short_name as route, direction_id, count(*) as n,
                percentile_cont(0.05) within group (order by delay_s) as p05
         from marts.fct_stop_events
         where stop_id = %s and status is not null and service_date >= %s {wt_clause}
-        group by 1, 2
+        group by 1, 2, 3
         """,
         (stop_id, start, *wt_params),
     )
     early_all = early_all.merge(hs, on=["route", "direction_id"], how="left")
     early_all["rkey"] = early_all["route"].map(route_key)
     early_all = early_all.sort_values(["rkey", "direction_id"])
-    enough = early_all["n"] >= 20
-    table(
-        pd.DataFrame(
+
+    def early_by(p05, n) -> float | None:
+        if n < 20 or p05 is None or pd.isna(p05):
+            return None
+        return 0.0 if p05 >= -30 else float(round(-float(p05) / 60))
+
+    rows = []
+    for r in early_all.itertuples():
+        e = early_by(r.p05, r.n)
+        rows.append(
             {
-                "Route": early_all["route"],
-                "Toward": early_all["headsign"].fillna(""),
-                "Be there early by": [
-                    (0.0 if s >= -30 else float(round(-float(s) / 60))) if ok else float("nan")
-                    for s, ok in zip(early_all["p05"], enough, strict=False)
-                ],
-                "Arrivals": early_all["n"],
+                "href": route_link(r.route_id, r.route).split("#")[0],
+                "hover": f"Route {r.route} here: {int(r.n):,} arrivals measured",
+                "route": r.route,
+                "toward": r.headsign if isinstance(r.headsign, str) else "",
+                "early": "not enough data yet"
+                if e is None
+                else ("on time is enough" if e == 0 else f"{e:.0f} min"),
+                "early_s": e,
             }
-        ),
-        hide_index=True,
-        width="content",
-        column_config={
-            "Be there early by": col_minutes("Be there early by", fmt="%.0f min"),
-            "Arrivals": col_count("Arrivals"),
-        },
-    )
-    st.caption(
-        "Minutes before the scheduled time to be at the stop to catch 19 buses in 20 "
-        "(0 = on time is enough). Blank until a route has 20 arrivals here."
+        )
+    link_table(
+        rows,
+        [
+            {"key": "route", "label": "Route", "width": "3.4em", "bold": True},
+            {"key": "toward", "label": "Toward", "width": "minmax(6em, 1.5fr)"},
+            {
+                "key": "early",
+                "label": "Be there early by",
+                "width": "minmax(9em, 1fr)",
+                "sort": "early_s",
+                "first": "desc",
+            },
+        ],
+        key="stop_early",
+        default_sort="route:asc",
     )
     with st.expander("Hour by hour"):
         guide = hourly[hourly["n"] >= 10].copy()
@@ -735,14 +737,17 @@ with st.container(border=True):
                     if c != "Hour"
                 },
             )
-            st.caption(
-                f"Same measure for each hour, {period}. Blank where an hour has fewer than 10 arrivals."
-            )
+            st.caption("Blank where an hour has fewer than 10 arrivals.")
 
 
 # ---- each scheduled bus ---------------------------------------------------------------------
-with st.container(border=True):
-    st.subheader("Your usual bus: each scheduled departure here")
+with card():
+    st.subheader(
+        "Your usual bus: each scheduled departure here",
+        help="How each scheduled bus of this route usually runs here against the timetable "
+        "(negative = early), and the earliest and latest it came. A departure shows once it has "
+        f"been measured on 3 days; hover a row for how many. {period[0].upper() + period[1:]}.",
+    )
     pairs = list(zip(tbl["route"], tbl["direction_id"], strict=False))
     usual_key = st.selectbox(
         "Route",
@@ -778,56 +783,91 @@ with st.container(border=True):
         hhmm = usual["sched"].str.split(":", expand=True).astype(int)
         usual["minute"] = hhmm[0] * 60 + hhmm[1]
         # service-day order: 4 am first, after-midnight trips last
-        usual = usual.sort_values(by="minute", key=lambda m: (m - 240) % 1440)
+        usual["service_min"] = (usual["minute"] - 240) % 1440
+        usual = usual.sort_values("service_min")
         days_word = {"weekday": "Weekdays", "saturday": "Saturdays", "sunday": "Sundays"}
-        out = pd.DataFrame(
+        cols = [
             {
-                "Scheduled": [dtime(int(m) // 60 % 24, int(m) % 60) for m in usual["minute"]],
-                "Typical bus": late_minutes(usual["median_delay"]).to_numpy(),
-                "Earliest": late_minutes(usual["earliest"]).to_numpy(),
-                "Latest": late_minutes(usual["latest"]).to_numpy(),
-                "Days measured": usual["n"].astype(int).to_numpy(),
-            }
-        )
-        if wt is None:  # all days: weekday and weekend timetables differ, so say which
-            out.insert(1, "Runs", usual["weekday_type"].map(days_word).to_numpy())
-        table(
-            out,
-            hide_index=True,
-            width="stretch",
-            height=min(560, 40 + 35 * len(out)),
-            column_config={
-                "Scheduled": st.column_config.TimeColumn("Scheduled here", format="h:mm a"),
-                "Typical bus": col_minutes(
-                    "Typical bus vs timetable", fmt="%+.1f min", help=TYPICAL_HELP
-                ),
-                "Earliest": col_minutes(
-                    "Earliest",
-                    fmt="%+.1f min",
-                    help="The earliest this bus came on any day measured.",
-                ),
-                "Latest": col_minutes(
-                    "Latest", fmt="%+.1f min", help="The latest this bus came on any day measured."
-                ),
-                "Days measured": col_count("Days measured"),
+                "key": "sched",
+                "label": "Scheduled here",
+                "width": "minmax(6em, 1fr)",
+                "bold": True,
+                "sort": "sched_s",
+                "first": "asc",
             },
-        )
-        st.caption(
-            f"Every scheduled departure of this route here, {period}: how its bus usually runs "
-            "against the timetable (minutes; negative = early), and the earliest and latest it came. "
-            "A departure shows once it has been measured on 3 days; the more days, the more it means."
+            {
+                "key": "typical",
+                "label": "Typical bus",
+                "width": "minmax(7em, 1fr)",
+                "help": TYPICAL_HELP,
+                "sort": "typical_s",
+            },
+            {
+                "key": "earliest",
+                "label": "Earliest",
+                "width": "minmax(6em, 1fr)",
+                "help": "The earliest this bus came on any day measured.",
+                "sort": "earliest_s",
+                "first": "asc",
+            },
+            {
+                "key": "latest",
+                "label": "Latest",
+                "width": "minmax(6em, 1fr)",
+                "help": "The latest this bus came on any day measured.",
+                "sort": "latest_s",
+            },
+        ]
+        if wt is None:  # all days: weekday and weekend timetables differ, so say which
+            cols.insert(1, {"key": "runs", "label": "Runs", "width": "minmax(5.5em, 0.8fr)"})
+        link_table(
+            [
+                {
+                    "hover": f"Measured on {int(r.n)} days",
+                    "sched": dtime(int(r.minute) // 60 % 24, int(r.minute) % 60)
+                    .strftime("%I:%M %p")
+                    .lstrip("0")
+                    .lower(),
+                    "sched_s": int(r.service_min),
+                    "runs": days_word.get(r.weekday_type, ""),
+                    "typical": fmt_delay(r.median_delay),
+                    "typical_s": float(r.median_delay),
+                    "earliest": fmt_delay(r.earliest),
+                    "earliest_s": float(r.earliest),
+                    "latest": fmt_delay(r.latest),
+                    "latest_s": float(r.latest),
+                }
+                for r in usual.itertuples()
+            ],
+            cols,
+            max_height=520,
+            key="stop_usual",
+            default_sort="sched:asc",
         )
 
 
 # ---- right now ------------------------------------------------------------------------------
-with st.container(border=True):
-    st.subheader("Right now at this stop")
+with card():
+    st.subheader(
+        "Right now at this stop",
+        help="The next buses of each route and direction, however far away, and any that left "
+        f"in the last {JUST_LEFT_MINUTES} minutes. Arrives and In are LTD's predictions where it "
+        "has one; LTD only predicts trips that are about to run, so later buses show the "
+        "timetable. Likely in corrects LTD's prediction by how far off it has usually been "
+        "(same route, time of day, minutes ahead). Min late compares with the timetable; "
+        "negative = early.",
+    )
     stop_right_now()
 
 
 # ---- trend --------------------------------------------------------------------
-with st.container(border=True):
-    st.subheader("Is it getting better?")
+with card():
+    st.subheader(
+        "Is it getting better?",
+        help="One point per calendar week (Monday to Sunday), labelled with the days in it that "
+        "have data. All routes and all days at this stop; the shaded band is where 8 in 10 buses "
+        "fell.",
+    )
     trend = q(
         """
         select date_trunc('week', service_date)::date as week, count(*) as n,
@@ -894,12 +934,7 @@ with st.container(border=True):
             height=340,
         )
         st.plotly_chart(fit_phone(fig), width="stretch")
-        st.caption(
-            "One point per calendar week (Monday to Sunday), labelled with the days in it that "
-            "have data, so a week that has only just started, or the first week of collection, "
-            "shows only those days. All routes and days at this stop, all data (it doesn't follow "
-            "the filters above). The shaded band is where 8 in 10 buses fell."
-        )
+        st.caption("All data; doesn't follow the period and days filters.")
     else:
         st.caption("A trend needs data from at least two calendar weeks.")
 

@@ -16,9 +16,9 @@ from common import (
     LIVE_CHECK_SECONDS,
     LOCAL_TZ,
     STATUS_COLOR,
-    STATUS_LABEL,
     STOP_ROWS_PER_ROUTE,
     busy_stop_buttons,
+    card,
     clean_headsigns,
     col_ago,
     col_late,
@@ -279,16 +279,23 @@ def live_map() -> None:
         + live["vehicle_id"].astype(str)
     )
 
-    # ---- selection: a route (chips) and optionally one bus on it (dropdown) ----
+    # ---- selection: a route (buttons) and optionally one bus on it (dropdown) ----
+    # The map remembers a click as "object number i of the bus layer". When the buses change
+    # (every update, and when a route is picked) Streamlit re-reads object number i, which is
+    # then a different bus: acting on that made the map hop from route to route by itself.
+    # So a click counts once, when the clicked position changes, and the bus layer keeps every
+    # bus in one fixed order (by vehicle id).
     try:
-        objs = st.session_state["live_map"]["selection"]["objects"].get("buses") or []
+        sel = st.session_state["live_map"]["selection"]
+        idx = tuple(sel["indices"].get("buses") or [])
+        objs = sel["objects"].get("buses") or []
         clicked_vid = objs[0].get("vehicle_id") if objs else None
     except (KeyError, TypeError, AttributeError):
-        clicked_vid = None
-    if not clicked_vid:  # nothing selected on the map: the next click on any bus counts
+        idx, clicked_vid = (), None
+    if not idx:  # nothing selected on the map: the next click on any bus counts
         st.session_state["live_click_last"] = None
-    if clicked_vid and clicked_vid != st.session_state.get("live_click_last"):
-        st.session_state["live_click_last"] = clicked_vid
+    if idx and clicked_vid and idx != st.session_state.get("live_click_last"):
+        st.session_state["live_click_last"] = idx
         bus = live[live["vehicle_id"] == clicked_vid]
         if not bus.empty:
             st.session_state["live_route"] = str(
@@ -296,9 +303,6 @@ def live_map() -> None:
             )
             st.session_state["live_bus_pick"] = bus["label"].iloc[0]
 
-    st.write(
-        "Click a bus on the map, or pick a route, to see the route and where its buses go next."
-    )
     present = (
         live[live["in_schedule"]]
         .assign(route_id=live["route_id"].fillna(live["route"]).astype(str))[["route_id", "route"]]
@@ -322,10 +326,10 @@ def live_map() -> None:
         st.selectbox("Zoom to a bus", ["(pick a route first)"], disabled=True)
 
     # ---- geometry ----
-    faded = live[~live["vehicle_id"].isin(on_route["vehicle_id"])].copy() if sel_route else None
-    if faded is not None:
-        faded["color"] = faded["color"].map(lambda c: [*c[:3], 70])
-    everyone = pd.concat([on_route, faded]) if faded is not None else live
+    everyone = live.sort_values("vehicle_id").reset_index(drop=True)
+    if sel_route:  # faded, in place: the layer's order must not change (see the selection above)
+        off = ~everyone["vehicle_id"].isin(on_route["vehicle_id"])
+        everyone.loc[off, "color"] = everyone.loc[off, "color"].map(lambda c: [*c[:3], 70])
     arrows = everyone[everyone["bearing"].notna()].copy()
     arrows["icon"] = [ARROW_ICON] * len(arrows)
     arrows["angle"] = -arrows["bearing"].astype(float)  # deck.gl turns counter-clockwise
@@ -570,22 +574,27 @@ def live_map() -> None:
     }
     deck = pdk.Deck(layers=layers, initial_view_state=view, map_style=None, tooltip=tooltip)
 
+    # the legend doubles as a count of the buses shown in each colour
     counts = shown["status"].value_counts()
+    legend = {
+        "early": "1+ min early",
+        "on_time": "on time to 5 min late",
+        "late": "5–10 min late",
+        "very_late": "10+ min late",
+        "unknown": "not known yet",
+    }
     st.caption(
-        f"{len(shown)} buses · "
-        + " · ".join(f"{STATUS_LABEL.get(k, 'Unknown')}: {v}" for k, v in counts.items())
-        + f" · newest report {fmt_ago(live['position_timestamp'].max(), now=data_now())} · updates as LTD's data arrives"
+        f"{len(shown)} buses: "
+        + " · ".join(
+            f"<span style='color:{STATUS_COLOR[k]}'>●</span> {counts[k]} {label}"
+            for k, label in legend.items()
+            if counts.get(k)
+        )
+        + ". Click a bus to follow it; hover for details.",
+        unsafe_allow_html=True,
     )
     st.pydeck_chart(
         deck, height=map_h, on_select="rerun", selection_mode="single-object", key="live_map"
-    )
-    st.caption(
-        "Hover a bus or a stop for details. Click a bus to choose it: the map draws its route in "
-        "light blue, zooms to it, and draws a red dashed line from the bus along the route to "
-        "its next stop, then a fainter one to the stop after. Other buses stay on the map, "
-        "faded, and you can click any of them. 'All routes' goes back to every bus. The arrow "
-        "shows which way a bus is heading. Colour is lateness against the timetable: green on "
-        "time · amber early · red late · dark red 10+ min late · grey unknown."
     )
     with st.expander("Table"):
         table(
@@ -616,7 +625,8 @@ def live_map() -> None:
         )
 
 
-live_map()
+with card():
+    live_map()
 
 
 @st.fragment(run_every=f"{LIVE_CHECK_SECONDS}s")
@@ -624,18 +634,18 @@ def stop_arrivals(stop_id: str) -> None:
     live_status_line()
     coming, _ = stop_buses(stop_id)
     show_coming(coming, "No buses scheduled at this stop in the next 36 hours.")
-    st.caption(
-        f"The next {STOP_ROWS_PER_ROUTE} buses of each route and direction. 'In' is LTD's prediction; "
-        "LTD only predicts trips that are about to run, so later buses show the timetable. 'Likely in' "
-        "corrects LTD's prediction by how far off it has usually been for this route, time of day and "
-        "number of minutes ahead; '80% of the time' is the range the bus actually arrived in, in past "
-        "data. Empty where there isn't enough history yet."
-    )
 
 
 # ---- stop lookup -----------------------------------------------------------------
-with st.container(border=True):
-    st.subheader("Next buses at a stop")
+with card():
+    st.subheader(
+        "Next buses at a stop",
+        help=f"The next {STOP_ROWS_PER_ROUTE} buses of each route and direction. In is LTD's "
+        "prediction; LTD only predicts trips that are about to run, so later buses show the "
+        "timetable. Likely in corrects LTD's prediction by how far off it has usually been for "
+        "this route, time of day and number of minutes ahead; 80% of the time is the range the "
+        "bus actually arrived in, in past data. Empty where there isn't enough history yet.",
+    )
     example = q(f"""
         select stop_code, stop_name from gtfs.stops
         where feed_version_id = {FV} and location_type = 0 and stop_code is not null and stop_code <> ''
@@ -702,8 +712,12 @@ def alert_times(payload: dict, first_seen: pd.Timestamp | None) -> str:
     return ""
 
 
-with st.container(border=True):
-    st.subheader("Service alerts")
+with card():
+    st.subheader(
+        "Service alerts",
+        help="From LTD. Times are when LTD says each alert applies or, where it doesn't say, the "
+        "first time this site saw the alert.",
+    )
     alerts = q(
         """
         with cur as (
@@ -719,10 +733,6 @@ with st.container(border=True):
     if alerts.empty:
         st.caption("No active alerts.")
     else:
-        st.caption(
-            "From LTD. Times are when LTD says each alert applies, or, where it doesn't say, the "
-            "first time this site saw the alert."
-        )
         for payload, first_seen in zip(alerts["payload"], alerts["first_seen"], strict=False):
             header = next(
                 (

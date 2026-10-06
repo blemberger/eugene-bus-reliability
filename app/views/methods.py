@@ -9,6 +9,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 from common import (
+    card,
     col_count,
     col_date,
     col_minutes,
@@ -35,7 +36,7 @@ b1.page_link("views/arrivals.py", label="Arrivals board →")
 b2.page_link("views/status.py", label="Status →")
 
 # ---- definitions -------------------------------------------------------------------------
-with st.container(border=True):
+with card():
     st.subheader("How it's measured")
     start = collection_start()
     st.markdown(f"""
@@ -81,7 +82,7 @@ cancellation flag, realtime trip ids that don't match the schedule. See the sect
 """)
 
 # ---- coverage & quality ----------------------------------------------------------------------
-with st.container(border=True):
+with card():
     st.subheader("Coverage: how much of the service we measured")
     if not marts_ready():
         st.info("Coverage tables appear once the analysis has run; it refreshes every 15 minutes.")
@@ -132,6 +133,7 @@ with st.container(border=True):
                 markers=True,
                 color_discrete_sequence=["#1f5f9e", "#e07b00"],
             )
+            fig.update_traces(line={"width": 3}, marker={"size": 9})
             # both measures sit in the high 90s: the axis spans the data (at most 95% to 100%,
             # wider only if a day dips lower), so a one-point drop is visible
             low = min(0.95, math.floor((float(long["Share"].min()) - 0.005) * 100) / 100)
@@ -181,31 +183,62 @@ with st.container(border=True):
                 hide_index=True,
                 width="stretch",
                 column_config={
-                    "Date": col_date("Date"),
-                    "Buses seen": col_count("Buses seen"),
-                    "Trips scheduled": col_count("Trips scheduled"),
-                    "Trips seen": col_count("Trips seen"),
+                    "Date": col_date(
+                        "Date",
+                        help="Service day (trips after midnight count with the day they started).",
+                    ),
+                    "Buses seen": col_count(
+                        "Buses seen",
+                        help="Different buses (vehicles) that reported a position that day.",
+                    ),
+                    "Trips scheduled": col_count(
+                        "Trips scheduled", help="Trips in LTD's timetable for that day."
+                    ),
+                    "Trips seen": col_count(
+                        "Trips seen",
+                        help="Scheduled trips that appeared in LTD's live feed at all.",
+                    ),
                     "Mid-trip stops due": col_count(
                         "Mid-trip stops due",
-                        help="On reported trips, excluding first and last stops.",
+                        help="Stops those trips were due to pass, leaving out each trip's first "
+                        "and last stop.",
                     ),
-                    "Timed": col_count("Timed"),
-                    "Stop events scheduled": col_count("Stop events scheduled"),
-                    "Observed": col_count("Observed"),
-                    "Implausible": col_count("Implausible"),
-                    "Imprecise": col_count("Imprecise"),
-                    "Feed gaps": col_minutes("Feed gaps"),
+                    "Timed": col_count(
+                        "Timed", help="Of those stops, the ones whose arrival time we measured."
+                    ),
+                    "Stop events scheduled": col_count(
+                        "Stop events scheduled",
+                        help="Every stop of every scheduled trip that day, first and last "
+                        "included.",
+                    ),
+                    "Observed": col_count(
+                        "Observed",
+                        help="Arrivals measured and used on the site (after leaving out the "
+                        "implausible and imprecise ones).",
+                    ),
+                    "Implausible": col_count(
+                        "Implausible",
+                        help="Arrivals left out because they were more than 30 min early or 90 "
+                        "min late against the timetable: in practice a bus reporting the wrong "
+                        "trip, not real service.",
+                    ),
+                    "Imprecise": col_count(
+                        "Imprecise",
+                        help="Arrivals left out because the bus's reports around that stop were "
+                        "more than 4 minutes apart (usually a feed outage), so the time can't be "
+                        "pinned down to within 2 minutes.",
+                    ),
+                    "Feed gaps": col_minutes(
+                        "Feed gaps",
+                        help="Minutes when our fetches of LTD's feed were more than 2 minutes "
+                        "apart.",
+                    ),
                 },
             )
-            st.caption(
-                "Feed gaps count minutes where consecutive fetches were more than 2 minutes apart. "
-                "Implausible = arrivals left out because they were more than 30 min early or 90 min late (a bus reporting the wrong trip). "
-                "Imprecise = arrivals left out because the bus's reports around that stop were more than 4 minutes apart "
-                "(usually a feed outage), so the time can't be pinned down to within 2 minutes."
-            )
+            st.caption("Hover a column heading for what it counts.")
 
 # ---- cross-check ------------------------------------------------------------------------------
-with st.container(border=True):
+with card():
     st.subheader("Cross-check: do two ways of timing arrivals agree?")
     if not marts_ready():
         st.caption("Appears once the analysis has run.")
@@ -235,7 +268,7 @@ with st.container(border=True):
             )
 
 # ---- right now --------------------------------------------------------------------------------
-with st.container(border=True):
+with card():
     st.subheader("Feed health right now")
     qual = q("""
         select

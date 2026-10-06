@@ -11,8 +11,8 @@ import streamlit as st
 from common import (
     TOLD_CHART_NOTE,
     busy_stop_buttons,
+    card,
     col_count,
-    col_pct,
     col_time,
     current_fv,
     fit_phone,
@@ -20,6 +20,7 @@ from common import (
     fmt_minutes,
     fmt_pct,
     hour_label,
+    link_table,
     local_times,
     q,
     q_live,
@@ -28,7 +29,6 @@ from common import (
     route_picker,
     search_stops,
     service_hour_key,
-    share_pct,
     stop_buttons,
     table,
     told_chart,
@@ -38,10 +38,7 @@ from common import (
 require_db()
 st.title("Can you trust the countdown?")
 st.caption(
-    "LTD's live predictions are the countdowns on bus-stop signs and in transit apps. We record "
-    "every prediction and every revision, and compare each one with when the bus actually "
-    "arrived. Everywhere else on this site, “minutes late” is against the printed timetable; "
-    "this page is about the countdown."
+    "LTD's live countdown, on bus-stop signs and in transit apps, against when the bus came."
 )
 require_marts()
 FV = str(current_fv())  # schedule version in force today
@@ -64,160 +61,53 @@ if cal.empty or cal["n_predictions"].sum() == 0:
 # ---- headline ------------------------------------------------------------------------
 at5 = cal[cal["horizon_min"] == 5]
 at15 = cal[cal["horizon_min"] == 15]
-c1, c2, c3 = st.columns(3)
+c1, c2 = st.columns(2)
+SCORED = f" From {int(cal['n_predictions'].sum()):,} predictions scored."
 if not at5.empty:
+    r5 = at5.iloc[0]
     c1.metric(
-        "Countdown says 5 min: right to within 1 min",
-        fmt_pct(int(at5["n_within_1min"].iloc[0]), int(at5["n_predictions"].iloc[0])),
+        "Countdown says 5 min: bus comes within 1 min of that",
+        fmt_pct(int(r5["n_within_1min"]), int(r5["n_predictions"])),
+        help="For the same buses, the printed timetable was right to within 1 minute "
+        + fmt_pct(int(r5["n_schedule_within_1min"]), int(r5["n_predictions"]))
+        + " of the time."
+        + SCORED,
     )
 if not at15.empty:
+    r15 = at15.iloc[0]
     c2.metric(
-        "Countdown says 15 min: right to within 2 min",
-        fmt_pct(int(at15["n_within_2min"].iloc[0]), int(at15["n_predictions"].iloc[0])),
+        "Countdown says 15 min: bus comes within 2 min of that",
+        fmt_pct(int(r15["n_within_2min"]), int(r15["n_predictions"])),
+        help="For the same buses, the printed timetable was right to within 2 minutes "
+        + fmt_pct(int(r15["n_schedule_within_2min"]), int(r15["n_predictions"]))
+        + " of the time."
+        + SCORED,
     )
-c3.metric("Predictions scored", f"{int(cal['n_predictions'].sum()):,}")
 
 # ---- timetable vs the sign -----------------------------------------------------------
-with st.container(border=True):
-    st.subheader("How much later than you were told did the bus come?")
+with card():
     told = told_vs_actual(route_id=route_id)
+    st.subheader(
+        "How much later than you were told did the bus come?",
+        help=TOLD_CHART_NOTE
+        + (f" All data since {fmt_date(told['first_day'].min())}." if len(told) else ""),
+    )
     fig0 = told_chart(told)
     if fig0 is None:
         st.caption("Not enough measured arrivals yet.")
     else:
         st.plotly_chart(fit_phone(fig0), width="stretch")
-        st.caption(TOLD_CHART_NOTE + f" All data since {fmt_date(told['first_day'].min())}.")
-
-
-# ---- calibration curve --------------------------------------------------------------
-with st.container(border=True):
-    st.subheader("How often is the countdown right?")
-    # 1 to 15 minutes out, as in the chart above: the range in which riders decide when to leave.
-    # (0 is the countdown's "due" moment, when the bus is already pulling in: not a forecast.)
-    cal = cal[cal["horizon_min"].between(1, 15) & (cal["n_predictions"] >= 30)]
-    if cal.empty:
-        st.info(
-            "No horizon has 30 scored predictions yet for this selection; the charts need more data."
-        )
-        st.stop()
-    custom = list(
-        zip(
-            cal["n_predictions"].astype(int),
-            cal["n_days"].astype(int),
-            cal["first_day"].astype(str),
-            cal["last_day"].astype(str),
-            strict=False,
-        )
-    )
-    hover = (
-        "%{x} min out: %{y:.0%}<br>%{customdata[0]:,} predictions over %{customdata[1]} day(s)"
-        "<br>%{customdata[2]} to %{customdata[3]}<extra>%{fullData.name}</extra>"
-    )
-    fig = go.Figure()
-    for k, color in (("1", "#2e8b57"), ("2", "#1f77b4")):
-        fig.add_trace(
-            go.Scatter(
-                x=cal["horizon_min"],
-                y=cal[f"n_within_{k}min"] / cal["n_predictions"],
-                mode="lines+markers",
-                name=f"countdown right to within {k} min",
-                line={"color": color, "width": 3},
-                customdata=custom,
-                hovertemplate=hover,
-            )
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=cal["horizon_min"],
-                y=cal[f"n_schedule_within_{k}min"] / cal["n_predictions"],
-                mode="lines",
-                name=f"printed timetable within {k} min",
-                line={"color": color, "dash": "dash", "width": 1.5},
-                hovertemplate="%{x} min out: %{y:.0%}<extra>%{fullData.name}</extra>",
-            )
-        )
-    shares = pd.concat(
-        [
-            cal[f"n{w}_within_{k}min"] / cal["n_predictions"]
-            for k in ("1", "2")
-            for w in ("", "_schedule")
-        ]
-    )
-    fig.update_layout(
-        xaxis_title="minutes the countdown said",
-        yaxis_title="share right",
-        yaxis_tickformat=".0%",
-        # fitted to the data, to the nearest 10%: the differences are what matter here
-        yaxis_range=[
-            max(0.0, math.floor(shares.min() * 10) / 10),
-            min(1.0, math.ceil(shares.max() * 10) / 10),
-        ],
-        xaxis_range=[0.5, 15.5],
-        xaxis_dtick=1,
-        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0, "xanchor": "left"},
-        legend_title="",
-        margin={"t": 30},
-    )
-    st.plotly_chart(fit_phone(fig), width="stretch")
-    st.caption(
-        "Solid lines: how often the bus came within 1 or 2 minutes of what the countdown said, by how far ahead "
-        "the countdown said it. Dashed lines, same colors: for the same buses, how often the printed timetable was "
-        "that close. Where a solid line is above its dashed twin, the live prediction is worth checking; where "
-        "they meet, the timetable would have done as well. Click a legend entry to hide or show a line. "
-        "Horizons with fewer than 30 scored predictions are left out."
-    )
-    st.markdown(
-        "**How far ahead does LTD predict?** For every trip in progress, LTD's feed gives a time for each of "
-        "the trip's remaining stops, so its predictions reach as far ahead as the end of the trip. This page "
-        "shows 1 to 15 minutes out, the range in which people use a countdown to decide when to leave; "
-        "further ahead, people plan from the timetable. That cut is ours, not LTD's."
-    )
-
-
-# ---- by route at 5 and 10 min ------------------------------------------------------------
-if route_id is None:
-    with st.container(border=True):
-        st.subheader("Which routes have the best predictions?")
-        by_route = q(f"""
-            select r.route_short_name as route,
-                   sum(c.n_predictions) filter (where c.horizon_min = 5)  as n5,
-                   sum(c.n_within_1min) filter (where c.horizon_min = 5)  as w5,
-                   sum(c.n_predictions) filter (where c.horizon_min = 10) as n10,
-                   sum(c.n_within_2min) filter (where c.horizon_min = 10) as w10,
-                   sum(c.n_predictions) as n
-            from marts.mart_calibration c
-            join gtfs.routes r on r.route_id = c.route_id and r.feed_version_id = {FV}
-            where c.route_id is not null
-            group by 1 having sum(c.n_predictions) >= 100
-            order by sum(c.n_within_1min) filter (where c.horizon_min = 5)::float / nullif(sum(c.n_predictions) filter (where c.horizon_min = 5), 0) desc nulls last
-        """)
-        if not by_route.empty:
-            table(
-                pd.DataFrame(
-                    {
-                        "Route": by_route["route"].to_numpy(),
-                        "'5 min' right within 1 min": share_pct(
-                            by_route["w5"], by_route["n5"]
-                        ).to_numpy(),
-                        "'10 min' right within 2 min": share_pct(
-                            by_route["w10"], by_route["n10"]
-                        ).to_numpy(),
-                        "Predictions": by_route["n"].astype(int).to_numpy(),
-                    }
-                ),
-                hide_index=True,
-                width="stretch",
-                column_config={
-                    "'5 min' right within 1 min": col_pct("'5 min' right within 1 min", bar=True),
-                    "'10 min' right within 2 min": col_pct("'10 min' right within 2 min", bar=True),
-                    "Predictions": col_count("Predictions"),
-                },
-            )
 
 
 # ---- by time of day ---------------------------------------------------------------------
-with st.container(border=True):
-    st.subheader("Does accuracy depend on the time of day?")
+with card():
+    st.subheader(
+        "Does accuracy depend on the time of day?",
+        help="Predictions made about this far ahead, by the hour they were made. Each bar builds "
+        "up: the dark part is the share right to within 1 minute; add the middle part for within "
+        "2 minutes; the whole bar is within 3 minutes. The space above is how often the bus came "
+        "more than 3 minutes off. Hours with fewer than 20 predictions are left out.",
+    )
     AHEAD_CHOICES = {"2 min": (1, 2), "5 min": (5, 5), "10 min": (10, 10), "15 min": (15, 15)}
     ahead = (
         st.segmented_control(
@@ -292,38 +182,187 @@ with st.container(border=True):
             },
         )
         st.plotly_chart(fit_phone(fig3), width="stretch")
-        st.caption(
-            f"Predictions made about {ahead} ahead, by the hour they were made. Each bar builds up: the "
-            "dark part is the share that was right to within 1 minute; add the middle part for within 2 "
-            "minutes; the whole bar is within 3 minutes. The empty space above is how often the bus came "
-            "more than 3 minutes off the prediction. Hours with fewer than 20 predictions are left out."
-        )
 
 
-# ---- revisions --------------------------------------------------------------------------
-with st.container(border=True):
-    st.subheader("How often does the prediction change?")
-    # computed once per analysis build (marts.mart_prediction_revisions): it reads every
-    # prediction of the week, far too slow to run on each visit
-    has_rev = q("select to_regclass('marts.mart_prediction_revisions') is not null as ok")["ok"][0]
-    rev = q("select * from marts.mart_prediction_revisions") if has_rev else pd.DataFrame()
-    if not rev.empty and rev["trip_stops"][0]:
-        r = rev.iloc[0]
-        st.write(
-            f"Over the last 7 days, a typical stop's prediction was revised **{int(r['median_revisions'])} times** "
-            f"(1 in 10 stops: {int(r['p90_revisions'])} or more) while it was on the board for about **{fmt_minutes(r['median_tracked_s'])}**."
-        )
-    st.caption(
-        "Every revision is kept; that's what lets a prediction be scored at the horizon it was made, not just the last value shown."
+# ---- calibration curve --------------------------------------------------------------
+with card():
+    st.subheader(
+        "How often is the countdown right?",
+        help="Solid lines: how often the bus came within 1 or 2 minutes of what the countdown "
+        "said, by how far ahead it said it. Dashed lines, same colours: for the same buses, how "
+        "often the printed timetable was that close. Where a solid line is above its dashed "
+        "twin, the countdown is worth checking. Click a legend entry to hide or show a line. "
+        "LTD predicts as far ahead as the end of each trip; this page shows 1 to 15 minutes out, "
+        "the range in which people use a countdown to decide when to leave (our cut, not LTD's). "
+        "Distances with fewer than 30 scored predictions are left out.",
     )
+    # 1 to 15 minutes out, as in the first chart: the range in which riders decide when to leave.
+    # (0 is the countdown's "due" moment, when the bus is already pulling in: not a forecast.)
+    cal = cal[cal["horizon_min"].between(1, 15) & (cal["n_predictions"] >= 30)]
+    if cal.empty:
+        st.info(
+            "No distance has 30 scored predictions yet for this selection; this chart needs more data."
+        )
+    else:
+        custom = list(
+            zip(
+                cal["n_predictions"].astype(int),
+                cal["n_days"].astype(int),
+                cal["first_day"].astype(str),
+                cal["last_day"].astype(str),
+                strict=False,
+            )
+        )
+        hover = (
+            "%{x} min out: %{y:.0%}<br>%{customdata[0]:,} predictions over %{customdata[1]} day(s)"
+            "<br>%{customdata[2]} to %{customdata[3]}<extra>%{fullData.name}</extra>"
+        )
+        fig = go.Figure()
+        for k, color in (("1", "#2e8b57"), ("2", "#1f77b4")):
+            fig.add_trace(
+                go.Scatter(
+                    x=cal["horizon_min"],
+                    y=cal[f"n_within_{k}min"] / cal["n_predictions"],
+                    mode="lines+markers",
+                    name=f"countdown right to within {k} min",
+                    line={"color": color, "width": 3},
+                    customdata=custom,
+                    hovertemplate=hover,
+                )
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=cal["horizon_min"],
+                    y=cal[f"n_schedule_within_{k}min"] / cal["n_predictions"],
+                    mode="lines",
+                    name=f"printed timetable within {k} min",
+                    line={"color": color, "dash": "dash", "width": 1.5},
+                    hovertemplate="%{x} min out: %{y:.0%}<extra>%{fullData.name}</extra>",
+                )
+            )
+        shares = pd.concat(
+            [
+                cal[f"n{w}_within_{k}min"] / cal["n_predictions"]
+                for k in ("1", "2")
+                for w in ("", "_schedule")
+            ]
+        )
+        fig.update_layout(
+            xaxis_title="minutes the countdown said",
+            yaxis_title="share right",
+            yaxis_tickformat=".0%",
+            # fitted to the data, to the nearest 10%: the differences are what matter here
+            yaxis_range=[
+                max(0.0, math.floor(shares.min() * 10) / 10),
+                min(1.0, math.ceil(shares.max() * 10) / 10),
+            ],
+            xaxis_range=[0.5, 15.5],
+            xaxis_dtick=1,
+            legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0, "xanchor": "left"},
+            legend_title="",
+            margin={"t": 30},
+        )
+        st.plotly_chart(fit_phone(fig), width="stretch")
+
+
+# ---- by route at 5 and 10 min ------------------------------------------------------------
+if route_id is None:
+    with card():
+        st.subheader("Which routes have the best predictions?")
+        by_route = q(f"""
+            select c.route_id, r.route_short_name as route,
+                   sum(c.n_predictions) filter (where c.horizon_min = 5)  as n5,
+                   sum(c.n_within_1min) filter (where c.horizon_min = 5)  as w5,
+                   sum(c.n_schedule_within_1min) filter (where c.horizon_min = 5) as t5,
+                   sum(c.n_predictions) filter (where c.horizon_min = 10) as n10,
+                   sum(c.n_within_2min) filter (where c.horizon_min = 10) as w10,
+                   sum(c.n_schedule_within_2min) filter (where c.horizon_min = 10) as t10,
+                   sum(c.n_predictions) as n
+            from marts.mart_calibration c
+            join gtfs.routes r on r.route_id = c.route_id and r.feed_version_id = {FV}
+            where c.route_id is not null
+            group by 1, 2 having sum(c.n_predictions) >= 100
+        """)
+        if not by_route.empty:
+
+            def share(k, n) -> float | None:
+                return None if not n or pd.isna(n) else float(k) / float(n)
+
+            def bar(v: float | None, colour: str) -> str:
+                if v is None:
+                    return ""
+                return (
+                    "<span class='ebw-g'><span class='ebw-x' style='width:80px'>"
+                    f"<span class='ebw-x1' style='left:0;top:4px;width:{v * 100:.0f}%;"
+                    f"background:{colour}'></span></span><span>{v:.0%}</span></span>"
+                )
+
+            rows = []
+            for r in by_route.itertuples():
+                c5, t5 = share(r.w5, r.n5), share(r.t5, r.n5)
+                c10, t10 = share(r.w10, r.n10), share(r.t10, r.n10)
+                rows.append(
+                    {
+                        "href": f"/accuracy?route={r.route_id}",
+                        "hover": f"Route {r.route}: {int(r.n):,} predictions scored",
+                        "route": r.route,
+                        "c5": bar(c5, "#1f5f9e"),
+                        "c5_s": c5,
+                        "t5": bar(t5, "#9a9a9a"),
+                        "t5_s": t5,
+                        "c10": bar(c10, "#1f5f9e"),
+                        "c10_s": c10,
+                        "t10": bar(t10, "#9a9a9a"),
+                        "t10_s": t10,
+                    }
+                )
+            cols = [{"key": "route", "label": "Route", "width": "3.4em", "bold": True}]
+            for k, label, tip in (
+                (
+                    "c5",
+                    "Countdown at 5 min: within 1 min",
+                    "When the countdown said 5 minutes, how often the bus came within 1 minute "
+                    "of that.",
+                ),
+                (
+                    "t5",
+                    "Timetable: within 1 min",
+                    "For the same buses, how often the printed timetable was right to within "
+                    "1 minute.",
+                ),
+                (
+                    "c10",
+                    "Countdown at 10 min: within 2 min",
+                    "When the countdown said 10 minutes, how often the bus came within 2 minutes "
+                    "of that.",
+                ),
+                (
+                    "t10",
+                    "Timetable: within 2 min",
+                    "For the same buses, how often the printed timetable was right to within "
+                    "2 minutes.",
+                ),
+            ):
+                cols.append(
+                    {
+                        "key": k,
+                        "label": label,
+                        "width": "minmax(8em, 1fr)",
+                        "html": True,
+                        "help": tip,
+                        "sort": f"{k}_s",
+                        "first": "desc",
+                        "hide_on_phone": k in ("t5", "t10"),
+                    }
+                )
+            link_table(rows, cols, max_height=640, key="pred_routes", default_sort="c5:desc")
+            st.caption("Click a route to see this page for that route alone.")
 
 
 # ---- one stop, right now: how each coming bus's prediction has been revised --------------
-with st.container(border=True):
+with card():
     st.subheader("One stop, right now")
-    st.caption(
-        "Pick a stop; for each bus coming, see how its predicted arrival has been revised since it first appeared."
-    )
+    st.caption("Pick a stop to see how each coming bus's predicted arrival has changed.")
     example = q(f"""
         select stop_code, stop_name from gtfs.stops
         where feed_version_id = {FV} and location_type = 0 and stop_code is not null and stop_code <> ''
@@ -438,3 +477,22 @@ with st.container(border=True):
             st.caption(
                 "A flat line is a prediction that held; a line that keeps stepping later is the countdown being optimistic and correcting itself as the bus falls behind."
             )
+
+
+# ---- revisions --------------------------------------------------------------------------
+with card():
+    st.subheader(
+        "How often does the prediction change?",
+        help="Every revision is kept; that's what lets a prediction be scored at the distance it "
+        "was made, not just the last value shown.",
+    )
+    # computed once per analysis build (marts.mart_prediction_revisions): it reads every
+    # prediction of the week, far too slow to run on each visit
+    has_rev = q("select to_regclass('marts.mart_prediction_revisions') is not null as ok")["ok"][0]
+    rev = q("select * from marts.mart_prediction_revisions") if has_rev else pd.DataFrame()
+    if not rev.empty and rev["trip_stops"][0]:
+        r = rev.iloc[0]
+        st.write(
+            f"Over the last 7 days, a typical stop's prediction was revised **{int(r['median_revisions'])} times** "
+            f"(1 in 10 stops: {int(r['p90_revisions'])} or more) while it was on the board for about **{fmt_minutes(r['median_tracked_s'])}**."
+        )

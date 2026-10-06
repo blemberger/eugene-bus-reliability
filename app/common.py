@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import math
 import os
 import re
@@ -10,6 +11,7 @@ import uuid
 from datetime import date, datetime, timedelta
 from datetime import time as dtime
 from html import escape as html_escape
+from pathlib import Path
 from urllib.parse import quote
 
 import pandas as pd
@@ -772,8 +774,8 @@ def col_ago(label: str = "Ago"):
     return st.column_config.DatetimeColumn(label, format="distance", timezone=LOCAL_TZ)
 
 
-def col_date(label: str):
-    return st.column_config.DateColumn(label, format="MMM D, YYYY")
+def col_date(label: str, help: str | None = None):
+    return st.column_config.DateColumn(label, format="MMM D, YYYY", help=help)
 
 
 def col_hour(label: str = "Hour", help: str | None = None):
@@ -919,40 +921,116 @@ def weekday_type_label(w: str) -> str:
 WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri"]
 
 
+PERIODS = {"7d": "Last 7 days", "30d": "Last 30 days", "all": "All data"}
+DAY_CHOICES = {
+    "all": "All days",
+    "weekday": "Weekdays",
+    "saturday": "Saturdays",
+    "sunday": "Sundays",
+}
+
+
+def _remembered(key: str, param: str, options: list[str], default: str) -> None:
+    """Start a filter widget at the visitor's last choice on any page (kept in the session), or
+    at the page address's choice (?period=30d, from a link or a bookmark), else the default."""
+    if st.session_state.get(key) in options:
+        return
+    for v in (st.session_state.get(f"_{key}"), st.query_params.get(param)):
+        if v in options:
+            st.session_state[key] = v
+            return
+    st.session_state[key] = default
+
+
+def _keep_one(key: str) -> None:
+    """A segmented control clicked on its selected option clears it; keep the last choice."""
+    if st.session_state.get(key) is None:
+        st.session_state[key] = st.session_state.get(f"_{key}")
+
+
 def page_filters() -> tuple[date, str | None]:
     """Compact filter rows under the page title. Returns (start_date, day filter), where the
     day filter is None, 'weekday', 'saturday', 'sunday', or 'dow:N' for one weekday (1 = Monday).
-    Turn it into SQL with day_sql()."""
+    Turn it into SQL with day_sql(). The choice follows the visitor from page to page and is
+    kept in the page's address, so a shared or bookmarked link opens with it."""
     c1, c2 = st.columns([1, 1])
-    span = (
+    _remembered("f_period", "period", list(PERIODS), "7d")
+    period = (
         c1.segmented_control(
-            "Period", ["Last 7 days", "Last 30 days", "All data"], default="Last 7 days"
+            "Period",
+            list(PERIODS),
+            format_func=PERIODS.get,
+            key="f_period",
+            on_change=_keep_one,
+            args=("f_period",),
         )
-        or "Last 7 days"
+        or "7d"
     )
     # "last 7 days" is today and the 6 days before it, as in marts.mart_lateness
     start = (
         {
-            "Last 7 days": local_today() - timedelta(days=6),
-            "Last 30 days": local_today() - timedelta(days=29),
-        }.get(span)
+            "7d": local_today() - timedelta(days=6),
+            "30d": local_today() - timedelta(days=29),
+        }.get(period)
         or collection_start()
         or date(2000, 1, 1)
     )
+    _remembered("f_days", "days", list(DAY_CHOICES), "all")
     day = (
         c2.segmented_control(
-            "Days", ["All days", "Weekdays", "Saturdays", "Sundays"], default="All days"
+            "Days",
+            list(DAY_CHOICES),
+            format_func=DAY_CHOICES.get,
+            key="f_days",
+            on_change=_keep_one,
+            args=("f_days",),
         )
-        or "All days"
+        or "all"
     )
-    wt = {"Weekdays": "weekday", "Saturdays": "saturday", "Sundays": "sunday"}.get(day)
+    wt = None if day == "all" else day
+    one = None
     if wt == "weekday":
+        dows = ["all", *WEEKDAYS]
+        _remembered("f_dow", "weekday", dows, "all")
         one = c2.segmented_control(
-            "Which weekday", ["All weekdays", *WEEKDAYS], default="All weekdays"
+            "Which weekday",
+            dows,
+            format_func=lambda d: "All weekdays" if d == "all" else d,
+            key="f_dow",
+            on_change=_keep_one,
+            args=("f_dow",),
         )
         if one in WEEKDAYS:
             wt = f"dow:{WEEKDAYS.index(one) + 1}"
+    # remember the choice for the next page, and show it in the address
+    st.session_state["_f_period"], st.session_state["_f_days"] = period, day
+    st.session_state["_f_dow"] = one or "all"
+    for param, value, default in (
+        ("period", period, "7d"),
+        ("days", day, "all"),
+        ("weekday", one if wt and wt.startswith("dow:") else None, None),
+    ):
+        if value and value != default:
+            st.query_params[param] = value
+        else:
+            st.query_params.pop(param, None)
     return start, wt
+
+
+def filter_query() -> str:
+    """The current period/days choice as a query string ('period=30d&days=weekday'), for links
+    that open another page with the same filters. Empty when everything is at its default."""
+    parts = []
+    period = st.session_state.get("_f_period", "7d")
+    day = st.session_state.get("_f_days", "all")
+    one = st.session_state.get("_f_dow", "all")
+    if period != "7d":
+        parts.append(f"period={period}")
+    if day != "all":
+        parts.append(f"days={day}")
+        if day == "weekday" and one in WEEKDAYS:
+            parts.append(f"weekday={one}")
+    return "&".join(parts)
 
 
 def day_sql(
@@ -1125,6 +1203,94 @@ def worst_hour_label(hour, delay_s) -> str:
     return f"{hour_label(int(hour))} · {fmt_delay(delay_s)}"
 
 
+def route_table(rank: pd.DataFrame, start: date, key: str) -> None:
+    """Every route in one sortable, clickable table (rows from route_rank()): typical bus,
+    the 8-in-10 range, the latest hour of the day, and today so far; the number of arrivals
+    behind each row shows on hover."""
+    routes = routes_by_service()
+    long_names = dict(
+        zip(routes["route_id"].astype(str), routes["route_long_name"].fillna(""), strict=False)
+    )
+    today_r = today_lateness(group_by_route=True)
+    today_of = {
+        str(r.route_id): (r.median_delay_s if r.n >= 10 else None) for r in today_r.itertuples()
+    }
+    lo, hi = range_scale(rank)
+    rows = []
+    for r in rank.itertuples():
+        rid = str(r.route_id)
+        today = today_of.get(rid)
+        rows.append(
+            {
+                "href": route_link(r.route_id, r.route_short_name).split("#")[0],
+                "hover": f"Route {r.route_short_name}: {int(r.n):,} arrivals measured since "
+                f"{fmt_date(start)}",
+                "route": r.route_short_name,
+                "name": long_names.get(rid, ""),
+                "typical": fmt_delay(r.median_delay),
+                "typical_s": float(r.median_delay),
+                "range": range_cell(r.p10_delay_s, r.median_delay, r.p90_delay_s, lo, hi),
+                "spread_s": float(r.p90_delay_s - r.p10_delay_s),
+                "worst": worst_hour_label(r.worst_hour, r.worst_delay_s),
+                "worst_s": None if pd.isna(r.worst_delay_s) else float(r.worst_delay_s),
+                "today": fmt_delay(today),
+                "today_s": today,
+            }
+        )
+    link_table(
+        rows,
+        [
+            {"key": "route", "label": "Route", "width": "3.4em", "bold": True},
+            {
+                "key": "name",
+                "label": "Name",
+                "width": "minmax(6em, 1.2fr)",
+                "hide_on_phone": True,
+            },
+            {
+                "key": "typical",
+                "label": "Typical bus",
+                "width": "minmax(7em, 0.8fr)",
+                "help": TYPICAL_HELP,
+                "sort": "typical_s",
+                "first": "desc",
+            },
+            {
+                "key": "range",
+                "label": "8 in 10 buses (vs timetable)",
+                "width": "minmax(13em, 1.6fr)",
+                "phone_width": "minmax(6.8em, 1fr)",
+                "html": True,
+                "help": RANGE_HELP + " Sorts by how wide the range is.",
+                "sort": "spread_s",
+                "first": "desc",
+            },
+            {
+                "key": "worst",
+                "label": "Latest hour",
+                "width": "minmax(9.5em, 0.9fr)",
+                "hide_on_phone": True,
+                "help": "The hour of day when the typical bus on this route runs latest, and how "
+                "late it is then (hours with at least 10 arrivals).",
+                "sort": "worst_s",
+                "first": "desc",
+            },
+            {
+                "key": "today",
+                "label": "Today so far",
+                "width": "minmax(6.5em, 0.7fr)",
+                "hide_on_phone": True,
+                "help": "The typical bus today, as of the latest update (every 15 minutes).",
+                "sort": "today_s",
+                "first": "desc",
+            },
+        ],
+        max_height=640,
+        key=key,
+        default_sort="route:asc",
+    )
+
+
 # ------------------------------------------- what you were told vs when the bus came ----
 
 # Minutes the countdown showed, shown left to right (far to near). The mart also has 20 and 30;
@@ -1148,16 +1314,17 @@ def told_vs_actual(route_id: str | None = None, stop_id: str | None = None) -> p
 
 TOLD_CHART_NOTE = (
     "Blue: LTD's countdown (on signs and in apps) when it said the bus was that many minutes "
-    "away. Grey: the printed timetable, the same at any distance because it never changes. Each "
-    "line is how much later than that the typical bus came (below zero = earlier); each shaded "
-    "band is where 8 in 10 buses fell. The narrower the band, the more you can rely on it."
+    "away; the line is the typical bus, the band where 8 in 10 buses came. Grey: the printed "
+    "timetable, the same at any distance; the dashed line is the typical bus, the dotted lines "
+    "the edges of where 8 in 10 came. Below zero = earlier than you were told. The narrower the "
+    "spread, the more you can rely on it."
 )
 
 
 def told_chart(df: pd.DataFrame, min_n: int = 20) -> go.Figure | None:
     """How much later than the timetable, and than the countdown N minutes out, the bus came.
-    The countdown is a line from 15 minutes out to 1; the timetable a flat band across the same
-    range, so the two compare directly. Countdown points with fewer than min_n predictions are
+    The countdown is a line and band from 15 minutes out to 1; the timetable flat lines across
+    the same range, so the two compare directly. Countdown points with fewer than min_n predictions are
     left out (the chart only spans the distances that have data)."""
     if df.empty:
         return None
@@ -1165,7 +1332,7 @@ def told_chart(df: pd.DataFrame, min_n: int = 20) -> go.Figure | None:
     sign = df[
         (df["basis"] == "sign") & (df["n"] >= min_n) & (df["ahead_min"].isin(TOLD_AHEAD))
     ].sort_values("ahead_min", ascending=False)
-    if sign.empty:
+    if len(sign) < 2:  # one distance alone is a dot, not a comparison
         return None
     x = [f"{int(m)} min" for m in sign["ahead_min"]]
 
@@ -1183,18 +1350,22 @@ def told_chart(df: pd.DataFrame, min_n: int = 20) -> go.Figure | None:
     if not tt.empty:
         r = tt.iloc[0]
         lo, hi = min(lo, r.p10_s), max(hi, r.p90_s)
-        fig.add_trace(
-            go.Scatter(
-                x=x + x[::-1],
-                y=[r.p90_s / 60] * len(x) + [r.p10_s / 60] * len(x),
-                fill="toself",
-                fillcolor="rgba(110,110,110,0.16)",
-                mode="lines",
-                line_width=0,
-                hoverinfo="skip",
-                name="Timetable: 8 in 10 buses",
+        # the timetable's spread as two thin dotted lines rather than a shaded block, so it
+        # doesn't cover the countdown's band
+        for edge, first in ((r.p90_s, True), (r.p10_s, False)):
+            fig.add_trace(
+                go.Scatter(
+                    x=x,
+                    y=[edge / 60] * len(x),
+                    mode="lines",
+                    name="Timetable: 8 in 10 buses (between the dotted lines)",
+                    legendgroup="tt_range",
+                    showlegend=first,
+                    line={"color": "#8a8a8a", "width": 1.5, "dash": "dot"},
+                    hovertext=[hover(r, "The printed timetable", "arrivals")] * len(x),
+                    hoverinfo="text",
+                )
             )
-        )
         fig.add_trace(
             go.Scatter(
                 x=x,
@@ -1260,9 +1431,9 @@ def service_hour_key(h) -> int:
 
 
 LATENESS_CHART_NOTE = (
-    "Measured against the printed timetable. The line is the typical bus (the median) in each "
-    "hour, in minutes behind the timetable; below zero = early. The shaded band is where 8 in 10 "
-    "buses fell. By scheduled hour; hover a point for details."
+    "Against the printed timetable, by the hour the bus was scheduled. The line is the typical "
+    "bus (the median); below zero = early. The shaded band is where 8 in 10 buses fell. Hover a "
+    "point for the numbers."
 )
 
 
@@ -1284,9 +1455,10 @@ def lateness_chart(
     hours = sorted(set(d["hour_local"].astype(int)), key=service_hour_key)
     ref = None
     if reference is not None and len(reference):
-        ref = reference[reference["n"] >= min_n]
+        # the comparison line only where the chosen route or stop has buses: the chart spans
+        # the hours with data, not the whole service day
+        ref = reference[(reference["n"] >= min_n) & reference["hour_local"].isin(hours)]
         ref = ref.assign(_k=ref["hour_local"].map(service_hour_key)).sort_values("_k")
-        hours = sorted(set(hours) | set(ref["hour_local"].astype(int)), key=service_hour_key)
     x_of = {h: hour_label(h) for h in hours}
     x = [x_of[int(h)] for h in d["hour_local"]]
     fig = go.Figure()
@@ -1388,17 +1560,27 @@ def col_range(label: str = "Usual range"):
 
 _TABLE_CSS = """
 <style>
-.ebw-t { border: 1px solid #e3e6ea; border-radius: 10px; overflow: auto; font-size: 15px; }
-.ebw-r { display: grid; align-items: center; column-gap: 12px; padding: 7px 12px;
-         border-bottom: 1px solid #eef0f2; color: #262730; text-decoration: none; }
+.ebw-t { border: 1px solid #e3e6ea; border-radius: 10px; overflow: auto; font-size: 15px;
+         display: flex; flex-direction: column; }
+.ebw-r { display: grid; grid-template-columns: var(--cols); align-items: center;
+         column-gap: 12px; padding: 7px 12px; border-bottom: 1px solid #eef0f2; color: #262730;
+         text-decoration: none; flex: none; }
 a.ebw-r:hover { background: #eef6f2; }
-.ebw-h { position: sticky; top: 0; background: #f6f8f9; font-weight: 600; font-size: 13px;
-         color: #555; z-index: 1; }
+.ebw-h { position: sticky; top: 0; order: -1; background: #f6f8f9; font-weight: 600;
+         font-size: 13px; color: #555; z-index: 1; }
+.ebw-h label { cursor: pointer; user-select: none; }
+.ebw-h label:hover { color: #0b6e4f; }
+.ebw-so::after { content: ' ↕'; color: #b5b5b5; }
+.ebw-sr { display: none; }
 .ebw-n { text-align: right; font-variant-numeric: tabular-nums; }
 .ebw-k { font-weight: 700; }
 .ebw-s { color: #666; font-size: 14px; }
 .ebw-g { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
-.ebw-r { grid-template-columns: var(--cols); }
+.ebw-x { position: relative; display: inline-block; flex: none; max-width: 100%; height: 16px; }
+.ebw-x > span { position: absolute; display: block; }
+.ebw-x0 { top: 0; width: 1px; height: 16px; background: #bbb; }
+.ebw-x1 { top: 4px; height: 8px; border-radius: 3px; background: #9cc0e0; }
+.ebw-x2 { top: 1px; width: 3px; height: 14px; border-radius: 1px; background: #1f5f9e; }
 @media (max-width: 640px) {
   .ebw-hide { display: none; } .ebw-t { font-size: 14px; }
   .ebw-r { grid-template-columns: var(--cols-phone); padding: 7px 8px; column-gap: 8px; }
@@ -1418,34 +1600,54 @@ def range_strip(p10, med, p90, lo: float, hi: float, width: int = 130) -> str:
         return max(0.0, min(100.0, (v / 60 - lo) / (hi - lo) * 100))
 
     # plain positioned spans (st.html's sanitiser removes inline SVG), placed in percent so the
-    # strip can shrink to fit a phone
+    # strip can shrink to fit a phone; the shared styles are the ebw-x classes above
     zero, a, b, m = x(0.0), x(p10), x(p90), x(med)
-    box = "position:absolute;display:block"
     return (
-        f"<span style='position:relative;display:inline-block;flex:none;width:{width}px;"
-        f"max-width:100%;height:16px'>"
-        f"<span style='{box};left:{zero:.1f}%;top:0;width:1px;height:16px;background:#bbb'></span>"
-        f"<span style='{box};left:{a:.1f}%;top:4px;width:max(2px,{b - a:.1f}%);height:8px;"
-        f"border-radius:3px;background:#9cc0e0'></span>"
-        f"<span style='{box};left:calc({m:.1f}% - 1.5px);top:1px;width:3px;height:14px;"
-        f"border-radius:1px;background:#1f5f9e'></span></span>"
+        f"<span class='ebw-x' style='width:{width}px'>"
+        f"<span class='ebw-x0' style='left:{zero:.1f}%'></span>"
+        f"<span class='ebw-x1' style='left:{a:.1f}%;width:max(2px,{b - a:.1f}%)'></span>"
+        f"<span class='ebw-x2' style='left:calc({m:.1f}% - 1.5px)'></span></span>"
     )
 
 
-def link_table(rows: list[dict], columns: list[dict], max_height: int = 460) -> None:
-    """A table whose every row is a link (click anywhere on it). rows: dicts with 'href' and one
-    entry per column key; columns: dicts with 'key', 'label', 'width' (CSS grid track), and
-    optionally 'num' (right-aligned), 'bold', 'hide_on_phone', 'phone_width', 'html' (value is
-    HTML)."""
+def _sort_key(v):
+    """Numbers by value, text as people read route numbers (2 before 10); blanks go last."""
+    if v is None or (isinstance(v, float) and math.isnan(v)):
+        return (2, 0, "")
+    if isinstance(v, (int, float)):
+        return (0, float(v), "")
+    t = str(v)
+    return (1, len(t) if t[:1].isdigit() else 99, t.lower())
+
+
+def link_table(
+    rows: list[dict],
+    columns: list[dict],
+    max_height: int = 460,
+    key: str = "t",
+    default_sort: str | None = None,
+) -> None:
+    """A table whose every row is a link (click anywhere on it) and whose columns sort when
+    their header is clicked (again to reverse), without reloading the page.
+
+    rows: dicts with 'href' (optional; without it the row is not a link), 'hover' (optional
+    text shown when the pointer rests on the row), and one entry per column key.
+    columns: dicts with 'key', 'label', 'width' (CSS grid track), and optionally 'num'
+    (right-aligned), 'bold', 'hide_on_phone', 'phone_width', 'html' (value is HTML), 'help'
+    (header tooltip), 'sort' (the row entry to sort by, if not the shown value; None in the
+    column dict means the column doesn't sort) and 'first' ('asc' or 'desc': the direction of
+    the first click; numbers default to latest/largest first).
+    key: unique per page, so two tables' sort buttons don't interfere. Links carry the page's
+    period and days filters along, so the next page opens with the same choice."""
     tracks = " ".join(c["width"] for c in columns)
-    # on a phone the hidden columns get no track; a column can name a narrower phone_width
-    # (by default flexible columns may shrink as far as their content allows)
+    # on a phone the hidden columns get no track; flexible columns may shrink to their content
     phone = " ".join(
         c.get("phone_width", re.sub(r"minmax\([^,]+,", "minmax(min-content,", c["width"]))
         for c in columns
         if not c.get("hide_on_phone")
     )
-    grid = f"--cols:{tracks};--cols-phone:{phone}"
+    tid = "ebw-" + re.sub(r"[^a-z0-9]", "", key.lower())
+    qs = filter_query()
 
     def cell(c: dict, value) -> str:
         cls = []
@@ -1462,19 +1664,81 @@ def link_table(rows: list[dict], columns: list[dict], max_height: int = 460) -> 
         )
         return f"<div class='{' '.join(cls)}'>{text}</div>"
 
-    head = "".join(
-        f"<div class='{'ebw-n ' if c.get('num') else ''}{'ebw-hide' if c.get('hide_on_phone') else ''}'"
-        f" title='{html_escape(c.get('help', ''))}'>{html_escape(c['label'])}</div>"
-        for c in columns
-    )
-    body = "".join(
-        f"<a class='ebw-r' href='{html_escape(r['href'])}' target='_self' "
-        f"style='{grid}'>" + "".join(cell(c, r.get(c["key"])) for c in columns) + "</a>"
-        for r in rows
-    )
+    # each sortable column: its rows' rank ascending, as a CSS variable per row
+    sortable = [j for j, c in enumerate(columns) if c.get("sort", c["key"]) is not None]
+    ranks: dict[int, list[int]] = {}
+    for j in sortable:
+        field = columns[j].get("sort", columns[j]["key"])
+        order = sorted(range(len(rows)), key=lambda i, f=field: _sort_key(rows[i].get(f)))
+        rank = [0] * len(rows)
+        for pos, i in enumerate(order):
+            rank[i] = pos
+        ranks[j] = rank
+    n = len(rows)
+
+    css = []
+    radios = []
+    head = []
+    for j, c in enumerate(columns):
+        cls = ("ebw-n " if c.get("num") else "") + ("ebw-hide" if c.get("hide_on_phone") else "")
+        label = html_escape(c["label"])
+        tip = html_escape(c.get("help", ""))
+        if j not in ranks:
+            head.append(f"<div class='{cls}' title='{tip}'>{label}</div>")
+            continue
+        first = c.get("first", "desc" if c.get("num") or c.get("html") else "asc")
+        other = "asc" if first == "desc" else "desc"
+        rid = f"{tid}-{j}"
+        for d in ("asc", "desc"):
+            checked = " checked" if default_sort == f"{c['key']}:{d}" else ""
+            radios.append(
+                f"<input type='radio' class='ebw-sr' name='{tid}' id='{rid}-{d}'{checked}>"
+            )
+            var = f"--{'a' if d == 'asc' else 'd'}{j}"
+            arrow = "▲" if d == "asc" else "▼"
+            css.append(
+                f"#{rid}-{d}:checked ~ .ebw-t .ebw-r:not(.ebw-h) {{ order: var({var}); }}"
+                f"#{rid}-{d}:checked ~ .ebw-t .{rid}-h::after "
+                f"{{ content: ' {arrow}'; color: #0b6e4f; }}"
+            )
+        css.append(
+            f".{rid}-2 {{ display: none; }}"
+            f"#{rid}-{first}:checked ~ .ebw-t .{rid}-1 {{ display: none; }}"
+            f"#{rid}-{first}:checked ~ .ebw-t .{rid}-2 {{ display: inline; }}"
+        )
+        head.append(
+            f"<div class='{cls}' title='{tip}'><span class='ebw-so {rid}-h'>"
+            f"<label for='{rid}-{first}' class='{rid}-1'>{label}</label>"
+            f"<label for='{rid}-{other}' class='{rid}-2'>{label}</label></span></div>"
+        )
+
+    def row(i: int, r: dict) -> str:
+        style = []  # the column widths come from the table (CSS variables are inherited)
+        for j, rank in ranks.items():
+            style.append(f"--a{j}:{rank[i]};--d{j}:{n - 1 - rank[i]}")
+        tip = f" title='{html_escape(r['hover'])}'" if r.get("hover") else ""
+        body = "".join(cell(c, r.get(c["key"])) for c in columns)
+        if r.get("href"):
+            href = r["href"] + (("&" if "?" in r["href"] else "?") + qs if qs else "")
+            return (
+                f"<a class='ebw-r' href='{html_escape(href)}' target='_self'{tip} "
+                f"style='{';'.join(style)}'>{body}</a>"
+            )
+        return f"<div class='ebw-r'{tip} style='{';'.join(style)}'>{body}</div>"
+
     st.html(
-        _TABLE_CSS + f"<div class='ebw-t' style='max-height:{max_height}px'>"
-        f"<div class='ebw-r ebw-h' style='{grid}'>{head}</div>{body}</div>"
+        _TABLE_CSS
+        + "<style>"
+        + "".join(css)
+        + "</style>"
+        + "".join(radios)
+        + f"<div class='ebw-t' style='max-height:{max_height}px;--cols:{tracks};"
+        + f"--cols-phone:{phone}'>"
+        + "<div class='ebw-r ebw-h'>"
+        + "".join(head)
+        + "</div>"
+        + "".join(row(i, r) for i, r in enumerate(rows))
+        + "</div>"
     )
 
 
@@ -1584,10 +1848,11 @@ def routes_by_service() -> pd.DataFrame:
 def route_picker(
     routes: pd.DataFrame, key: str, all_label: str | None = "All routes", query_param: str = "route"
 ) -> str | None:
-    """A row of route chips (one per route, plus 'All routes'); returns the chosen route_id.
+    """A row of route buttons ('All routes' first, set apart by the site's CSS, then every route
+    by number); returns the chosen route_id, or None for all routes.
 
     `routes` needs route_id and route_short_name. The choice is kept in the page's address
-    (?route=...) so it can be bookmarked and shared."""
+    (?route=...) so it can be bookmarked and shared. No label: the buttons say what they are."""
     names = routes.sort_values(
         "route_short_name", key=lambda c: c.astype(str).map(lambda v: (len(v), v))
     )
@@ -1600,13 +1865,16 @@ def route_picker(
         st.session_state[key] = wanted if wanted in ids else (all_key if all_label else ids[0])
     elif st.session_state[key] not in options:  # e.g. a route with no data in this period
         st.session_state[key] = all_key if all_label else ids[0]
-    choice = st.pills(
-        "Route",
-        options,
-        format_func=lambda r: all_label if r == all_key else label_of.get(r, str(r)),
-        key=key,
-        required=True,  # clicking the selected chip keeps it selected
-    )
+    # the container's key gives it the CSS class st-key-rp_..., which streamlit_app.py styles
+    with st.container(key=f"rp_{key}"):
+        choice = st.pills(
+            "Route",
+            options,
+            format_func=lambda r: all_label if r == all_key else label_of.get(r, str(r)),
+            key=key,
+            required=True,  # clicking the selected button keeps it selected
+            label_visibility="collapsed",
+        )
     if choice in ids:
         st.query_params[query_param] = choice
         return choice
@@ -1676,28 +1944,28 @@ def stop_buttons(df: pd.DataFrame, key_prefix: str, show_code: bool = False) -> 
     return clicked
 
 
+def card():
+    """A bordered section that the site's CSS draws as a white card (streamlit_app.py styles
+    the st-key-card_ class). The key comes from the calling line, so it is unique and stable."""
+    caller = inspect.stack()[1]
+    name = re.sub(r"[^A-Za-z0-9]", "", Path(caller.filename).stem)
+    return st.container(border=True, key=f"card_{name}_{caller.lineno}")
+
+
 def data_note(start: date | None = None) -> None:
-    """Footer caption: how much data is behind the numbers, and how fresh the analysis is."""
+    """Footer: what the site is, how much data is behind it, how fresh the analysis is."""
     first = collection_start()
-    if not first:
-        return
-    line = f"Collecting since {fmt_date(first)}."
-    if marts_ready():
-        cov = q("""
-            select count(*) as days, min(service_date) as d0, max(service_date) as d1,
-                   sum(stop_events_observed) as scored
-            from marts.mart_daily_coverage where stop_events_observed > 0
-        """).iloc[0]
-        if cov["days"]:
-            line += (
-                f" Scored data: {int(cov['days'])} day{'s' if int(cov['days']) != 1 else ''} "
-                f"({fmt_date(cov['d0'])}–{fmt_date(cov['d1'])}), {int(cov['scored']):,} stop events."
-            )
+    line = (
+        "Eugene Bus Watch measures when Lane Transit District's buses actually reach each stop, "
+        "from LTD's public schedule and live bus positions. Independent; not affiliated with LTD."
+    )
+    if first:
+        line += f" Collecting since {fmt_date(first)}."
+    if first and marts_ready():
         line += " " + build_status()
     st.caption(
-        line + " Typical bus = the median minutes behind the printed timetable; 8 in 10 buses = "
-        "the range between the earliest and latest tenth. "
-        "[Source code on GitHub](https://github.com/blemberger/eugene-bus-reliability)."
+        line + " [How it's measured](/methods) · "
+        "[Source code on GitHub](https://github.com/blemberger/eugene-bus-reliability)"
     )
 
 
