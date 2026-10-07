@@ -37,15 +37,18 @@ from common import (
     link_table,
     live_status_line,
     marts_ready,
+    on_time_line,
     page_filters,
     q,
-    range_cell,
+    range_columns,
+    range_fields,
     range_scale,
     recomputing_note,
     require_db,
     require_marts,
     route_colors,
     route_link,
+    route_picker,
     search_stops,
     service_hour_key,
     show_coming,
@@ -55,8 +58,9 @@ from common import (
     stop_link,
     table,
     today_lateness,
+    told_at_stop,
     told_chart,
-    told_vs_actual,
+    told_takeaway,
 )
 
 require_db()
@@ -140,8 +144,7 @@ def every_stop(start, wt) -> None:
                     "routes": r.routes,
                     "typical": fmt_delay(r.median_delay_s),
                     "typical_s": float(r.median_delay_s),
-                    "range": range_cell(r.p10_delay_s, r.median_delay_s, r.p90_delay_s, lo, hi),
-                    "spread_s": float(r.p90_delay_s - r.p10_delay_s),
+                    **range_fields(r.p10_delay_s, r.median_delay_s, r.p90_delay_s, lo, hi),
                 }
                 for r in enough.itertuples()
             ],
@@ -161,16 +164,7 @@ def every_stop(start, wt) -> None:
                     "sort": "typical_s",
                     "first": "desc",
                 },
-                {
-                    "key": "range",
-                    "label": "8 in 10 buses (vs timetable)",
-                    "width": "minmax(13em, 1.6fr)",
-                    "phone_width": "minmax(6.8em, 1fr)",
-                    "html": True,
-                    "help": RANGE_HELP + " Sorts by how wide the range is.",
-                    "sort": "spread_s",
-                    "first": "desc",
-                },
+                *range_columns(lo, hi),
             ],
             max_height=520,
             key="every_stop",
@@ -239,38 +233,44 @@ def stop_button_grid(df: pd.DataFrame, key_prefix: str, show_code: bool = False)
     clicked = stop_buttons(df, key_prefix, show_code=show_code)
     if clicked:
         st.session_state["stop_id"] = clicked
-        st.rerun()  # redraw with the stop pickers folded away
+        st.session_state["_clear_stop_search"] = True
+        st.rerun()  # redraw for the chosen stop
 
 
-def stop_pickers(with_map: bool) -> None:
-    """Busy-stop buttons, a list of every stop and (once a stop is chosen) a plain stop map;
-    before a stop is chosen, the coloured all-stops map further down does the map's job."""
-    busiest = busy_stops(9)
-    stop_button_grid(busiest, "busy")
-    all_stops = q(f"""
-        select stop_id, stop_code, stop_name from gtfs.stops
-        where feed_version_id = {FV} and location_type = 0 order by stop_name
+def stop_finder(with_map: bool) -> None:
+    """Search by name or sign number (matches appear as buttons), the busiest stops as buttons
+    until something is typed, and (once a stop is chosen, inside "Choose a different stop") a
+    map to click a stop on; before a stop is chosen the coloured map further down does that."""
+    if st.session_state.pop("_clear_stop_search", False):
+        st.session_state["stop_search"] = ""
+    example = q(f"""
+        select stop_code, stop_name from gtfs.stops
+        where feed_version_id = {FV} and location_type = 0 and stop_code is not null
+          and stop_code <> ''
+        order by stop_name limit 1
     """)
-    all_stops["label"] = all_stops["stop_name"] + all_stops["stop_code"].map(
-        lambda c: f"  ·  #{c}" if c else ""
+    hint = (
+        f"Search: stop name or the number on the sign, e.g. {example['stop_name'][0]} or "
+        f"{example['stop_code'][0]}"
+        if not example.empty
+        else "Search: stop name or the number on the sign"
     )
-    label_to_id = dict(zip(all_stops["label"], all_stops["stop_id"], strict=False))
-
-    def _picked_from_list() -> None:
-        choice = st.session_state.get("stop_pick_list")
-        if choice in label_to_id:
-            st.session_state["stop_id"] = label_to_id[choice]
-
-    st.selectbox(
-        "Or pick any stop",
-        ["—"] + all_stops["label"].tolist(),
-        index=0,
-        key="stop_pick_list",
-        on_change=_picked_from_list,
+    query = st.text_input(
+        "Stop name or the number on the sign",
+        placeholder=hint,
+        key="stop_search",
+        label_visibility="collapsed",
     )
+    if query:
+        matches = search_stops(query)
+        if matches.empty:
+            st.warning("No stop matches that. Try part of a street name.")
+        else:
+            stop_button_grid(matches, "stop", show_code=True)
+    else:
+        stop_button_grid(busy_stops(9), "busy")
     if not with_map:
         return
-    st.caption("Or pick a stop on the map:")
     pts = q(f"""
         select stop_id, stop_code, stop_name, stop_lat as lat, stop_lon as lon from gtfs.stops
         where feed_version_id = {FV} and location_type = 0
@@ -316,43 +316,18 @@ def stop_pickers(with_map: bool) -> None:
 if "stop" in st.query_params and not st.session_state.get("stop_id"):
     st.session_state["stop_id"] = st.query_params["stop"]
 
-# ---- choose a stop ----------------------------------------------------------------
-example = q(f"""
-    select stop_code, stop_name from gtfs.stops
-    where feed_version_id = {FV} and location_type = 0 and stop_code is not null and stop_code <> ''
-    order by stop_name limit 1
-""")
-hint = (
-    f"e.g. {example['stop_name'][0]}, or {example['stop_code'][0]}"
-    if not example.empty
-    else "stop name or number"
-)
-query = st.text_input("Search by stop name or the number on the sign", placeholder=hint)
-
-if query:
-    matches = search_stops(query)
-    if matches.empty:
-        st.warning("No stop matches that. Try part of a street name.")
-    else:
-        st.caption("Pick one:")
-        stop_button_grid(matches, "stop", show_code=True)
-
 stop_id = st.session_state.get("stop_id")
 if not stop_id:
-    # no stop yet: ways to pick one, every stop in a table and on a map, all stops together
-    if not query:
-        with card():
-            st.subheader("Start with a busy stop")
-            stop_pickers(with_map=False)
+    # no stop yet: find one, every stop in a table and on a map, all stops together
+    with card():
+        st.subheader("Find your stop")
+        stop_finder(with_map=False)
     start, wt = page_filters()
     every_stop(start, wt)
     all_stops_summary(start, wt)
     st.divider()
     data_note(start)
     st.stop()
-if not query:
-    with st.expander("Choose a different stop"):
-        stop_pickers(with_map=True)
 st.query_params["stop"] = stop_id
 stop = q(
     f"select stop_id, stop_code, stop_name, stop_lat, stop_lon from gtfs.stops where stop_id = %s and feed_version_id = {FV}",
@@ -360,6 +335,8 @@ stop = q(
 ).iloc[0]
 st.subheader(f"{stop['stop_name']}" + (f"  ·  #{stop['stop_code']}" if stop["stop_code"] else ""))
 st.page_link("views/map.py", label="What's coming to this stop right now →")
+with st.expander("Choose a different stop"):
+    stop_finder(with_map=True)
 
 
 # ---- right now at this stop ------------------------------------------------------------
@@ -488,8 +465,7 @@ with card():
                 "toward": r.headsign if isinstance(r.headsign, str) else "",
                 "typical": fmt_delay(r.median_delay),
                 "typical_s": float(r.median_delay),
-                "range": range_cell(r.p10, r.median_delay, r.p90, lo, hi),
-                "spread_s": float(r.p90 - r.p10),
+                **range_fields(r.p10, r.median_delay, r.p90, lo, hi),
             }
             for r in tbl.itertuples()
         ],
@@ -503,15 +479,7 @@ with card():
                 "help": TYPICAL_HELP,
                 "sort": "typical_s",
             },
-            {
-                "key": "range",
-                "label": "8 in 10 buses (vs timetable)",
-                "width": "minmax(13em, 1.6fr)",
-                "phone_width": "minmax(6.8em, 1fr)",
-                "html": True,
-                "help": RANGE_HELP + " Sorts by how wide the range is.",
-                "sort": "spread_s",
-            },
+            *range_columns(lo, hi),
         ],
         key="stop_routes",
         default_sort="route:asc",
@@ -521,11 +489,12 @@ with card():
 # ---- when are buses late here: by hour, one line per route --------------------------------
 with card():
     st.subheader(
-        "When are buses late here?",
+        "When are buses late at this stop?",
         help="Against the printed timetable, by the hour the bus was scheduled. Each line is "
-        "the typical bus (the median) on one route; below zero = early. Pick one route to see "
-        f"the band where 8 in 10 of its buses fell. {period[0].upper() + period[1:]}; an hour "
-        "needs 5 arrivals to show. Hover a point for the numbers.",
+        "the typical bus (the median); below zero = early. With one line showing, the band is "
+        "where 8 in 10 of its buses fell. Pick routes to compare them; All routes goes back to "
+        f"every route together. {period[0].upper() + period[1:]}; an hour needs 5 arrivals to "
+        "show. Hover a point for the numbers.",
     )
     hourly = q(
         f"""
@@ -545,18 +514,52 @@ with card():
     hourly["label"] = [
         labels.get((r, d), r) for r, d in zip(hourly["route"], hourly["direction_id"], strict=False)
     ]
-    options = tbl["label"].tolist()
-    busiest = tbl.sort_values("n", ascending=False)["label"].head(6).tolist()
-    picked = st.pills(
-        "Routes (pick one for its range)",
-        options,
-        selection_mode="multi",
-        default=[o for o in options if o in busiest],
-        key=f"stop_hour_routes_{stop_id}",
-    )
+    # every route here together, as one more line to choose
+    ALL = "All routes"
+    every = q(
+        f"""
+        select hour_local, count(*) as n,
+               percentile_cont(0.05) within group (order by delay_s) as p05,
+               percentile_cont(0.1) within group (order by delay_s) as p10,
+               percentile_cont(0.5) within group (order by delay_s) as p50,
+               percentile_cont(0.9) within group (order by delay_s) as p90,
+               count(distinct service_date) as n_days
+        from marts.fct_stop_events
+        where stop_id = %s and status is not null and service_date >= %s {wt_clause}
+        group by 1
+        """,
+        (stop_id, start, *wt_params),
+    ).assign(route_id="__all__", route=ALL, direction_id=-1, label=ALL)
+    hourly = pd.concat([hourly, every], ignore_index=True)
+    options = [ALL, *tbl["label"].tolist()]
+    pick_key = f"stop_hour_routes_{stop_id}"
+
+    def _pick_lines() -> None:
+        """All routes on its own, or any set of routes: picking a route replaces All routes,
+        picking All routes replaces the routes, and nothing picked means All routes."""
+        prev = st.session_state.get(f"_{pick_key}", [ALL])
+        cur = list(st.session_state.get(pick_key) or [])
+        if not cur or (ALL in cur and ALL not in prev):
+            cur = [ALL]
+        elif ALL in cur:
+            cur = [c for c in cur if c != ALL]
+        st.session_state[pick_key] = cur
+        st.session_state[f"_{pick_key}"] = cur
+
+    if pick_key not in st.session_state:
+        st.session_state[pick_key] = [ALL]
+    with st.container(key="rp_stop_lines"):  # styled like the other route buttons
+        picked = st.pills(
+            "Routes",
+            options,
+            selection_mode="multi",
+            key=pick_key,
+            on_change=_pick_lines,
+            label_visibility="collapsed",
+        )
     chart = hourly[hourly["label"].isin(picked or []) & (hourly["n"] >= 5)].copy()
     if not picked:
-        st.caption("Pick at least one route above.")
+        st.caption("Pick a route above.")
     elif chart.empty:
         st.caption("Not enough arrivals yet for an hour-by-hour view (needs 5 in an hour).")
     else:
@@ -565,13 +568,13 @@ with card():
         chart = chart.assign(_k=chart["hour_local"].map(service_hour_key)).sort_values("_k")
         x_of = {h: hour_label(h) for h in hours}
         fig = go.Figure()
-        fig.add_hline(y=0, line_width=1, line_color="#999", line_dash="dot")
+        on_time_line(fig)
         one = len(picked) == 1
         for label in [o for o in options if o in picked]:
             d = chart[chart["label"] == label]
             if d.empty:
                 continue
-            color = colors.get(str(d["route_id"].iloc[0]), "#0b6e4f")
+            color = "#1f5f9e" if label == ALL else colors.get(str(d["route_id"].iloc[0]), "#555555")
             x = [x_of[h] for h in d["hour_local"]]
             if one:
                 # the range most buses fall in: 10th to 90th percentile
@@ -622,7 +625,7 @@ with card():
                 "categoryorder": "array",
                 "categoryarray": [x_of[h] for h in hours],
             },
-            yaxis_title="typical bus, min behind the timetable",
+            yaxis_title="minutes behind the timetable",
             yaxis_tickformat="+d",
             yaxis_zeroline=False,
             legend_title="",
@@ -632,22 +635,29 @@ with card():
         st.plotly_chart(fit_phone(fig), width="stretch")
 
 
-# ---- timetable or the sign? ---------------------------------------------------------
+# ---- timetable or the countdown? -------------------------------------------------------
 with card():
-    told = told_vs_actual(stop_id=stop_id)
-    since = told["first_day"].min() if len(told) else None
     st.subheader(
-        "The timetable or the countdown: which to go by here?",
-        help=TOLD_CHART_NOTE
-        + (f" All routes here, all days since {fmt_date(since)}." if since is not None else "")
-        + " A point needs 20 predictions to show. More on the Countdown page.",
+        "Timetable or countdown: which to trust at this stop?",
+        help=TOLD_CHART_NOTE + " More on the Countdown page.",
     )
+    here_routes = (
+        tbl[["route_id", "route"]]
+        .drop_duplicates("route_id")
+        .rename(columns={"route": "route_short_name"})
+    )
+    told_route = route_picker(here_routes, key=f"told_route_{stop_id}", query_param="told_route")
+    told = told_at_stop(stop_id, start, wt, told_route)
     fig = told_chart(told)
     if fig is None:
-        st.caption("Not enough measured arrivals and predictions at this stop yet.")
+        st.caption(
+            "Not enough measured arrivals and countdown predictions here for this choice yet."
+        )
     else:
+        line = told_takeaway(told)
+        if line:
+            st.markdown(line)
         st.plotly_chart(fit_phone(fig), width="stretch")
-        st.caption("All data; doesn't follow the period and days filters.")
 
 # ---- arrive-by guidance ---------------------------------------------------
 with card():
@@ -708,7 +718,7 @@ with card():
         default_sort="route:asc",
     )
     with st.expander("Hour by hour"):
-        guide = hourly[hourly["n"] >= 10].copy()
+        guide = hourly[(hourly["n"] >= 10) & (hourly["label"] != ALL)].copy()
         # minutes before the scheduled time; 0 when the earliest buses are no more than 30 s early
         guide["early_by"] = guide["p05"].map(
             lambda s: 0.0 if s is None or pd.isna(s) or s >= -30 else round(-float(s) / 60)
@@ -720,7 +730,7 @@ with card():
             pivot = guide.pivot_table(
                 index="hour_local", columns="col", values="early_by", aggfunc="first"
             ).sort_index()
-            order = ["Route " + o for o in options]
+            order = ["Route " + o for o in options if o != ALL]
             pivot = pivot[[c for c in order if c in pivot.columns]]
             pivot.insert(0, "Hour", [hour_time(h) for h in pivot.index])
             table(
@@ -895,7 +905,7 @@ with card():
 
         x = [week_label(a, b) for a, b in zip(trend["d0"], trend["d1"], strict=False)]
         fig = go.Figure()
-        fig.add_hline(y=0, line_width=1, line_color="#999", line_dash="dot")
+        on_time_line(fig)
         fig.add_trace(
             go.Scatter(
                 x=x + x[::-1],

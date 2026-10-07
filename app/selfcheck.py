@@ -18,6 +18,8 @@ import traceback
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import pandas as pd
+
 APP_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(APP_DIR))
 # Streamlit warns "no runtime found" for every cached function when run outside a server.
@@ -212,6 +214,74 @@ def stop_names_report() -> None:
             print(f"   {raw}  ->  {new}" if raw != new else f"   {raw}")
 
 
+def next_stop_report() -> None:
+    """Live map check: for the buses reporting now, compare LTD's own "next stop" (the first stop
+    it still gives a time for) with the next stop worked out from the bus's position on its
+    route (common.next_stops, what the map draws)."""
+    import psycopg
+    from common import next_stops
+
+    section("LIVE MAP NEXT STOPS (LTD's next stop vs the bus's position on its route)")
+    try:
+        with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
+            cur = conn.execute(
+                """
+                with latest as (
+                    select distinct on (vehicle_id) *
+                    from rt.vehicle_position
+                    where position_timestamp > now() - interval '10 minutes'
+                    order by vehicle_id, position_timestamp desc
+                )
+                select vp.vehicle_id, vp.trip_id, vp.start_date, vp.latitude as lat,
+                       vp.longitude as lon, vp.position_timestamp,
+                       (select min(x.stop_sequence) from rt.prediction_current x
+                         where x.trip_id = vp.trip_id and x.start_date = vp.start_date
+                           and coalesce(x.arrival_time, x.departure_time)
+                               >= vp.position_timestamp - interval '30 seconds') as next_seq,
+                       exists (select 1 from gtfs.trips t where t.trip_id = vp.trip_id
+                                 and t.feed_version_id = (select max(feed_version_id)
+                                                          from gtfs.feed_version)) as in_schedule
+                from latest vp
+                """
+            )
+            cols = [d.name for d in cur.description]
+            buses = pd.DataFrame(cur.fetchall(), columns=cols)
+    except Exception as exc:  # noqa: BLE001
+        print(f"!! could not read live buses: {exc!r}")
+        return
+    if buses.empty:
+        print("no buses reporting in the last 10 minutes (normal overnight)")
+        return
+    geo = next_stops(buses)
+    placed = buses.merge(geo, on="vehicle_id", how="left") if len(geo) else buses.assign(seq1=None)
+    n = len(buses)
+    ok = placed["seq1"].notna()
+    print(f"buses reporting: {n}")
+    print(f"  placed on their route (the map draws their next stops): {int(ok.sum())}")
+    print(
+        f"  not placed: no trip id {int(buses['trip_id'].isna().sum())}, trip not in the "
+        f"schedule {int((buses['trip_id'].notna() & ~buses['in_schedule']).sum())}, other "
+        f"{int((~ok).sum() - buses['trip_id'].isna().sum() - (buses['trip_id'].notna() & ~buses['in_schedule']).sum())}"
+    )
+    both = placed[ok & placed["next_seq"].notna()]
+    if len(both):
+        same = (both["next_seq"] == both["seq1"]).sum()
+        behind = (both["next_seq"] < both["seq1"]).sum()
+        ahead = (both["next_seq"] > both["seq1"]).sum()
+        print(
+            f"  LTD's next stop vs position-based, for {len(both)} buses with both: "
+            f"same {int(same)}, LTD's is behind the bus {int(behind)}, LTD's is further on "
+            f"{int(ahead)}"
+        )
+        odd = both[both["next_seq"] != both["seq1"]].head(8)
+        for r in odd.itertuples():
+            print(
+                f"    bus {r.vehicle_id} trip {r.trip_id}: LTD next stop #{int(r.next_seq)}, "
+                f"position says #{int(r.seq1)} ({r.name1}); along route {r.bus_frac:.3f}"
+            )
+    print(f"  LTD has no upcoming stop for {int(buses['next_seq'].isna().sum())} buses")
+
+
 def main() -> None:
     section("APP SELF-CHECK (every page rendered headlessly, as `make app` would show it)")
     try:
@@ -224,6 +294,7 @@ def main() -> None:
     for page in PAGES:
         run_page(page, page)
     stop_names_report()
+    next_stop_report()
     ex = pick_examples()
     if ex.get("route_id"):
         run_page(

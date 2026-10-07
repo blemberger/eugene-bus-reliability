@@ -6,8 +6,10 @@
 --                      prediction shown (fct_prediction_errors; horizon_min is whole minutes, so
 --                      "5" means the sign showed 5:00 to 5:59).
 -- Positive = the bus came later than you were told. Rows for all routes and stops together
--- (route_id and stop_id null), per route, and per stop. All data. The Accuracy page and each
--- stop's page draw it as one chart, left to right from the timetable to the sign 1 minute out.
+-- (route_id and stop_id null), per route, and per stop. All data. The Countdown page draws it
+-- as one bar per row: the timetable, then the countdown at 15 minutes out down to 1, each split
+-- into early / within a minute / 1-3 min late / 3+ min late. (Each stop's page computes the
+-- same split itself, so it can follow that page's route and day filters.)
 -- Recomputed at most hourly (macros/hourly.sql).
 
 {{ config(indexes=[{'columns': ['route_id']}, {'columns': ['stop_id']}], **hourly_config()) }}
@@ -34,6 +36,11 @@ select
     percentile_cont(0.5) within group (order by abs(error_s)) as median_abs_s,
     count(*) filter (where abs(error_s) <= 60)                 as n_within_1min,
     count(*) filter (where abs(error_s) <= 120)                as n_within_2min,
+    -- where the rest fell, for the "when you're told a time" chart: more than a minute early,
+    -- 1 to 3 minutes late, more than 3 minutes late
+    count(*) filter (where error_s < -60)                      as n_early_1min,
+    count(*) filter (where error_s > 60 and error_s <= 180)    as n_late_1_3min,
+    count(*) filter (where error_s > 180)                      as n_late_3min,
     min(service_date)                                          as first_day
 from told
 group by basis, ahead_min, grouping sets ((), (route_id), (stop_id))

@@ -33,7 +33,7 @@ from common import (
 )
 
 require_db()
-st.title("How reliable are Eugene's buses?")
+st.title("How reliable are Eugene's buses?", help=LATENESS_CHART_NOTE)
 require_marts()
 FV = str(current_fv())
 
@@ -44,7 +44,6 @@ names = dict(
 
 # ---- when are buses late: any route, any stop -----------------------------------------------
 with card():
-    st.subheader("When are buses late?", help=LATENESS_CHART_NOTE)
     route_id = route_picker(routes, key="ov_route")
 
     if route_id:
@@ -79,6 +78,9 @@ with card():
         key="ov_stop",
     )
     stop_id = None if stop_choice == ALL_STOPS else stop_choice
+    # the chart goes here, right under the route and stop; the period and days filters below it
+    # (it is drawn after them, because it depends on them)
+    chart_slot = st.container()
     start, wt = page_filters()
 
     what = (f"route {names[route_id]}" if route_id else "all routes") + (
@@ -86,17 +88,21 @@ with card():
     )
     tot, hourly = selection_lateness(start, wt, route_id, stop_id)
     if tot is None:
-        if not route_id and not stop_id and lateness(start, None, "overall").empty:
-            recomputing_note()
-        else:
-            st.info(f"No measured arrivals for {what}, {day_label(wt)} since {fmt_date(start)}.")
+        with chart_slot:
+            if not route_id and not stop_id and lateness(start, None, "overall").empty:
+                recomputing_note()
+            else:
+                st.info(
+                    f"No measured arrivals for {what}, {day_label(wt)} since {fmt_date(start)}."
+                )
     else:
         ref = lateness(start, wt, "hour") if (route_id or stop_id) else None
         fig = lateness_chart(hourly, what, reference=ref, min_n=5 if stop_id else 10)
-        if fig is None:
-            st.caption("Not enough arrivals yet for an hour-by-hour view (needs 5 in an hour).")
-        else:
-            st.plotly_chart(fit_phone(fig), width="stretch")
+        with chart_slot:
+            if fig is None:
+                st.caption("Not enough arrivals yet for an hour-by-hour view (needs 5 in an hour).")
+            else:
+                st.plotly_chart(fit_phone(fig), width="stretch")
         today = today_lateness(route_id=route_id, stop_id=stop_id)
         n_today = int(today["n"].iloc[0]) if len(today) else 0
         m1, m2, m3 = st.columns(3)

@@ -32,6 +32,7 @@ from common import (
     stop_buttons,
     table,
     told_chart,
+    told_takeaway,
     told_vs_actual,
 )
 
@@ -58,6 +59,24 @@ if cal.empty or cal["n_predictions"].sum() == 0:
     )
     st.stop()
 
+# The timetable never changes, so it has one accuracy, over every measured arrival. (Measured
+# on "the same predictions" at each countdown distance it seemed to change with the distance,
+# only because each distance holds a different mix of buses.)
+TT = q(
+    """
+    select route_id, n, n_within_1min, n_within_2min from marts.mart_told_vs_actual
+    where basis = 'timetable' and stop_id is null
+    """
+)
+tt_share = {
+    (None if pd.isna(r.route_id) else str(r.route_id)): (
+        r.n_within_1min / r.n if r.n else None,
+        r.n_within_2min / r.n if r.n else None,
+    )
+    for r in TT.itertuples()
+}
+tt1, tt2 = tt_share.get(route_id, (None, None))
+
 # ---- headline ------------------------------------------------------------------------
 at5 = cal[cal["horizon_min"] == 5]
 at15 = cal[cal["horizon_min"] == 15]
@@ -68,9 +87,11 @@ if not at5.empty:
     c1.metric(
         "Countdown says 5 min: bus comes within 1 min of that",
         fmt_pct(int(r5["n_within_1min"]), int(r5["n_predictions"])),
-        help="For the same buses, the printed timetable was right to within 1 minute "
-        + fmt_pct(int(r5["n_schedule_within_1min"]), int(r5["n_predictions"]))
-        + " of the time."
+        help=(
+            f"The printed timetable is right to within 1 minute {tt1:.0%} of the time."
+            if tt1 is not None
+            else ""
+        )
         + SCORED,
     )
 if not at15.empty:
@@ -78,9 +99,11 @@ if not at15.empty:
     c2.metric(
         "Countdown says 15 min: bus comes within 2 min of that",
         fmt_pct(int(r15["n_within_2min"]), int(r15["n_predictions"])),
-        help="For the same buses, the printed timetable was right to within 2 minutes "
-        + fmt_pct(int(r15["n_schedule_within_2min"]), int(r15["n_predictions"]))
-        + " of the time."
+        help=(
+            f"The printed timetable is right to within 2 minutes {tt2:.0%} of the time."
+            if tt2 is not None
+            else ""
+        )
         + SCORED,
     )
 
@@ -88,14 +111,17 @@ if not at15.empty:
 with card():
     told = told_vs_actual(route_id=route_id)
     st.subheader(
-        "How much later than you were told did the bus come?",
+        "When you're told a time, when does the bus come?",
         help=TOLD_CHART_NOTE
         + (f" All data since {fmt_date(told['first_day'].min())}." if len(told) else ""),
     )
     fig0 = told_chart(told)
     if fig0 is None:
-        st.caption("Not enough measured arrivals yet.")
+        st.caption("Not enough measured arrivals yet, or the numbers are being recalculated.")
     else:
+        line = told_takeaway(told)
+        if line:
+            st.markdown(line)
         st.plotly_chart(fit_phone(fig0), width="stretch")
 
 
@@ -189,9 +215,10 @@ with card():
     st.subheader(
         "How often is the countdown right?",
         help="Solid lines: how often the bus came within 1 or 2 minutes of what the countdown "
-        "said, by how far ahead it said it. Dashed lines, same colours: for the same buses, how "
-        "often the printed timetable was that close. Where a solid line is above its dashed "
-        "twin, the countdown is worth checking. Click a legend entry to hide or show a line. "
+        "said, by how far ahead it said it. Dashed lines, same colours: how often the printed "
+        "timetable is that close, over every measured arrival (flat, because the timetable "
+        "doesn't change as the bus gets nearer). Where a solid line is above its dashed twin, "
+        "the countdown is worth checking. Click a legend entry to hide or show a line. "
         "LTD predicts as far ahead as the end of each trip; this page shows 1 to 15 minutes out, "
         "the range in which people use a countdown to decide when to leave (our cut, not LTD's). "
         "Distances with fewer than 30 scored predictions are left out.",
@@ -230,22 +257,23 @@ with card():
                     hovertemplate=hover,
                 )
             )
-            fig.add_trace(
-                go.Scatter(
-                    x=cal["horizon_min"],
-                    y=cal[f"n_schedule_within_{k}min"] / cal["n_predictions"],
-                    mode="lines",
-                    name=f"printed timetable within {k} min",
-                    line={"color": color, "dash": "dash", "width": 1.5},
-                    hovertemplate="%{x} min out: %{y:.0%}<extra>%{fullData.name}</extra>",
+            # the timetable: one level, flat across every distance
+            level = tt1 if k == "1" else tt2
+            if level is not None:
+                fig.add_trace(
+                    go.Scatter(
+                        x=[0.5, 15.5],
+                        y=[level, level],
+                        mode="lines",
+                        name=f"printed timetable within {k} min",
+                        line={"color": color, "dash": "dash", "width": 2},
+                        hovertemplate=f"printed timetable: right to within {k} min "
+                        f"{level:.0%} of the time<extra></extra>",
+                    )
                 )
-            )
         shares = pd.concat(
-            [
-                cal[f"n{w}_within_{k}min"] / cal["n_predictions"]
-                for k in ("1", "2")
-                for w in ("", "_schedule")
-            ]
+            [cal[f"n_within_{k}min"] / cal["n_predictions"] for k in ("1", "2")]
+            + [pd.Series([v for v in (tt1, tt2) if v is not None], dtype=float)]
         )
         fig.update_layout(
             xaxis_title="minutes the countdown said",
@@ -273,10 +301,8 @@ if route_id is None:
             select c.route_id, r.route_short_name as route,
                    sum(c.n_predictions) filter (where c.horizon_min = 5)  as n5,
                    sum(c.n_within_1min) filter (where c.horizon_min = 5)  as w5,
-                   sum(c.n_schedule_within_1min) filter (where c.horizon_min = 5) as t5,
                    sum(c.n_predictions) filter (where c.horizon_min = 10) as n10,
                    sum(c.n_within_2min) filter (where c.horizon_min = 10) as w10,
-                   sum(c.n_schedule_within_2min) filter (where c.horizon_min = 10) as t10,
                    sum(c.n_predictions) as n
             from marts.mart_calibration c
             join gtfs.routes r on r.route_id = c.route_id and r.feed_version_id = {FV}
@@ -299,8 +325,8 @@ if route_id is None:
 
             rows = []
             for r in by_route.itertuples():
-                c5, t5 = share(r.w5, r.n5), share(r.t5, r.n5)
-                c10, t10 = share(r.w10, r.n10), share(r.t10, r.n10)
+                c5, c10 = share(r.w5, r.n5), share(r.w10, r.n10)
+                t5, t10 = tt_share.get(str(r.route_id), (None, None))
                 rows.append(
                     {
                         "href": f"/accuracy?route={r.route_id}",
@@ -308,10 +334,10 @@ if route_id is None:
                         "route": r.route,
                         "c5": bar(c5, "#1f5f9e"),
                         "c5_s": c5,
-                        "t5": bar(t5, "#9a9a9a"),
-                        "t5_s": t5,
                         "c10": bar(c10, "#1f5f9e"),
                         "c10_s": c10,
+                        "t5": bar(t5, "#9a9a9a"),
+                        "t5_s": t5,
                         "t10": bar(t10, "#9a9a9a"),
                         "t10_s": t10,
                     }
@@ -325,22 +351,22 @@ if route_id is None:
                     "of that.",
                 ),
                 (
-                    "t5",
-                    "Timetable: within 1 min",
-                    "For the same buses, how often the printed timetable was right to within "
-                    "1 minute.",
-                ),
-                (
                     "c10",
                     "Countdown at 10 min: within 2 min",
                     "When the countdown said 10 minutes, how often the bus came within 2 minutes "
                     "of that.",
                 ),
                 (
+                    "t5",
+                    "Timetable: within 1 min",
+                    "How often this route's printed timetable is right to within 1 minute, over "
+                    "every measured arrival.",
+                ),
+                (
                     "t10",
                     "Timetable: within 2 min",
-                    "For the same buses, how often the printed timetable was right to within "
-                    "2 minutes.",
+                    "How often this route's printed timetable is right to within 2 minutes, over "
+                    "every measured arrival.",
                 ),
             ):
                 cols.append(
@@ -369,15 +395,18 @@ with card():
         order by stop_name limit 1
     """)
     hint = (
-        f"e.g. {example['stop_name'][0]}, or {example['stop_code'][0]}"
+        f"stop name or the number on the sign, e.g. {example['stop_name'][0]} or "
+        f"{example['stop_code'][0]}"
         if not example.empty
         else "stop name or number"
     )
     query = st.text_input(
-        "Stop name or the number on the sign", placeholder=hint, key="pred_stop_query"
+        "Stop name or the number on the sign",
+        placeholder="Search: " + hint,
+        key="pred_stop_query",
+        label_visibility="collapsed",
     )
     if not query:
-        st.write("Or start with a busy stop:")
         picked = busy_stop_buttons("pred_busy")
         if picked:
             st.session_state["pred_stop_id"] = picked

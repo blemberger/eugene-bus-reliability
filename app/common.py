@@ -111,7 +111,7 @@ _STOP_RULES = [
     ),
     ("side, street only", re.compile(_SIDE + r"(?P<street>.+)$", re.I), "{street} ({side} side)"),
 ]
-STOP_NAME_COLUMNS = ("stop_name", "next_stop", "stop2")
+STOP_NAME_COLUMNS = ("stop_name", "next_stop", "stop2", "name1", "name2")
 
 
 def _tidy_words(s: str) -> str:
@@ -724,6 +724,116 @@ def schedule_join(pred_alias: str = "p") -> tuple[str, str]:
     return "", f"{pred_alias}.scheduled_time"
 
 
+NEXT_STOP_CLEARANCE_M = 25  # a stop the bus is within this far of counts as reached
+
+
+def next_stops(buses: pd.DataFrame, marker: int | None = None) -> pd.DataFrame:
+    """Where each bus is going next, from where it actually is: its GPS position is placed on
+    its trip's route shape, and the next two stops are the first two scheduled stops ahead of
+    it along the shape (a stop within NEXT_STOP_CLEARANCE_M counts as reached). LTD's own
+    "next stop" can be a stop the bus has just passed (LTD keeps a time for stops already
+    served), so it is used only as a hint for which pass of a street the bus is on: the bus is
+    placed between two stops before and two stops after LTD's next stop.
+
+    buses: vehicle_id, trip_id, start_date, lat, lon, next_seq (LTD's hint, may be missing).
+    Returns one row per bus that could be placed: vehicle_id, bus_frac, ltd_seq, and for the
+    next stop and the one after (suffixes 1 and 2): seq, stop_id, stop name, lat, lon, time
+    (LTD's predicted arrival, else the timetable's), time_src ('LTD' or 'timetable'), and the
+    route's path from the bus to stop 1 and from stop 1 to stop 2 (GeoJSON, WGS84)."""
+    rows = buses.dropna(subset=["trip_id", "lat", "lon"])
+    if rows.empty or not marts_ready():
+        return pd.DataFrame()
+    fv = current_fv()
+    sql = f"""
+        with v as (
+            select * from unnest(%s::text[], %s::text[], %s::date[], %s::float8[], %s::float8[],
+                                 %s::int[])
+                as v(vehicle_id, trip_id, start_date, lon, lat, hint_seq)
+        ),
+        s as (  -- the trip's stops in order, with where each lies along the shape
+            select f.trip_id, f.stop_sequence, f.stop_id, f.frac,
+                   row_number() over (partition by f.trip_id order by f.stop_sequence) as k
+            from intermediate.int_stop_shape_fractions f
+            where f.feed_version_id = {fv} and f.is_usable
+              and f.trip_id in (select trip_id from v)
+        ),
+        g as (
+            select v.*, l.line_m, l.length_m,
+                   ST_Transform(ST_SetSRID(ST_MakePoint(v.lon, v.lat), 4326), 32610) as pt,
+                   (select k from s where s.trip_id = v.trip_id
+                      and s.stop_sequence >= v.hint_seq order by s.stop_sequence limit 1) as hint_k
+            from v
+            join gtfs.trips t on t.trip_id = v.trip_id and t.feed_version_id = {fv}
+            join intermediate.int_shape_lines l
+              on l.shape_id = t.shape_id and l.feed_version_id = t.feed_version_id
+        ),
+        w as materialized (  -- the stretch of shape to look in: two stops either side of LTD's next stop
+            select g.*,
+                   coalesce((select s.frac from s where s.trip_id = g.trip_id
+                               and s.k = g.hint_k - 2), 0) as lo,
+                   coalesce((select s.frac from s where s.trip_id = g.trip_id
+                               and s.k = g.hint_k + 2), 1) as hi
+            from g
+        ),
+        placed as materialized (
+            select w.*,
+                   lo + ST_LineLocatePoint(ST_LineSubstring(line_m, lo, greatest(hi, lo + 1e-6)), pt)
+                        * (greatest(hi, lo + 1e-6) - lo) as bus_frac
+            from w
+        ),
+        ahead as (
+            select p.vehicle_id, p.trip_id, p.start_date, p.line_m, p.bus_frac, p.hint_seq,
+                   s.stop_sequence, s.stop_id, s.frac,
+                   row_number() over (partition by p.vehicle_id order by s.stop_sequence) as n
+            from placed p
+            join s on s.trip_id = p.trip_id
+                  and s.frac > p.bus_frac + {NEXT_STOP_CLEARANCE_M} / nullif(p.length_m, 0)
+        ),
+        two as materialized (
+            select a.*, st.stop_name, st.stop_lat, st.stop_lon,
+                   coalesce(pc.arrival_time, pc.departure_time) as predicted,
+                   coalesce(se.scheduled_arrival, pc.scheduled_time) as scheduled
+            from ahead a
+            join gtfs.stops st on st.stop_id = a.stop_id and st.feed_version_id = {fv}
+            left join rt.prediction_current pc
+              on pc.trip_id = a.trip_id and pc.start_date = a.start_date
+             and pc.stop_sequence = a.stop_sequence
+            left join intermediate.int_scheduled_stop_events se
+              on se.trip_id = a.trip_id and se.service_date = a.start_date
+             and se.stop_sequence = a.stop_sequence
+            where a.n <= 2
+        )
+        select a.vehicle_id, a.bus_frac, a.hint_seq as ltd_seq,
+               a.stop_sequence as seq1, a.stop_id as stop_id1, a.stop_name as name1,
+               a.stop_lat as lat1, a.stop_lon as lon1,
+               coalesce(a.predicted, a.scheduled) as time1,
+               case when a.predicted is not null then 'LTD' else 'timetable' end as src1,
+               b.stop_sequence as seq2, b.stop_id as stop_id2, b.stop_name as name2,
+               b.stop_lat as lat2, b.stop_lon as lon2,
+               coalesce(b.predicted, b.scheduled) as time2,
+               case when b.predicted is not null then 'LTD' else 'timetable' end as src2,
+               ST_AsGeoJSON(ST_Transform(ST_LineSubstring(a.line_m, a.bus_frac, a.frac), 4326))
+                   as path1,
+               case when b.frac is not null then ST_AsGeoJSON(ST_Transform(
+                   ST_LineSubstring(a.line_m, a.frac, b.frac), 4326)) end as path2
+        from two a
+        left join two b on b.vehicle_id = a.vehicle_id and b.n = 2
+        where a.n = 1
+    """
+    params = (
+        rows["vehicle_id"].astype(str).tolist(),
+        rows["trip_id"].astype(str).tolist(),
+        [None if pd.isna(d) else pd.Timestamp(d).date() for d in rows["start_date"]],
+        rows["lon"].astype(float).tolist(),
+        rows["lat"].astype(float).tolist(),
+        [int(x) if pd.notna(x) else None for x in rows["next_seq"]],
+    )
+    try:
+        return q_fresh(sql, params, marker=marker)
+    except Exception:  # noqa: BLE001 — the analysis tables may be rebuilding
+        return pd.DataFrame()
+
+
 def arrow_safe(df: pd.DataFrame) -> pd.DataFrame:
     """Streamlit sends tables to the browser via Arrow, which needs one type per column.
     Raw tables can hold mixed values (e.g. jsonb, ints next to strings); stringify those.
@@ -866,15 +976,16 @@ def fmt_ago(ts, now=None) -> str:
     return f"{s // 86400} d ago"
 
 
-def fmt_delay(seconds, on_time_band: int = 30) -> str:
-    """'4 min late', '2 min early', 'on time'. Half-minute precision under 10 minutes."""
+def fmt_delay(seconds) -> str:
+    """'0.3 min late', '2.0 min early', '12 min late': tenths of a minute under 10 minutes,
+    whole minutes above; 'on time' only when it rounds to 0.0."""
     if seconds is None or pd.isna(seconds):
         return "—"
     s = float(seconds)
-    if abs(s) < on_time_band:
-        return "on time"
     m = abs(s) / 60
-    txt = f"{m:.1f}".rstrip("0").rstrip(".") if m < 10 else f"{m:.0f}"
+    if round(m, 1) == 0:
+        return "on time"
+    txt = f"{m:.1f}" if m < 9.95 else f"{m:.0f}"
     return f"{txt} min {'late' if s > 0 else 'early'}"
 
 
@@ -1229,10 +1340,10 @@ def route_table(rank: pd.DataFrame, start: date, key: str) -> None:
                 "name": long_names.get(rid, ""),
                 "typical": fmt_delay(r.median_delay),
                 "typical_s": float(r.median_delay),
-                "range": range_cell(r.p10_delay_s, r.median_delay, r.p90_delay_s, lo, hi),
-                "spread_s": float(r.p90_delay_s - r.p10_delay_s),
+                **range_fields(r.p10_delay_s, r.median_delay, r.p90_delay_s, lo, hi),
                 "worst": worst_hour_label(r.worst_hour, r.worst_delay_s),
-                "worst_s": None if pd.isna(r.worst_delay_s) else float(r.worst_delay_s),
+                # in the order of the service day: 5 am first, after midnight last
+                "worst_s": None if pd.isna(r.worst_hour) else service_hour_key(r.worst_hour),
                 "today": fmt_delay(today),
                 "today_s": today,
             }
@@ -1255,25 +1366,16 @@ def route_table(rank: pd.DataFrame, start: date, key: str) -> None:
                 "sort": "typical_s",
                 "first": "desc",
             },
-            {
-                "key": "range",
-                "label": "8 in 10 buses (vs timetable)",
-                "width": "minmax(13em, 1.6fr)",
-                "phone_width": "minmax(6.8em, 1fr)",
-                "html": True,
-                "help": RANGE_HELP + " Sorts by how wide the range is.",
-                "sort": "spread_s",
-                "first": "desc",
-            },
+            *range_columns(lo, hi),
             {
                 "key": "worst",
                 "label": "Latest hour",
                 "width": "minmax(9.5em, 0.9fr)",
                 "hide_on_phone": True,
                 "help": "The hour of day when the typical bus on this route runs latest, and how "
-                "late it is then (hours with at least 10 arrivals).",
+                "late it is then (hours with at least 10 arrivals). Sorts by time of day.",
                 "sort": "worst_s",
-                "first": "desc",
+                "first": "asc",
             },
             {
                 "key": "today",
@@ -1293,135 +1395,195 @@ def route_table(rank: pd.DataFrame, start: date, key: str) -> None:
 
 # ------------------------------------------- what you were told vs when the bus came ----
 
-# Minutes the countdown showed, shown left to right (far to near). The mart also has 20 and 30;
-# riders decide when to leave within about 15 minutes, so the chart stops there.
+# How far ahead the countdown said the bus was, top to bottom of the chart (far to near).
+# Riders decide when to leave within about 15 minutes, so the chart stops there.
 TOLD_AHEAD = (15, 10, 5, 3, 2, 1)
 
-
-def told_vs_actual(route_id: str | None = None, stop_id: str | None = None) -> pd.DataFrame:
-    """Rows of marts.mart_told_vs_actual for all routes and stops, one route, or one stop."""
-    if not q("select to_regclass('marts.mart_told_vs_actual') is not null as ok")["ok"][0]:
-        return pd.DataFrame()
-    df = q(
-        "select * from marts.mart_told_vs_actual "
-        "where route_id is not distinct from %s and stop_id is not distinct from %s",
-        (route_id, stop_id),
-    )
-    for c in ("median_s", "p10_s", "p90_s", "median_abs_s"):
-        df[c] = df[c].astype(float)
-    return df
-
+# Where the bus came against what you were told, early to late: (column, legend, colour).
+TOLD_PARTS = [
+    ("n_early", "1+ min early", "#e6a100"),
+    ("n_within", "within 1 min", "#2e8b57"),
+    ("n_late13", "1–3 min late", "#ef9a9a"),
+    ("n_late3", "3+ min late", "#c62828"),
+]
 
 TOLD_CHART_NOTE = (
-    "Blue: LTD's countdown (on signs and in apps) when it said the bus was that many minutes "
-    "away; the line is the typical bus, the band where 8 in 10 buses came. Grey: the printed "
-    "timetable, the same at any distance; the dashed line is the typical bus, the dotted lines "
-    "the edges of where 8 in 10 came. Below zero = earlier than you were told. The narrower the "
-    "spread, the more you can rely on it."
+    "Each bar is 100% of the buses. The top bar compares when the bus came with the printed "
+    "timetable; the others with LTD's countdown (on stop signs and in apps) when it said the "
+    "bus was 15, 10, 5, 3, 2 or 1 minutes away. Green: within a minute of what you were told. "
+    "Amber: the bus came more than a minute early, so you could have missed it. Red: it came "
+    "later than you were told. The more green, the more you can rely on it. Distances with "
+    "fewer than 20 predictions are left out."
 )
 
 
-def told_chart(df: pd.DataFrame, min_n: int = 20) -> go.Figure | None:
-    """How much later than the timetable, and than the countdown N minutes out, the bus came.
-    The countdown is a line and band from 15 minutes out to 1; the timetable flat lines across
-    the same range, so the two compare directly. Countdown points with fewer than min_n predictions are
-    left out (the chart only spans the distances that have data)."""
+def _told_counts(err: str) -> str:
+    """SQL counts of an error column (seconds, positive = later than told) for TOLD_PARTS."""
+    return (
+        f"count(*) as n, count(*) filter (where {err} < -60) as n_early, "
+        f"count(*) filter (where abs({err}) <= 60) as n_within, "
+        f"count(*) filter (where {err} > 60 and {err} <= 180) as n_late13, "
+        f"count(*) filter (where {err} > 180) as n_late3, min(service_date) as first_day"
+    )
+
+
+def told_vs_actual(route_id: str | None = None) -> pd.DataFrame:
+    """The timetable and the countdown at each distance, all stops, all routes or one route,
+    all data (marts.mart_told_vs_actual). Empty until the mart has the early/late split."""
+    if not q("select to_regclass('marts.mart_told_vs_actual') is not null as ok")["ok"][0]:
+        return pd.DataFrame()
+    try:
+        return q(
+            """
+            select basis, ahead_min, n, n_early_1min as n_early, n_within_1min as n_within,
+                   n_late_1_3min as n_late13, n_late_3min as n_late3, first_day
+            from marts.mart_told_vs_actual
+            where route_id is not distinct from %s and stop_id is null
+            """,
+            (route_id,),
+        )
+    except Exception:  # noqa: BLE001 — the mart predates the split until the next rebuild
+        return pd.DataFrame()
+
+
+def told_at_stop(stop_id: str, start: date, wt: str | None, route_id: str | None) -> pd.DataFrame:
+    """told_vs_actual() for one stop, computed on the spot so it follows the page's period,
+    days and route."""
+    wt_e, wt_params = day_sql(wt)
+    route_sql = "and route_id = %s" if route_id else ""
+    route_params = (route_id,) if route_id else ()
+    return q(
+        f"""
+        select 'timetable' as basis, null::int as ahead_min, {_told_counts("delay_s")}
+        from marts.fct_stop_events
+        where stop_id = %s and status is not null and service_date >= %s {wt_e} {route_sql}
+        union all
+        select 'sign', horizon_min, {_told_counts("error_s")}
+        from marts.fct_prediction_errors
+        where stop_id = %s and horizon_min = any(%s) and service_date >= %s {wt_e} {route_sql}
+        group by horizon_min
+        """,
+        (
+            stop_id,
+            start,
+            *wt_params,
+            *route_params,
+            stop_id,
+            list(TOLD_AHEAD),
+            start,
+            *wt_params,
+            *route_params,
+        ),
+    )
+
+
+def _told_rows(df: pd.DataFrame, min_n: int) -> pd.DataFrame:
+    """The chart's rows, top to bottom: the timetable, then the countdown far to near."""
     if df.empty:
-        return None
-    tt = df[(df["basis"] == "timetable") & (df["n"] >= min_n)]
-    sign = df[
-        (df["basis"] == "sign") & (df["n"] >= min_n) & (df["ahead_min"].isin(TOLD_AHEAD))
-    ].sort_values("ahead_min", ascending=False)
-    if len(sign) < 2:  # one distance alone is a dot, not a comparison
-        return None
-    x = [f"{int(m)} min" for m in sign["ahead_min"]]
+        return df
+    df = df[df["n"] >= min_n].copy()
+    tt = df[df["basis"] == "timetable"].assign(label="Timetable", order=0)
+    sign = df[(df["basis"] == "sign") & df["ahead_min"].isin(TOLD_AHEAD)].copy()
+    sign["label"] = sign["ahead_min"].map(lambda m: f"Countdown at {int(m)} min")
+    sign["order"] = sign["ahead_min"].map(lambda m: TOLD_AHEAD.index(int(m)) + 1)
+    return pd.concat([tt, sign]).sort_values("order")
 
-    def hover(r, what: str, unit: str) -> str:
-        return (
-            f"<b>{what}</b><br>typical bus {r.median_s / 60:+.1f} min vs this"
-            f"<br>8 in 10 buses: {r.p10_s / 60:+.1f} to {r.p90_s / 60:+.1f} min"
-            f"<br>right to within 1 min: {r.n_within_1min / r.n:.0%}"
-            f" · within 2 min: {r.n_within_2min / r.n:.0%}<br>{int(r.n):,} {unit}"
-        )
 
+def told_chart(df: pd.DataFrame, min_n: int = 20) -> go.Figure | None:
+    """When you're told a time, when does the bus come? One 100% bar per source of the time:
+    the timetable, then the countdown at 15 minutes out down to 1, each split into early /
+    within a minute / 1-3 min late / 3+ min late. None without the timetable and two
+    countdown distances."""
+    rows = _told_rows(df, min_n)
+    if rows.empty or (rows["basis"] == "sign").sum() < 2:
+        return None
+    labels = rows["label"].tolist()
     fig = go.Figure()
-    fig.add_hline(y=0, line_width=1, line_color="#999", line_dash="dot")
-    lo, hi = float(sign["p10_s"].min()), float(sign["p90_s"].max())
-    if not tt.empty:
-        r = tt.iloc[0]
-        lo, hi = min(lo, r.p10_s), max(hi, r.p90_s)
-        # the timetable's spread as two thin dotted lines rather than a shaded block, so it
-        # doesn't cover the countdown's band
-        for edge, first in ((r.p90_s, True), (r.p10_s, False)):
-            fig.add_trace(
-                go.Scatter(
-                    x=x,
-                    y=[edge / 60] * len(x),
-                    mode="lines",
-                    name="Timetable: 8 in 10 buses (between the dotted lines)",
-                    legendgroup="tt_range",
-                    showlegend=first,
-                    line={"color": "#8a8a8a", "width": 1.5, "dash": "dot"},
-                    hovertext=[hover(r, "The printed timetable", "arrivals")] * len(x),
-                    hoverinfo="text",
-                )
-            )
+    for col, name, colour in TOLD_PARTS:
+        share = rows[col] / rows["n"]
         fig.add_trace(
-            go.Scatter(
-                x=x,
-                y=[r.median_s / 60] * len(x),
-                mode="lines",
-                name="Timetable: typical bus",
-                line={"color": "#6b6b6b", "width": 2.5, "dash": "dash"},
-                hovertext=[hover(r, "The printed timetable", "arrivals")] * len(x),
-                hoverinfo="text",
+            go.Bar(
+                y=labels,
+                x=share,
+                orientation="h",
+                name=name,
+                marker={"color": colour, "line": {"color": "white", "width": 1}},
+                text=[f"{v:.0%}" if v >= 0.07 else "" for v in share],
+                textposition="inside",
+                insidetextanchor="middle",
+                textfont={"color": "white" if col in ("n_within", "n_late3") else "#222"},
+                customdata=list(zip(rows["n"].astype(int), rows["basis"], strict=False)),
+                hovertemplate="<b>%{y}</b><br>%{x:.0%} of buses came "
+                + name
+                + ", against the time it gave<br>%{customdata[0]:,} measured<extra></extra>",
             )
         )
-    fig.add_trace(
-        go.Scatter(
-            x=x + x[::-1],
-            y=list(sign["p90_s"] / 60) + list(sign["p10_s"] / 60)[::-1],
-            fill="toself",
-            fillcolor="rgba(31,95,158,0.20)",
-            mode="lines",
-            line_width=0,
-            hoverinfo="skip",
-            name="Countdown: 8 in 10 buses",
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=x,
-            y=sign["median_s"] / 60,
-            mode="lines+markers",
-            name="Countdown: typical bus",
-            line={"color": "#1f5f9e", "width": 3},
-            hovertext=[
-                hover(r, f"When the countdown said {int(r.ahead_min)} min", "predictions")
-                for r in sign.itertuples()
-            ],
-            hoverinfo="text",
-        )
-    )
-    pad = 0.4
     fig.update_layout(
+        barmode="stack",
         xaxis={
-            "type": "category",
-            "categoryorder": "array",
-            "categoryarray": x,
-            "title": "what the countdown said",
+            "tickformat": ".0%",
+            "range": [0, 1.005],
+            "tickvals": [0, 0.2, 0.4, 0.6, 0.8, 1],
+            "title": "share of buses",
         },
         yaxis={
-            "title": "minutes later than told",
-            "range": [min(0.0, lo / 60) - pad, max(0.0, hi / 60) + pad],
-            "tickformat": "+.0f",
-            "zeroline": False,
+            "categoryorder": "array",
+            "categoryarray": labels,
+            "autorange": "reversed",
+            "title": "",
         },
-        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0, "xanchor": "left"},
-        margin={"t": 50},
-        height=400,
+        legend={
+            "orientation": "h",
+            "yanchor": "bottom",
+            "y": 1.02,
+            "x": 0,
+            "xanchor": "left",
+            "traceorder": "normal",
+        },
+        bargap=0.25,
+        margin={"t": 40, "l": 10, "r": 10},
+        height=90 + 44 * len(labels),
     )
     return fig
+
+
+def told_takeaway(df: pd.DataFrame, min_n: int = 20) -> str:
+    """The chart in one sentence: the countdown at 5 minutes against the timetable."""
+    rows = _told_rows(df, min_n)
+    if rows.empty:
+        return ""
+    tt = rows[rows["basis"] == "timetable"]
+    at5 = rows[rows["ahead_min"] == 5]
+    if tt.empty or at5.empty:
+        return ""
+    c = float(at5["n_within"].iloc[0] / at5["n"].iloc[0])
+    t = float(tt["n_within"].iloc[0] / tt["n"].iloc[0])
+    return (
+        f"When the countdown says 5 minutes, the bus comes within a minute of that **{c:.0%}** "
+        f"of the time. The printed timetable is that close **{t:.0%}** of the time."
+    )
+
+
+ON_TIME_GREEN = "#0b6e4f"
+
+
+def on_time_line(fig: go.Figure, vertical: bool = False, label: str = "on time") -> None:
+    """The 'on time' reference (0 minutes against the timetable) on a minutes axis: a solid
+    green line, labelled, drawn over the bands, the same green as the on-time line in tables."""
+    style = {"line_width": 1.5, "line_color": ON_TIME_GREEN, "layer": "above"}
+    font = {"color": ON_TIME_GREEN, "size": 12}
+    if vertical:
+        fig.add_vline(
+            x=0, annotation_text=label, annotation_position="bottom", annotation_font=font, **style
+        )
+    else:
+        fig.add_hline(
+            y=0,
+            annotation_text=label,
+            annotation_position="bottom right",
+            annotation_font=font,
+            **style,
+        )
 
 
 def service_hour_key(h) -> int:
@@ -1462,7 +1624,7 @@ def lateness_chart(
     x_of = {h: hour_label(h) for h in hours}
     x = [x_of[int(h)] for h in d["hour_local"]]
     fig = go.Figure()
-    fig.add_hline(y=0, line_width=1, line_color="#999", line_dash="dot")
+    on_time_line(fig)
     fig.add_trace(
         go.Scatter(
             x=x + x[::-1],
@@ -1567,6 +1729,7 @@ _TABLE_CSS = """
          text-decoration: none; flex: none; }
 a.ebw-r:hover { background: #eef6f2; }
 .ebw-h { position: sticky; top: 0; order: -1; background: #f6f8f9; font-weight: 600;
+         align-items: end;
          font-size: 13px; color: #555; z-index: 1; }
 .ebw-h label { cursor: pointer; user-select: none; }
 .ebw-h label:hover { color: #0b6e4f; }
@@ -1578,13 +1741,19 @@ a.ebw-r:hover { background: #eef6f2; }
 .ebw-g { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
 .ebw-x { position: relative; display: inline-block; flex: none; max-width: 100%; height: 16px; }
 .ebw-x > span { position: absolute; display: block; }
-.ebw-x0 { top: 0; width: 1px; height: 16px; background: #bbb; }
+.ebw-x0 { top: -10px; width: 2px; margin-left: -1px; height: calc(100% + 20px);
+          background: #0b6e4f; }
 .ebw-x1 { top: 4px; height: 8px; border-radius: 3px; background: #9cc0e0; }
-.ebw-x2 { top: 1px; width: 3px; height: 14px; border-radius: 1px; background: #1f5f9e; }
+.ebw-x2 { top: 0; width: 4px; height: 16px; border-radius: 1px; background: #123f6b; }
+.ebw-ax { position: relative; display: block; max-width: 100%; height: 15px; margin-top: 3px;
+          font-weight: 500; font-size: 11px; color: #777; }
+.ebw-ax > span { position: absolute; top: 0; transform: translateX(-50%); white-space: nowrap; }
+.ebw-ax > .ebw-ax0 { color: #0b6e4f; font-weight: 700; }
 @media (max-width: 640px) {
   .ebw-hide { display: none; } .ebw-t { font-size: 14px; }
   .ebw-r { grid-template-columns: var(--cols-phone); padding: 7px 8px; column-gap: 8px; }
   .ebw-g { flex-direction: column; align-items: stretch; gap: 2px; }
+  .ebw-x0 { top: -4px; height: calc(100% + 6px); }  /* clear of the numbers under the strip */
 }
 </style>
 """
@@ -1592,7 +1761,7 @@ a.ebw-r:hover { background: #eef6f2; }
 
 def range_strip(p10, med, p90, lo: float, hi: float, width: int = 130) -> str:
     """A small horizontal picture of where 8 in 10 buses fell (p10 to p90, seconds) with a tick at
-    the typical bus and a faint line at 0, on a shared scale lo..hi (minutes)."""
+    the typical bus and a green line at on time (0), on a shared scale lo..hi (minutes)."""
     if any(v is None or pd.isna(v) for v in (p10, med, p90)):
         return ""
 
@@ -1604,9 +1773,10 @@ def range_strip(p10, med, p90, lo: float, hi: float, width: int = 130) -> str:
     zero, a, b, m = x(0.0), x(p10), x(p90), x(med)
     return (
         f"<span class='ebw-x' style='width:{width}px'>"
-        f"<span class='ebw-x0' style='left:{zero:.1f}%'></span>"
         f"<span class='ebw-x1' style='left:{a:.1f}%;width:max(2px,{b - a:.1f}%)'></span>"
-        f"<span class='ebw-x2' style='left:calc({m:.1f}% - 1.5px)'></span></span>"
+        # on time, drawn over the range so it shows where on time falls within it
+        f"<span class='ebw-x0' style='left:{zero:.1f}%'></span>"
+        f"<span class='ebw-x2' style='left:calc({m:.1f}% - 2px)'></span></span>"
     )
 
 
@@ -1684,7 +1854,7 @@ def link_table(
         label = html_escape(c["label"])
         tip = html_escape(c.get("help", ""))
         if j not in ranks:
-            head.append(f"<div class='{cls}' title='{tip}'>{label}</div>")
+            head.append(f"<div class='{cls}' title='{tip}'>{label}{c.get('axis', '')}</div>")
             continue
         first = c.get("first", "desc" if c.get("num") or c.get("html") else "asc")
         other = "asc" if first == "desc" else "desc"
@@ -1709,7 +1879,8 @@ def link_table(
         head.append(
             f"<div class='{cls}' title='{tip}'><span class='ebw-so {rid}-h'>"
             f"<label for='{rid}-{first}' class='{rid}-1'>{label}</label>"
-            f"<label for='{rid}-{other}' class='{rid}-2'>{label}</label></span></div>"
+            f"<label for='{rid}-{other}' class='{rid}-2'>{label}</label></span>"
+            f"{c.get('axis', '')}</div>"
         )
 
     def row(i: int, r: dict) -> str:
@@ -1755,8 +1926,66 @@ def range_scale(df: pd.DataFrame, lo_col: str = "p10_delay_s", hi_col: str = "p9
     if df.empty:
         return -2.0, 8.0
     lo = math.floor(min(0.0, float(df[lo_col].min()) / 60)) - 0.5
-    hi = math.ceil(max(1.0, float(df[hi_col].quantile(0.95)) / 60)) + 0.5
+    hi = math.ceil(max(1.0, float(df[hi_col].max()) / 60)) + 0.5
     return lo, hi
+
+
+def range_axis(lo: float, hi: float, width: int = 130) -> str:
+    """The minutes scale over a column of range strips, with 'on time' marked at 0 (green, as
+    the line running down through the strips)."""
+    span = hi - lo
+    step = 1 if span <= 6 else 2 if span <= 14 else 5
+    ticks = []
+    t = math.ceil(lo / step) * step
+    while t <= hi:
+        x = (t - lo) / span * 100
+        if t == 0:
+            ticks.append(f"<span class='ebw-ax0' style='left:{x:.1f}%'>on time</span>")
+        elif abs(t) >= step and 8 < x < 92:  # keep labels inside, clear of "on time"
+            ticks.append(f"<span style='left:{x:.1f}%'>{t:+d}</span>")
+        t += step
+    return f"<span class='ebw-ax' style='width:{width}px'>{''.join(ticks)}</span>"
+
+
+def range_fields(p10, med, p90, lo: float, hi: float) -> dict:
+    """A table row's entries for range_columns(): the strip, its sort value (the typical bus,
+    so sorting lines the dark ticks up), and the spread in minutes."""
+    spread = None if pd.isna(p10) or pd.isna(p90) else float(p90 - p10)
+    return {
+        "range": range_cell(p10, med, p90, lo, hi),
+        "range_s": None if pd.isna(med) else float(med),
+        "spread": "" if spread is None else f"{spread / 60:.1f} min",
+        "spread_s": spread,
+    }
+
+
+def range_columns(lo: float, hi: float) -> list[dict]:
+    """The 8-in-10 strip column (with its minutes scale in the heading) and the spread column."""
+    return [
+        {
+            "key": "range",
+            "label": "8 in 10 buses (vs timetable)",
+            "axis": range_axis(lo, hi),
+            "width": "minmax(13em, 1.6fr)",
+            "phone_width": "minmax(6.8em, 1fr)",
+            "html": True,
+            "help": RANGE_HELP + " The green line is on time; the dark tick is the typical bus. "
+            "Sorts by the typical bus.",
+            "sort": "range_s",
+            "first": "desc",
+        },
+        {
+            "key": "spread",
+            "label": "Spread",
+            "width": "minmax(5em, 0.5fr)",
+            "num": True,
+            "hide_on_phone": True,
+            "help": "How wide the 8-in-10 range is: the time to allow for the bus being early "
+            "or late. Narrower = more predictable.",
+            "sort": "spread_s",
+            "first": "desc",
+        },
+    ]
 
 
 # ----------------------------------------------- lateness for any route / stop choice ----
@@ -2010,12 +2239,22 @@ def fmt_in(minutes) -> str:
 
 
 def col_clock(label: str, times: pd.Series, help: str | None = None):
-    """A time column that adds the weekday when any row is not today in Eugene."""
+    """A time column that adds the weekday when any row is not today in Eugene; wide enough
+    for "Wed 12:45 pm"."""
     t = pd.to_datetime(times, utc=True).dt.tz_convert(LOCAL_TZ).dropna()
     other_day = bool((t.dt.date != local_today()).any()) if len(t) else False
     return st.column_config.DatetimeColumn(
-        label, format="ddd h:mm a" if other_day else "h:mm a", timezone=LOCAL_TZ, help=help
+        label,
+        format="ddd h:mm a" if other_day else "h:mm a",
+        timezone=LOCAL_TZ,
+        help=help,
+        width=120 if other_day else 90,
     )
+
+
+# narrow route and destination columns in the live tables, so the times fit
+COL_ROUTE_NARROW = st.column_config.TextColumn("Route", width=60)
+COL_TOWARD_NARROW = st.column_config.TextColumn("Toward", width=150)
 
 
 JUST_LEFT_MINUTES = 6  # "just left" at a stop: only buses gone this recently
@@ -2146,6 +2385,8 @@ def show_coming(coming: pd.DataFrame, empty: str) -> None:
         hide_index=True,
         width="stretch",
         column_config={
+            "Route": COL_ROUTE_NARROW,
+            "Toward": COL_TOWARD_NARROW,
             "Arrives": col_clock("Arrives", coming["t"]),
             "In": st.column_config.TextColumn(
                 "In",
@@ -2185,6 +2426,8 @@ def show_left(left: pd.DataFrame, empty: str) -> None:
         hide_index=True,
         width="stretch",
         column_config={
+            "Route": COL_ROUTE_NARROW,
+            "Toward": COL_TOWARD_NARROW,
             "Left at": col_clock("Left at", left["t"]),
             "Scheduled": col_clock("Scheduled", left["scheduled"]),
             "Min late": col_late(),

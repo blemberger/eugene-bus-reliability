@@ -27,9 +27,11 @@ from common import (
     lateness,
     lateness_chart,
     link_table,
+    on_time_line,
     page_filters,
     q,
-    range_cell,
+    range_columns,
+    range_fields,
     range_scale,
     recomputing_note,
     require_db,
@@ -248,7 +250,7 @@ with card():
             along[c] = along[c].astype(float) / 60
         stops_order = along["Stop"].tolist()
         fig = go.Figure()
-        fig.add_vline(x=0, line_dash="dot", line_color="#999")
+        on_time_line(fig, vertical=True)
         fig.add_trace(
             go.Scatter(
                 y=stops_order + stops_order[::-1],
@@ -303,8 +305,7 @@ with card():
                     "stop": r.stop_name,
                     "typical": fmt_delay(r.median_delay * 60),
                     "typical_s": float(r.median_delay),
-                    "range": range_cell(r.p10_s, r.median_delay * 60, r.p90_s, lo, hi),
-                    "spread_s": float(r.p90_s - r.p10_s),
+                    **range_fields(r.p10_s, r.median_delay * 60, r.p90_s, lo, hi),
                 }
                 for r in along.itertuples()
             ],
@@ -325,15 +326,7 @@ with card():
                     "help": TYPICAL_HELP,
                     "sort": "typical_s",
                 },
-                {
-                    "key": "range",
-                    "label": "8 in 10 buses (vs timetable)",
-                    "width": "minmax(13em, 1.6fr)",
-                    "phone_width": "minmax(6.8em, 1fr)",
-                    "html": True,
-                    "help": RANGE_HELP + " Sorts by how wide the range is.",
-                    "sort": "spread_s",
-                },
+                *range_columns(lo, hi),
             ],
             max_height=520,
             key="route_stops",

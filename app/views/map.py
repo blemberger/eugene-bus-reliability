@@ -36,6 +36,7 @@ from common import (
     live_marker,
     live_status_line,
     local_times,
+    next_stops,
     q,
     q_fresh,
     require_db,
@@ -80,67 +81,6 @@ ARROW_ICON = {
     "anchorY": 32,
     "mask": True,
 }
-
-
-def paths_to_next_stops(focus: pd.DataFrame) -> pd.DataFrame:
-    """For each bus in `focus`: the route's own path from the bus to its next stop, and from
-    there to the stop after, as lists of [lon, lat]. Stops and the bus are placed along the
-    shape the same way the arrival analysis does (int_stop_shape_fractions), so on a route
-    that uses a street twice the path follows the right pass. Empty if the analysis tables
-    aren't there yet; the map then draws straight lines."""
-    rows = focus.dropna(subset=["trip_id", "next_seq"])
-    if rows.empty:
-        return pd.DataFrame()
-    try:
-        df = q(
-            f"""
-            with v as (
-                select * from unnest(%s::text[], %s::text[], %s::float8[], %s::float8[], %s::int[], %s::int[])
-                    as v(vehicle_id, trip_id, lon, lat, next_seq, seq2)
-            ),
-            g as (
-                select v.vehicle_id, l.line_m,
-                       ST_Transform(ST_SetSRID(ST_MakePoint(v.lon, v.lat), 4326), 32610) as pt,
-                       nf.frac as next_frac, tf.frac as then_frac,
-                       coalesce((select max(f.frac) from intermediate.int_stop_shape_fractions f
-                                 where f.feed_version_id = t.feed_version_id and f.trip_id = v.trip_id
-                                   and f.stop_sequence < v.next_seq), 0) as prev_frac
-                from v
-                join gtfs.trips t on t.trip_id = v.trip_id and t.feed_version_id = {FV}
-                join intermediate.int_shape_lines l
-                  on l.shape_id = t.shape_id and l.feed_version_id = t.feed_version_id
-                join intermediate.int_stop_shape_fractions nf
-                  on nf.feed_version_id = t.feed_version_id and nf.trip_id = v.trip_id
-                 and nf.stop_sequence = v.next_seq
-                left join intermediate.int_stop_shape_fractions tf
-                  on tf.feed_version_id = t.feed_version_id and tf.trip_id = v.trip_id
-                 and tf.stop_sequence = v.seq2
-            ),
-            located as (
-                select g.*, least(prev_frac + ST_LineLocatePoint(
-                           ST_LineSubstring(line_m, prev_frac, greatest(next_frac, prev_frac + 1e-6)), pt)
-                           * (greatest(next_frac, prev_frac + 1e-6) - prev_frac), next_frac) as bus_frac
-                from g where next_frac >= prev_frac
-            )
-            select vehicle_id,
-                   ST_AsGeoJSON(ST_Transform(ST_LineSubstring(line_m, bus_frac, next_frac), 4326)) as to_next,
-                   case when then_frac > next_frac then
-                       ST_AsGeoJSON(ST_Transform(ST_LineSubstring(line_m, next_frac, then_frac), 4326))
-                   end as to_then
-            from located
-            """,
-            (
-                rows["vehicle_id"].astype(str).tolist(),
-                rows["trip_id"].astype(str).tolist(),
-                rows["lon"].astype(float).tolist(),
-                rows["lat"].astype(float).tolist(),
-                rows["next_seq"].astype(int).tolist(),
-                [int(x) if pd.notna(x) else None for x in rows["seq2"]],
-            ),
-        )
-    except Exception:  # noqa: BLE001 — the analysis tables may not exist yet
-        return pd.DataFrame()
-    return df
 
 
 def coords(geojson: str | None) -> list:
@@ -196,7 +136,8 @@ def load_live() -> pd.DataFrame:
             where position_timestamp between now() - interval '10 minutes' and now() + interval '5 minutes'
             order by vehicle_id, position_timestamp desc
         )
-        select vp.vehicle_id, vp.trip_id, vp.route_id, r.route_short_name as route, t.trip_headsign as headsign,
+        select vp.vehicle_id, vp.trip_id, vp.start_date, vp.route_id, r.route_short_name as route,
+               t.trip_headsign as headsign,
                vp.latitude as lat, vp.longitude as lon, vp.bearing, vp.speed_mps, vp.occupancy_status,
                vp.position_timestamp,
                p.stop_sequence as next_seq, p2.stop_sequence as seq2,
@@ -242,6 +183,33 @@ def live_map() -> None:
         )
         return
 
+    # next two stops from where each bus actually is, not LTD's "next stop" (which can be a stop
+    # the bus has just passed); LTD's stays only for a bus that can't be placed on its route
+    live["next_src"], live["src2"] = "LTD", "LTD"
+    live["path1"], live["path2"] = None, None
+    geo = next_stops(live, marker=live_marker()["fid"])
+    if len(geo):
+        g = geo.set_index(geo["vehicle_id"].astype(str))
+        placed = live["vehicle_id"].astype(str).isin(g.index)
+        vid = live["vehicle_id"].astype(str)
+        for to, frm in (
+            ("next_seq", "seq1"),
+            ("next_stop", "name1"),
+            ("next_lat", "lat1"),
+            ("next_lon", "lon1"),
+            ("next_time", "time1"),
+            ("next_src", "src1"),
+            ("seq2", "seq2"),
+            ("stop2", "name2"),
+            ("lat2s", "lat2"),
+            ("lon2s", "lon2"),
+            ("time2", "time2"),
+            ("src2", "src2"),
+            ("path1", "path1"),
+            ("path2", "path2"),
+        ):
+            live[to] = live[to].astype(object).where(~placed, vid.map(g[frm]))
+
     live["status"] = live["delay_s"].map(status_from_delay)
     live["color"] = live["status"].map(lambda k: hex_to_rgb(STATUS_COLOR[k]))
     # a bus whose trip isn't in the schedule (LTD's "swap" and the like) has no route name
@@ -257,9 +225,15 @@ def live_map() -> None:
         ),
         speed=live["speed_mps"].map(lambda v: "" if pd.isna(v) else f"Speed {v * 2.237:.0f} mph"),
         reported=live["position_timestamp"].map(lambda t: fmt_ago(t, now=data_now())),
-        next_at=live["next_time"].map(fmt_time),
+        next_at=[
+            ("" if pd.isna(t) else ("predicted " if s_ == "LTD" else "scheduled ") + fmt_time(t))
+            for t, s_ in zip(live["next_time"], live["next_src"], strict=False)
+        ],
         then=live["stop2"].fillna("—"),
-        then_at=live["time2"].map(fmt_time),
+        then_at=[
+            ("" if pd.isna(t) else ("predicted " if s_ == "LTD" else "scheduled ") + fmt_time(t))
+            for t, s_ in zip(live["time2"], live["src2"], strict=False)
+        ],
         load=live["occupancy_status"].map(
             lambda o: "" if pd.isna(o) else f" · Seats: {OCCUPANCY.get(int(o), '')}"
         ),
@@ -355,8 +329,10 @@ def live_map() -> None:
         route_paths = [
             {"path": g[["lon", "lat"]].to_numpy().tolist()} for _, g in pts.groupby("shape_id")
         ]
-    to_stop = focus.dropna(subset=["next_lat", "next_lon"])
-    to_then = focus.dropna(subset=["lat2s", "lon2s", "next_lat", "next_lon"])
+    # markers only for buses placed on their route (the same ones that get the dashed lines)
+    placed_focus = focus[focus["path1"].notna()]
+    to_stop = placed_focus.dropna(subset=["next_lat", "next_lon"])
+    to_then = placed_focus.dropna(subset=["lat2s", "lon2s", "next_lat", "next_lon"])
     stops_pts = (
         pd.concat(
             [
@@ -385,7 +361,7 @@ def live_map() -> None:
             + stops_pts["which"]
             + ": "
             + stops_pts["sname"]
-            + " at "
+            + ", "
             + stops_pts["sat"]
             + "</i><br/>"
         )
@@ -417,27 +393,19 @@ def live_map() -> None:
         view = pdk.ViewState(latitude=44.06, longitude=-123.09, zoom=11.2)
     # the bus's way to its next stop and on to the one after, dashed, along the route itself
     zoom_now = float(view.zoom)
-    along = paths_to_next_stops(focus) if len(focus) else pd.DataFrame()
     dash_next: list[dict] = []
     dash_then: list[dict] = []
     casing: list[dict] = []  # a pale line under the red dashes, so they read over the route
-    here = {str(r.vehicle_id): ([float(r.lon), float(r.lat)], r) for r in focus.itertuples()}
-    for _, r in along.iterrows():
-        dot, bus = here.get(str(r["vehicle_id"]), (None, None))
-        if dot is None:
-            continue
+    for r in focus.itertuples():
+        to_next = coords(r.path1)
+        if not to_next:
+            continue  # couldn't be placed on its route: no line rather than a wrong one
         # from the bus's own dot (its GPS position is usually a few metres off the route's
-        # line), along the route to the next stop; straight to the stop if the bus is already
-        # level with it
-        path = coords(r["to_next"]) or [[float(bus.next_lon), float(bus.next_lat)]]
-        path = [dot, *path]
+        # line), along the route to its next stop, then on to the stop after
+        path = [[float(r.lon), float(r.lat)], *to_next]
         casing.append({"path": path})
         dash_next += [{"path": d} for d in dashed(path, zoom_now, on_px=11, off_px=6)]
-        dash_then += [{"path": d} for d in dashed(coords(r["to_then"]), zoom_now, 7, 6)]
-    have_paths = set(along["vehicle_id"].astype(str)) if len(along) else set()
-    # straight lines only for buses whose route path couldn't be worked out
-    to_stop = to_stop[~to_stop["vehicle_id"].astype(str).isin(have_paths)]
-    to_then = to_then[~to_then["vehicle_id"].astype(str).isin(have_paths)]
+        dash_then += [{"path": d} for d in dashed(coords(r.path2), zoom_now, 7, 6)]
 
     layers = [
         pdk.Layer(
@@ -484,24 +452,6 @@ def live_map() -> None:
             get_width=4,
             width_min_pixels=4,
             width_max_pixels=4,
-            pickable=False,
-        ),
-        pdk.Layer(
-            "LineLayer",
-            data=to_then,
-            get_source_position="[next_lon, next_lat]",
-            get_target_position="[lon2s, lat2s]",
-            get_color=[230, 30, 30, 150],
-            get_width=2,
-            pickable=False,
-        ),
-        pdk.Layer(
-            "LineLayer",
-            data=to_stop,
-            get_source_position="[lon, lat]",
-            get_target_position="[next_lon, next_lat]",
-            get_color=[230, 30, 30, 220],
-            get_width=3,
             pickable=False,
         ),
         pdk.Layer(
@@ -566,8 +516,8 @@ def live_map() -> None:
     tooltip = {
         "html": "<b>Route {route} → {headsign}</b><br/>"
         "<span style='color:#bbb'>destination shown on the bus</span><br/>{stop_line}"
-        "Next stop: {next_stop}, predicted {next_at}<br/>"
-        "Stop after: {then}, predicted {then_at}<br/>"
+        "Next stop: {next_stop}, {next_at}<br/>"
+        "Stop after: {then}, {then_at}<br/>"
         "{running}<br/>{speed}{load}<br/>"
         "<span style='color:#999'>position reported {reported}</span>",
         "style": {"backgroundColor": "#222", "color": "white", "fontSize": "13px"},
@@ -652,13 +602,17 @@ with card():
         order by stop_name limit 1
     """)
     hint = (
-        f"e.g. {example['stop_name'][0]}, or {example['stop_code'][0]}"
+        f"stop name or the number on the sign, e.g. {example['stop_name'][0]} or "
+        f"{example['stop_code'][0]}"
         if not example.empty
         else "stop name or number"
     )
-    query = st.text_input("Stop name or the number on the sign", placeholder=hint)
+    query = st.text_input(
+        "Stop name or the number on the sign",
+        placeholder="Search: " + hint,
+        label_visibility="collapsed",
+    )
     if not query:
-        st.write("Or start with a busy stop:")
         picked = busy_stop_buttons("live_busy")
         if picked:
             st.session_state["live_stop_id"] = picked

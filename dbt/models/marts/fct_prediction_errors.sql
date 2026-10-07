@@ -12,6 +12,7 @@
     indexes=[
         {'columns': ['service_date']},
         {'columns': ['route_id', 'horizon_min']},
+        {'columns': ['stop_id', 'horizon_min']},
     ]
 ) }}
 
