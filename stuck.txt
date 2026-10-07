@@ -1,0 +1,70 @@
+scheduler-1  | 2026-10-07 21:30:34,030 INFO eugene_bus_reliability.scheduler: scheduler up: dbt build every 0:15:00, daily jobs at 10:00 UTC
+scheduler-1  | 2026-10-07 21:30:34,171 INFO eugene_bus_reliability.scheduler: checking for a new static schedule
+scheduler-1  | 2026-10-07 21:30:34,172 INFO eugene_bus_reliability.gtfs_static: downloading https://feed.ltd.org/TMGTFSRealTimeWebService/GTFS/google_transit.zip
+scheduler-1  | 2026-10-07 21:30:35,013 INFO httpx: HTTP Request: GET https://feed.ltd.org/TMGTFSRealTimeWebService/GTFS/google_transit.zip "HTTP/1.1 200 OK"
+scheduler-1  | 2026-10-07 21:30:35,281 INFO eugene_bus_reliability.gtfs_static: GTFS zip already loaded as feed_version_id=1
+scheduler-1  | 2026-10-07 21:30:35,314 INFO eugene_bus_reliability.scheduler: stale predictions moved to history
+scheduler-1  | 2026-10-07 21:30:35,617 INFO eugene_bus_reliability.scheduler: dbt build starting (full refresh: analysis code changed)
+scheduler-1  | 2026-10-07 21:30:52,426 ERROR eugene_bus_reliability.scheduler: dbt build FAILED (exit 2)
+scheduler-1  | 21:30:44  Running with dbt=1.12.5
+scheduler-1  | 21:30:45  Registered adapter: postgres=1.11.0
+scheduler-1  | 21:30:46  Unable to do partial parsing because saved manifest not found. Starting full parse.
+scheduler-1  | 21:30:51  [WARNING]: Did not find matching node for patch with name 'fct_countdown_samples' in the 'models' section of file 'models/marts/marts_schema.yml'
+scheduler-1  | 21:30:51  [ERROR]: Encountered an error:
+scheduler-1  | Compilation Error
+scheduler-1  |   Model 'model.eugene_bus_reliability.mart_told_vs_actual' (models/marts/mart_told_vs_actual.sql) depends on a node named 'fct_countdown_samples' which was not found
+scheduler-1  | 
+scheduler-1  | 2026-10-07 21:31:02,427 ERROR eugene_bus_reliability.scheduler: source freshness ERROR: collection has stalled
+scheduler-1  | 
+scheduler-1  | 2026-10-07 21:46:02,461 INFO eugene_bus_reliability.scheduler: dbt build starting (full refresh: analysis code changed)
+scheduler-1  | 2026-10-07 21:46:12,463 ERROR eugene_bus_reliability.scheduler: dbt build FAILED (exit 2)
+scheduler-1  | 21:46:06  Running with dbt=1.12.5
+scheduler-1  | 21:46:06  Registered adapter: postgres=1.11.0
+scheduler-1  | 21:46:06  Unable to do partial parsing because saved manifest not found. Starting full parse.
+scheduler-1  | 21:46:11  [WARNING]: Did not find matching node for patch with name 'fct_countdown_samples' in the 'models' section of file 'models/marts/marts_schema.yml'
+scheduler-1  | 21:46:11  [ERROR]: Encountered an error:
+scheduler-1  | Compilation Error
+scheduler-1  |   Model 'model.eugene_bus_reliability.mart_told_vs_actual' (models/marts/mart_told_vs_actual.sql) depends on a node named 'fct_countdown_samples' which was not found
+scheduler-1  | 
+scheduler-1  | 2026-10-07 21:46:21,813 ERROR eugene_bus_reliability.scheduler: source freshness ERROR: collection has stalled
+scheduler-1  | 
+scheduler-1  | 2026-10-07 22:01:21,851 INFO eugene_bus_reliability.scheduler: dbt build starting (full refresh: analysis code changed)
+scheduler-1  | 2026-10-07 22:01:31,059 ERROR eugene_bus_reliability.scheduler: dbt build FAILED (exit 2)
+scheduler-1  | 22:01:25  Running with dbt=1.12.5
+scheduler-1  | 22:01:25  Registered adapter: postgres=1.11.0
+scheduler-1  | 22:01:25  Unable to do partial parsing because saved manifest not found. Starting full parse.
+scheduler-1  | 22:01:29  [WARNING]: Did not find matching node for patch with name 'fct_countdown_samples' in the 'models' section of file 'models/marts/marts_schema.yml'
+scheduler-1  | 22:01:30  [ERROR]: Encountered an error:
+scheduler-1  | Compilation Error
+scheduler-1  |   Model 'model.eugene_bus_reliability.mart_told_vs_actual' (models/marts/mart_told_vs_actual.sql) depends on a node named 'fct_countdown_samples' which was not found
+scheduler-1  | 
+scheduler-1  | 2026-10-07 22:01:48,559 ERROR eugene_bus_reliability.scheduler: source freshness ERROR: collection has stalled
+scheduler-1  | 
+scheduler-1  | 2026-10-07 22:16:48,598 INFO eugene_bus_reliability.scheduler: dbt build starting (full refresh: analysis code changed)
+scheduler-1  | 2026-10-07 22:16:58,663 ERROR eugene_bus_reliability.scheduler: dbt build FAILED (exit 2)
+scheduler-1  | 22:16:52  Running with dbt=1.12.5
+scheduler-1  | 22:16:52  Registered adapter: postgres=1.11.0
+scheduler-1  | 22:16:52  Unable to do partial parsing because saved manifest not found. Starting full parse.
+scheduler-1  | 22:16:57  [WARNING]: Did not find matching node for patch with name 'fct_countdown_samples' in the 'models' section of file 'models/marts/marts_schema.yml'
+scheduler-1  | 22:16:57  [ERROR]: Encountered an error:
+scheduler-1  | Compilation Error
+scheduler-1  |   Model 'model.eugene_bus_reliability.mart_told_vs_actual' (models/marts/mart_told_vs_actual.sql) depends on a node named 'fct_countdown_samples' which was not found
+scheduler-1  | 
+scheduler-1  | 2026-10-07 22:17:10,443 ERROR eugene_bus_reliability.scheduler: source freshness ERROR: collection has stalled
+scheduler-1  | 
+scheduler-1  | 2026-10-07 22:32:10,482 INFO eugene_bus_reliability.scheduler: dbt build starting (full refresh: analysis code changed)
+scheduler-1  | 2026-10-07 22:32:19,736 ERROR eugene_bus_reliability.scheduler: dbt build FAILED (exit 2)
+scheduler-1  | 22:32:13  Running with dbt=1.12.5
+scheduler-1  | 22:32:14  Registered adapter: postgres=1.11.0
+scheduler-1  | 22:32:14  Unable to do partial parsing because saved manifest not found. Starting full parse.
+scheduler-1  | 22:32:18  [WARNING]: Did not find matching node for patch with name 'fct_countdown_samples' in the 'models' section of file 'models/marts/marts_schema.yml'
+scheduler-1  | 22:32:19  [ERROR]: Encountered an error:
+scheduler-1  | Compilation Error
+scheduler-1  |   Model 'model.eugene_bus_reliability.mart_told_vs_actual' (models/marts/mart_told_vs_actual.sql) depends on a node named 'fct_countdown_samples' which was not found
+scheduler-1  | 
+scheduler-1  | 2026-10-07 22:32:28,019 ERROR eugene_bus_reliability.scheduler: source freshness ERROR: collection has stalled
+scheduler-1  | 
+ pid | login | running_for | state | waiting_on | query 
+-----+-------+-------------+-------+------------+-------
+(0 rows)
+
