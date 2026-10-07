@@ -49,19 +49,28 @@ routes = q(
 )
 route_id = route_picker(routes, key="pred_route")
 
-cal = q(
-    "select * from marts.mart_calibration where route_id is not distinct from %s order by horizon_min",
-    (route_id,),
-)
-if cal.empty or cal["n_predictions"].sum() == 0:
-    st.info(
-        "No scored predictions yet. They appear once the analysis has measured some arrivals; it refreshes every 15 minutes."
+# The countdown at each distance, one count per bus arrival, on the same arrivals as the
+# timetable (marts.mart_told_vs_actual, from fct_countdown_samples). n_predictions here is a
+# number of bus arrivals.
+try:
+    cal = q(
+        """
+        select ahead_min as horizon_min, n as n_predictions, n_within_1min, n_within_2min,
+               n_days, first_day, last_day
+        from marts.mart_told_vs_actual
+        where basis = 'sign' and stop_id is null and route_id is not distinct from %s
+        order by 1
+        """,
+        (route_id,),
     )
+except Exception:  # noqa: BLE001 — the mart is being rebuilt with its new columns
+    cal = pd.DataFrame()
+if cal.empty or cal["n_predictions"].sum() == 0:
+    st.info("The countdown numbers are being recalculated; they reappear within about 20 minutes.")
     st.stop()
 
-# The timetable never changes, so it has one accuracy, over every measured arrival. (Measured
-# on "the same predictions" at each countdown distance it seemed to change with the distance,
-# only because each distance holds a different mix of buses.)
+# The timetable, on the same bus arrivals as the countdown (those with a countdown 15 minutes
+# out; fct_countdown_samples): one value, since the timetable doesn't change as the bus nears.
 TT = q(
     """
     select route_id, n, n_within_1min, n_within_2min from marts.mart_told_vs_actual
@@ -81,7 +90,15 @@ tt1, tt2 = tt_share.get(route_id, (None, None))
 at5 = cal[cal["horizon_min"] == 5]
 at15 = cal[cal["horizon_min"] == 15]
 c1, c2 = st.columns(2)
-SCORED = f" From {int(cal['n_predictions'].sum()):,} predictions scored."
+N_CMP = (
+    TT[TT["route_id"].isna()]["n"].sum()
+    if route_id is None
+    else (TT[TT["route_id"].astype(str) == str(route_id)]["n"].sum())
+)
+SCORED = (
+    f" Both measured on the same {int(N_CMP):,} bus arrivals: those with a countdown 15 "
+    "minutes out."
+)
 if not at5.empty:
     r5 = at5.iloc[0]
     c1.metric(
@@ -161,7 +178,7 @@ with card():
     )
     tod = tod[tod["n"] >= 20].copy() if not tod.empty else tod
     if tod.empty:
-        st.caption("Not enough scored predictions this far ahead yet (needs 20 in an hour).")
+        st.caption("Not enough measured bus arrivals this far ahead yet (needs 20 in an hour).")
     else:
         # service order: 5 am first, the hours after midnight last
         tod = tod.assign(_k=tod["hour_local"].map(service_hour_key)).sort_values("_k")
@@ -216,19 +233,19 @@ with card():
         "How often is the countdown right?",
         help="Solid lines: how often the bus came within 1 or 2 minutes of what the countdown "
         "said, by how far ahead it said it. Dashed lines, same colours: how often the printed "
-        "timetable is that close, over every measured arrival (flat, because the timetable "
-        "doesn't change as the bus gets nearer). Where a solid line is above its dashed twin, "
+        "timetable is that close for the same buses (flat, because the timetable doesn't "
+        "change as the bus gets nearer). Where a solid line is above its dashed twin, "
         "the countdown is worth checking. Click a legend entry to hide or show a line. "
         "LTD predicts as far ahead as the end of each trip; this page shows 1 to 15 minutes out, "
         "the range in which people use a countdown to decide when to leave (our cut, not LTD's). "
-        "Distances with fewer than 30 scored predictions are left out.",
+        "Each bus arrival counts once at each distance; distances with fewer than 30 are left out.",
     )
     # 1 to 15 minutes out, as in the first chart: the range in which riders decide when to leave.
     # (0 is the countdown's "due" moment, when the bus is already pulling in: not a forecast.)
     cal = cal[cal["horizon_min"].between(1, 15) & (cal["n_predictions"] >= 30)]
     if cal.empty:
         st.info(
-            "No distance has 30 scored predictions yet for this selection; this chart needs more data."
+            "No distance has 30 measured bus arrivals yet for this selection; this chart needs more data."
         )
     else:
         custom = list(
@@ -241,7 +258,7 @@ with card():
             )
         )
         hover = (
-            "%{x} min out: %{y:.0%}<br>%{customdata[0]:,} predictions over %{customdata[1]} day(s)"
+            "%{x} min out: %{y:.0%}<br>%{customdata[0]:,} bus arrivals over %{customdata[1]} day(s)"
             "<br>%{customdata[2]} to %{customdata[3]}<extra>%{fullData.name}</extra>"
         )
         fig = go.Figure()
@@ -299,15 +316,15 @@ if route_id is None:
         st.subheader("Which routes have the best predictions?")
         by_route = q(f"""
             select c.route_id, r.route_short_name as route,
-                   sum(c.n_predictions) filter (where c.horizon_min = 5)  as n5,
-                   sum(c.n_within_1min) filter (where c.horizon_min = 5)  as w5,
-                   sum(c.n_predictions) filter (where c.horizon_min = 10) as n10,
-                   sum(c.n_within_2min) filter (where c.horizon_min = 10) as w10,
-                   sum(c.n_predictions) as n
-            from marts.mart_calibration c
+                   sum(c.n) filter (where c.ahead_min = 5)  as n5,
+                   sum(c.n_within_1min) filter (where c.ahead_min = 5)  as w5,
+                   sum(c.n) filter (where c.ahead_min = 10) as n10,
+                   sum(c.n_within_2min) filter (where c.ahead_min = 10) as w10,
+                   sum(c.n) filter (where c.ahead_min = 15) as n
+            from marts.mart_told_vs_actual c
             join gtfs.routes r on r.route_id = c.route_id and r.feed_version_id = {FV}
-            where c.route_id is not null
-            group by 1, 2 having sum(c.n_predictions) >= 100
+            where c.basis = 'sign' and c.route_id is not null and c.stop_id is null
+            group by 1, 2 having sum(c.n) filter (where c.ahead_min = 15) >= 50
         """)
         if not by_route.empty:
 
@@ -330,7 +347,7 @@ if route_id is None:
                 rows.append(
                     {
                         "href": f"/accuracy?route={r.route_id}",
-                        "hover": f"Route {r.route}: {int(r.n):,} predictions scored",
+                        "hover": f"Route {r.route}: measured on {int(r.n):,} bus arrivals",
                         "route": r.route,
                         "c5": bar(c5, "#1f5f9e"),
                         "c5_s": c5,
@@ -360,13 +377,13 @@ if route_id is None:
                     "t5",
                     "Timetable: within 1 min",
                     "How often this route's printed timetable is right to within 1 minute, over "
-                    "every measured arrival.",
+                    "the same bus arrivals.",
                 ),
                 (
                     "t10",
                     "Timetable: within 2 min",
                     "How often this route's printed timetable is right to within 2 minutes, over "
-                    "every measured arrival.",
+                    "the same bus arrivals.",
                 ),
             ):
                 cols.append(

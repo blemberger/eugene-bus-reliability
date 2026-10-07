@@ -66,7 +66,7 @@ FV = str(current_fv())  # schedule version in force today
 
 
 BUS_DOT_PX = 7
-STOP_DOT_PX = 6  # the next-stop markers (white, red ring)
+STOP_DOT_PX = 7  # the next-stop markers (solid red)
 HALO_PX = 15  # the ring around a selected bus
 ARROW_ICON_PX = 44
 _ARROW_SVG = (
@@ -458,11 +458,11 @@ def live_map() -> None:
             "ScatterplotLayer",
             data=stops_pts,
             get_position="[slon, slat]",
-            # white with a red ring, so a stop never looks like a (red) late bus
-            get_fill_color=[255, 255, 255, 255],
-            get_line_color=[215, 20, 20, 255],
+            # solid red with a white edge, so the stops stand out over the route and the map
+            get_fill_color=[215, 20, 20, 255],
+            get_line_color=[255, 255, 255, 255],
             stroked=True,
-            line_width_min_pixels=2,
+            line_width_min_pixels=1.5,
             get_radius=26,
             radius_min_pixels=STOP_DOT_PX,  # min = max: fixed pixel size, like the buses
             radius_max_pixels=STOP_DOT_PX,

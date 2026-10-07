@@ -617,7 +617,9 @@ def main(settings: Settings, raw: bool = False) -> None:
         """,
         )
 
-        section("CALIBRATION (all routes): how often the sign is right")
+        section(
+            "CALIBRATION, per prediction row (how the site measured the countdown before this fix)"
+        )
         show(
             cur,
             """
@@ -628,6 +630,125 @@ def main(settings: Settings, raw: bool = False) -> None:
                    round(100.0 * n_schedule_within_1min / n_predictions) timetable_within_1min
             from marts.mart_calibration where route_id is null and horizon_min in (1, 3, 5, 10, 15, 20, 30, 45, 60)
             order by 1
+        """,
+        )
+
+        section("COUNTDOWN: WHICH BUSES GET COUNTED (prediction rows vs one count per bus arrival)")
+        print(
+            "Per row of fct_prediction_errors = one value LTD sent (a bus whose estimate keeps\n"
+            "changing sends many). Per arrival = fct_countdown_samples, what the countdown showed\n"
+            "while it read that many minutes, once per bus arrival (what the site now uses), on\n"
+            "arrivals that had a countdown at 15 min. timetable_all = every scored arrival."
+        )
+        show(
+            cur,
+            """
+            with rows_way as (
+                select horizon_min h, count(*) n_rows,
+                       count(distinct (service_date, trip_id, stop_sequence)) n_arrivals,
+                       round(100.0 * avg((abs(error_s) <= 60)::int)) countdown_rows,
+                       round(100.0 * avg((abs(extract(epoch from observed_arrival
+                                                          - scheduled_arrival)) <= 60)::int))
+                           timetable_same_rows
+                from marts.fct_prediction_errors where horizon_min in (1, 3, 5, 10, 15)
+                group by 1
+            ),
+            arrival_way as (
+                select ahead_min h, count(*) n_arrivals_cmp,
+                       round(100.0 * avg((abs(error_s) <= 60)::int)) countdown_per_arrival
+                from marts.fct_countdown_samples
+                where in_comparison and ahead_min in (1, 3, 5, 10, 15) group by 1
+            ),
+            tt_cmp as (
+                select round(100.0 * avg((abs(schedule_error_s) <= 60)::int)) tt
+                from marts.fct_countdown_samples where in_comparison and ahead_min = 15
+            ),
+            tt_all as (
+                select round(100.0 * avg((abs(delay_s) <= 60)::int)) tt
+                from marts.fct_stop_events where status is not null
+            )
+            select r.h minutes_ahead, r.n_rows, r.n_arrivals,
+                   round(1.0 * r.n_rows / nullif(r.n_arrivals, 0), 1) rows_per_arrival,
+                   r.countdown_rows, r.timetable_same_rows,
+                   a.countdown_per_arrival, (select tt from tt_cmp) timetable_same_arrivals,
+                   (select tt from tt_all) timetable_all
+            from rows_way r left join arrival_way a using (h) order by 1
+        """,
+        )
+        print(
+            "Timetable right to within 1 min, for arrivals grouped by how many values LTD sent\n"
+            "for them while 1 to 15 minutes away (if more values go with a worse timetable, counting\n"
+            "rows over-weights the buses that are off schedule):"
+        )
+        show(
+            cur,
+            """
+            with per as (
+                select service_date, trip_id, stop_sequence, count(*) n_values,
+                       max(abs(extract(epoch from observed_arrival - scheduled_arrival))) err
+                from marts.fct_prediction_errors where horizon_min between 1 and 15
+                group by 1, 2, 3
+            )
+            select case when n_values <= 2 then '1-2' when n_values <= 5 then '3-5'
+                        when n_values <= 10 then '6-10' else '11+' end values_sent,
+                   count(*) arrivals,
+                   round(100.0 * avg((err <= 60)::int)) timetable_within_1min_pct
+            from per group by 1 order by min(n_values)
+        """,
+        )
+
+        section("CHART CHECKS: numbers on the site recomputed straight from the base tables")
+        show(
+            cur,
+            """
+            with today as (select (now() at time zone 'America/Los_Angeles')::date d),
+            site as (
+                select median_delay_s, p10_delay_s, p90_delay_s, n from marts.mart_lateness
+                where period = '7d' and days = 'all' and route_id is null and stop_id is null
+                  and hour_local is null
+            ),
+            direct as (
+                select percentile_cont(0.5) within group (order by delay_s) median_delay_s,
+                       percentile_cont(0.1) within group (order by delay_s) p10_delay_s,
+                       percentile_cont(0.9) within group (order by delay_s) p90_delay_s,
+                       count(*) n
+                from marts.fct_stop_events
+                where status is not null and service_date >= (select d - 6 from today)
+            )
+            select 'Overview, all routes, last 7 days' chart,
+                   round(s.median_delay_s) site_typical_s, round(d.median_delay_s) direct_typical_s,
+                   round(s.p10_delay_s) || ' to ' || round(s.p90_delay_s) site_8in10_s,
+                   round(d.p10_delay_s) || ' to ' || round(d.p90_delay_s) direct_8in10_s,
+                   s.n site_n, d.n direct_n,
+                   case when abs(s.median_delay_s - d.median_delay_s) <= 1 and s.n = d.n
+                        then 'PASS' else 'DIFFERENT (the mart is up to an hour old)' end result
+            from site s, direct d
+        """,
+        )
+        show(
+            cur,
+            """
+            with site as (
+                select ahead_min, n, n_within_1min from marts.mart_told_vs_actual
+                where route_id is null and stop_id is null
+            ),
+            direct as (
+                select null::int ahead_min, count(*) n,
+                       count(*) filter (where abs(schedule_error_s) <= 60) n_within_1min
+                from marts.fct_countdown_samples where in_comparison and ahead_min = 15
+                union all
+                select ahead_min, count(*), count(*) filter (where abs(error_s) <= 60)
+                from marts.fct_countdown_samples where in_comparison group by 1
+            )
+            select coalesce(d.ahead_min::text, 'timetable') countdown_at,
+                   round(100.0 * s.n_within_1min / s.n) site_within_1min_pct,
+                   round(100.0 * d.n_within_1min / d.n) direct_within_1min_pct,
+                   s.n site_n, d.n direct_n,
+                   case when s.n = d.n and s.n_within_1min = d.n_within_1min then 'PASS'
+                        else 'DIFFERENT (the mart is up to an hour old)' end result
+            from direct d left join site s on s.ahead_min is not distinct from d.ahead_min
+            where d.ahead_min is null or d.ahead_min in (1, 2, 3, 5, 10, 15)
+            order by d.ahead_min nulls first
         """,
         )
 

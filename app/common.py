@@ -1408,12 +1408,13 @@ TOLD_PARTS = [
 ]
 
 TOLD_CHART_NOTE = (
-    "Each bar is 100% of the buses. The top bar compares when the bus came with the printed "
-    "timetable; the others with LTD's countdown (on stop signs and in apps) when it said the "
-    "bus was 15, 10, 5, 3, 2 or 1 minutes away. Green: within a minute of what you were told. "
+    "Each bar is 100% of the same bus arrivals (those that had a countdown 15 minutes out), "
+    "each counted once. The top bar compares when the bus came with the printed timetable; the "
+    "others with LTD's countdown (on stop signs and in apps) when it said the bus was 15, 10, "
+    "5, 3, 2 or 1 minutes away. Green: within a minute of what you were told. "
     "Amber: the bus came more than a minute early, so you could have missed it. Red: it came "
     "later than you were told. The more green, the more you can rely on it. Distances with "
-    "fewer than 20 predictions are left out."
+    "fewer than 20 arrivals are left out."
 )
 
 
@@ -1447,21 +1448,24 @@ def told_vs_actual(route_id: str | None = None) -> pd.DataFrame:
 
 
 def told_at_stop(stop_id: str, start: date, wt: str | None, route_id: str | None) -> pd.DataFrame:
-    """told_vs_actual() for one stop, computed on the spot so it follows the page's period,
-    days and route."""
+    """told_vs_actual() for one stop, computed on the spot (fct_countdown_samples) so it follows
+    the page's period, days and route. The same bus arrivals for the timetable and the
+    countdown: those with a countdown 15 minutes out; each counts once per bar."""
     wt_e, wt_params = day_sql(wt)
     route_sql = "and route_id = %s" if route_id else ""
     route_params = (route_id,) if route_id else ()
     return q(
         f"""
-        select 'timetable' as basis, null::int as ahead_min, {_told_counts("delay_s")}
-        from marts.fct_stop_events
-        where stop_id = %s and status is not null and service_date >= %s {wt_e} {route_sql}
+        select 'timetable' as basis, null::int as ahead_min, {_told_counts("schedule_error_s")}
+        from marts.fct_countdown_samples
+        where stop_id = %s and in_comparison and ahead_min = 15 and service_date >= %s
+          {wt_e} {route_sql}
         union all
-        select 'sign', horizon_min, {_told_counts("error_s")}
-        from marts.fct_prediction_errors
-        where stop_id = %s and horizon_min = any(%s) and service_date >= %s {wt_e} {route_sql}
-        group by horizon_min
+        select 'sign', ahead_min, {_told_counts("error_s")}
+        from marts.fct_countdown_samples
+        where stop_id = %s and in_comparison and ahead_min = any(%s) and service_date >= %s
+          {wt_e} {route_sql}
+        group by ahead_min
         """,
         (
             stop_id,
