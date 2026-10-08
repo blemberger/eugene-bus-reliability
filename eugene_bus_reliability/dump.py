@@ -704,7 +704,7 @@ def main(settings: Settings, raw: bool = False) -> None:
             with today as (select (now() at time zone 'America/Los_Angeles')::date d),
             site as (
                 select median_delay_s, p10_delay_s, p90_delay_s, n from marts.mart_lateness
-                where period = '7d' and days = 'all' and route_id is null and stop_id is null
+                where period = '30d' and days = 'all' and route_id is null and stop_id is null
                   and hour_local is null
             ),
             direct as (
@@ -713,9 +713,9 @@ def main(settings: Settings, raw: bool = False) -> None:
                        percentile_cont(0.9) within group (order by delay_s) p90_delay_s,
                        count(*) n
                 from marts.fct_stop_events
-                where status is not null and service_date >= (select d - 6 from today)
+                where status is not null and service_date >= (select d - 29 from today)
             )
-            select 'Overview, all routes, last 7 days' chart,
+            select 'Overview, all routes, last 30 days' chart,
                    round(s.median_delay_s) site_typical_s, round(d.median_delay_s) direct_typical_s,
                    round(s.p10_delay_s) || ' to ' || round(s.p90_delay_s) site_8in10_s,
                    round(d.p10_delay_s) || ' to ' || round(d.p90_delay_s) direct_8in10_s,
@@ -774,6 +774,32 @@ def main(settings: Settings, raw: bool = False) -> None:
              and r.feed_version_id = (select max(feed_version_id) from gtfs.feed_version)
             where c.in_comparison
             group by 1 order by length(r.route_short_name), 1
+        """,
+        )
+
+        section("PREDICTIONS 1 MIN AWAY, BY ROUTE: is the bus late, or is our arrival time off?")
+        print(
+            "A prediction 1 minute away should be close. Where it is far off, compare: at\n"
+            "timepoints (where LTD's own times verify ours), and where our two arrival methods\n"
+            "agree within a minute. If the error shrinks there, our arrival time is the problem.\n"
+            "avg_off_s = average |error|; signed = median error, positive = bus came later."
+        )
+        show(
+            cur,
+            """
+            select coalesce(e.route_short_name, c.route_id) route, count(*) n,
+                   round(avg(abs(c.error_s))) avg_off_s,
+                   round(percentile_cont(0.5) within group (order by c.error_s)) median_signed_s,
+                   round(avg(abs(c.error_s)) filter (where c.is_timepoint)) avg_off_timepoints_s,
+                   round(avg(abs(c.error_s)) filter (where abs(e.methods_diff_s) <= 60))
+                       avg_off_methods_agree_s,
+                   round(100.0 * count(*) filter (where abs(e.methods_diff_s) > 120)
+                         / nullif(count(e.methods_diff_s), 0)) pct_methods_differ_2min
+            from marts.fct_countdown_samples c
+            left join marts.fct_stop_events e using (service_date, trip_id, stop_sequence)
+            where c.ahead_min = 1 and c.in_comparison
+            group by 1 having count(*) >= 100
+            order by avg_off_s desc limit 10
         """,
         )
 

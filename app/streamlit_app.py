@@ -44,6 +44,12 @@ st.html(
     "[data-testid^='stBaseButton'] { min-height: 2.75rem; font-size: 1.05rem;"
     " padding: 0.45rem 1.1rem; }"
     "[data-testid='stPageLink'] p { font-size: 1.05rem; font-weight: 600; }"
+    # the way back from a report card to its list (common.back_link, and the Stops page's
+    # button that does the same)
+    "[class*='st-key-backlink'] p { font-size: 1.2rem !important; font-weight: 650;"
+    " color: #0b6e4f; }"
+    "[class*='st-key-backlink'] button { padding-left: 0; min-height: 2rem; }"
+    "[class*='st-key-backlink'] a { padding-left: 0; }"
     # route buttons (common.route_picker): "All routes" first, set apart from the route numbers
     "[class*='st-key-rp_'] [role='radiogroup'] > button:first-child {"
     " border: 1.5px solid #0b6e4f; margin-right: 0.75rem; }"
@@ -70,8 +76,9 @@ pages = [
     st.Page("views/routes.py", title="Routes", url_path="routes"),
     # one route's report card: no menu entry, reached from the Routes table or /route?route=...
     st.Page("views/route.py", title="Route", url_path="route", visibility="hidden"),
-    # the countdown signs' accuracy; the address stays /accuracy so old links still work
-    st.Page("views/accuracy.py", title="Countdown", url_path="accuracy"),
+    # how far off LTD's real-time predictions are; the address stays /accuracy so old links
+    # still work
+    st.Page("views/accuracy.py", title="Predictions", url_path="accuracy"),
     st.Page("views/methods.py", title="Data & methods", url_path="methods"),
     # behind the scenes, linked from Data & methods rather than the menu
     st.Page("views/arrivals.py", title="Arrivals board", url_path="arrivals", visibility="hidden"),

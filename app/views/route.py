@@ -12,6 +12,7 @@ from common import (
     LATENESS_CHART_NOTE,
     RANGE_HELP,
     TYPICAL_HELP,
+    back_link,
     card,
     clean_headsign,
     current_fv,
@@ -46,174 +47,177 @@ from common import (
 )
 
 require_db()
+back_link("views/routes.py", "← All routes")
 title_slot = st.empty()  # filled in once the route is known (below the pickers)
 require_marts()
-st.page_link("views/routes.py", label="← All routes")
+# the route buttons, its numbers and the hour-by-hour chart first, then the period and days
+# filters (which everything on the page follows), then the rest (drawn in that order, though
+# the filters are read first)
+top = st.container()
 start, wt = page_filters()
 FV = str(current_fv())  # schedule version in force today
 wt_clause, wt_params = day_sql(wt)
 rank = route_rank(start, wt)
 if rank.empty:
-    if lateness(start, None, "overall").empty:
-        recomputing_note()
-    else:
-        st.info("No scored arrivals in the selected period yet.")
+    with top:
+        if lateness(start, None, "overall").empty:
+            recomputing_note()
+        else:
+            st.info("No scored arrivals in the selected period yet.")
     st.stop()
-names = q(
-    f"select route_id, route_short_name, route_long_name from gtfs.routes where feed_version_id = {FV}"
-)
-rank = rank.merge(names[["route_id", "route_long_name"]], on="route_id", how="left")
+with top:
+    names = q(
+        f"select route_id, route_short_name, route_long_name from gtfs.routes where feed_version_id = {FV}"
+    )
+    rank = rank.merge(names[["route_id", "route_long_name"]], on="route_id", how="left")
 
-# ---- one route --------------------------------------------------------------------
-rank_sorted = rank.sort_values(
-    "route_short_name", key=lambda c: c.astype(str).map(lambda v: (len(v), v))
-)
-ids = rank_sorted["route_id"].astype(str).tolist()
-short = dict(zip(ids, rank_sorted["route_short_name"].astype(str), strict=False))
-full = dict(
-    zip(
+    # ---- one route --------------------------------------------------------------------
+    rank_sorted = rank.sort_values(
+        "route_short_name", key=lambda c: c.astype(str).map(lambda v: (len(v), v))
+    )
+    ids = rank_sorted["route_id"].astype(str).tolist()
+    short = dict(zip(ids, rank_sorted["route_short_name"].astype(str), strict=False))
+    full = dict(
+        zip(
+            ids,
+            [
+                sn if not ln or ln == sn else f"{sn} — {ln}"
+                for sn, ln in zip(
+                    rank_sorted["route_short_name"].astype(str),
+                    rank_sorted["route_long_name"].fillna("").astype(str),
+                    strict=False,
+                )
+            ],
+            strict=False,
+        )
+    )
+    if st.session_state.get("route_id") not in ids:
+        wanted = st.query_params.get("route")
+        st.session_state["route_id"] = wanted if wanted in ids else ids[0]
+    for k in ("route_chips", "route_select"):
+        if st.session_state.get(k) not in ids:
+            st.session_state[k] = st.session_state["route_id"]
+
+    def _sync(source: str) -> None:
+        rid = st.session_state[source]
+        st.session_state["route_id"] = rid
+        st.session_state["route_chips"] = rid
+        st.session_state["route_select"] = rid
+
+    st.pills(
+        "Route",
         ids,
-        [
-            sn if not ln or ln == sn else f"{sn} — {ln}"
-            for sn, ln in zip(
-                rank_sorted["route_short_name"].astype(str),
-                rank_sorted["route_long_name"].fillna("").astype(str),
-                strict=False,
-            )
-        ],
-        strict=False,
+        format_func=lambda r: short[r],
+        key="route_chips",
+        required=True,
+        on_change=_sync,
+        args=("route_chips",),
     )
-)
-if st.session_state.get("route_id") not in ids:
-    wanted = st.query_params.get("route")
-    st.session_state["route_id"] = wanted if wanted in ids else ids[0]
-for k in ("route_chips", "route_select"):
-    if st.session_state.get(k) not in ids:
-        st.session_state[k] = st.session_state["route_id"]
-
-
-def _sync(source: str) -> None:
-    rid = st.session_state[source]
-    st.session_state["route_id"] = rid
-    st.session_state["route_chips"] = rid
-    st.session_state["route_select"] = rid
-
-
-st.pills(
-    "Route",
-    ids,
-    format_func=lambda r: short[r],
-    key="route_chips",
-    required=True,
-    on_change=_sync,
-    args=("route_chips",),
-)
-st.selectbox(
-    "Or find it by name",
-    ids,
-    format_func=lambda r: full[r],
-    key="route_select",
-    on_change=_sync,
-    args=("route_select",),
-)
-route_id = st.session_state["route_id"]
-st.query_params["route"] = route_id
-route_name = short[route_id]
-title_slot.title(f"Route {full[route_id]}")
-me = rank[rank["route_id"].astype(str) == route_id].iloc[0]
-today = today_lateness(route_id=route_id)
-n_today = int(today["n"].iloc[0]) if len(today) else 0
-with card():
-    m1, m2, m3 = st.columns(3)
-    m1.metric(
-        "Typical bus vs timetable",
-        fmt_delay(me["median_delay"]),
-        help=TYPICAL_HELP
-        + f" {int(me['n']):,} arrivals measured, {day_label(wt)} since {fmt_date(start)}.",
+    st.selectbox(
+        "Or find it by name",
+        ids,
+        format_func=lambda r: full[r],
+        key="route_select",
+        on_change=_sync,
+        args=("route_select",),
     )
-    m2.metric("8 in 10 buses", fmt_range(me["p10_delay_s"], me["p90_delay_s"]), help=RANGE_HELP)
-    m3.metric(
-        "Today so far",
-        fmt_delay(today["median_delay_s"].iloc[0]) if n_today >= 10 else "—",
-        help="The typical bus today, as of the latest update (every 15 minutes)"
-        + (f", from {n_today:,} arrivals." if n_today else "; none measured yet."),
+    route_id = st.session_state["route_id"]
+    st.query_params["route"] = route_id
+    route_name = short[route_id]
+    title_slot.title(f"Route {full[route_id]}")
+    me = rank[rank["route_id"].astype(str) == route_id].iloc[0]
+    today = today_lateness(route_id=route_id)
+    n_today = int(today["n"].iloc[0]) if len(today) else 0
+    with card():
+        m1, m2, m3 = st.columns(3)
+        m1.metric(
+            "Typical bus vs timetable",
+            fmt_delay(me["median_delay"]),
+            help=TYPICAL_HELP
+            + f" {int(me['n']):,} arrivals measured, {day_label(wt)} since {fmt_date(start)}.",
+        )
+        m2.metric("8 in 10 buses", fmt_range(me["p10_delay_s"], me["p90_delay_s"]), help=RANGE_HELP)
+        m3.metric(
+            "Today so far",
+            fmt_delay(today["median_delay_s"].iloc[0]) if n_today >= 10 else "—",
+            help="The typical bus today, as of the latest update (every 15 minutes)"
+            + (f", from {n_today:,} arrivals." if n_today else "; none measured yet."),
+        )
+
+    dirs = q(
+        f"""
+        select direction_id, string_agg(distinct trip_headsign, ' / ') as headsigns
+        from gtfs.trips where route_id = %s and feed_version_id = {FV}
+        group by 1 order by 1
+        """,
+        (route_id,),
     )
 
-dirs = q(
-    f"""
-    select direction_id, string_agg(distinct trip_headsign, ' / ') as headsigns
-    from gtfs.trips where route_id = %s and feed_version_id = {FV}
-    group by 1 order by 1
-    """,
-    (route_id,),
-)
+    def _dir_label(direction_id: int, headsigns: str) -> str:
+        raw = [h for h in str(headsigns).split(" / ") if h and h != "None"]
+        clean = sorted({clean_headsign(h, route_name) for h in raw} - {""})
+        if clean:
+            return ("Toward " + " / ".join(clean))[:70]
+        if raw:  # the headsign is only the route's own name
+            return " / ".join(sorted(set(raw)))[:70] + f" (direction {direction_id})"
+        return f"Direction {direction_id}"
 
+    dir_labels = {
+        int(r["direction_id"]): _dir_label(int(r["direction_id"]), r["headsigns"])
+        for _, r in dirs.iterrows()
+        if pd.notna(r["direction_id"])
+    }
+    direction = None
+    if dir_labels:
+        direction = st.segmented_control(
+            "Direction",
+            list(dir_labels.keys()),
+            format_func=lambda d: dir_labels[d],
+            default=next(iter(dir_labels)),
+            key=f"route_dir_{route_id}",
+        )
+        if direction is None:  # clicking the selected option clears it; fall back to the first
+            direction = next(iter(dir_labels))
+    dir_clause = "and direction_id = %s" if direction is not None else ""
+    dir_params: tuple = (direction,) if direction is not None else ()
 
-def _dir_label(direction_id: int, headsigns: str) -> str:
-    raw = [h for h in str(headsigns).split(" / ") if h and h != "None"]
-    clean = sorted({clean_headsign(h, route_name) for h in raw} - {""})
-    if clean:
-        return ("Toward " + " / ".join(clean))[:70]
-    if raw:  # the headsign is only the route's own name
-        return " / ".join(sorted(set(raw)))[:70] + f" (direction {direction_id})"
-    return f"Direction {direction_id}"
-
-
-dir_labels = {
-    int(r["direction_id"]): _dir_label(int(r["direction_id"]), r["headsigns"])
-    for _, r in dirs.iterrows()
-    if pd.notna(r["direction_id"])
-}
-direction = None
-if dir_labels:
-    direction = st.segmented_control(
-        "Direction",
-        list(dir_labels.keys()),
-        format_func=lambda d: dir_labels[d],
-        default=next(iter(dir_labels)),
-        key=f"route_dir_{route_id}",
+    # ---- by hour: this route against all routes ------------------------------------------------
+    wt_e = day_sql(wt, "e.service_date", "e.weekday_type")[0]
+    hourly = q(
+        f"""
+        select e.hour_local, count(*) as n,
+               count(*) filter (where e.status = 'early') as n_early,
+               count(*) filter (where e.status = 'late') as n_late,
+               percentile_cont(0.5) within group (order by e.delay_s) as median_delay_s,
+               percentile_cont(0.1) within group (order by e.delay_s) as p10_delay_s,
+               percentile_cont(0.9) within group (order by e.delay_s) as p90_delay_s,
+               count(distinct e.service_date) as n_days
+        from marts.fct_stop_events e
+        where e.route_id = %s and e.service_date >= %s and e.status is not null
+          {wt_e} {dir_clause.replace("direction_id", "e.direction_id")}
+        group by 1 order by 1
+        """,
+        (route_id, start, *wt_params, *dir_params),
     )
-    if direction is None:  # clicking the selected option clears it; fall back to the first
-        direction = next(iter(dir_labels))
-dir_clause = "and direction_id = %s" if direction is not None else ""
-dir_params: tuple = (direction,) if direction is not None else ()
-
-# ---- by hour: this route against all routes ------------------------------------------------
-wt_e = day_sql(wt, "e.service_date", "e.weekday_type")[0]
-hourly = q(
-    f"""
-    select e.hour_local, count(*) as n,
-           count(*) filter (where e.status = 'early') as n_early,
-           count(*) filter (where e.status = 'late') as n_late,
-           percentile_cont(0.5) within group (order by e.delay_s) as median_delay_s,
-           percentile_cont(0.1) within group (order by e.delay_s) as p10_delay_s,
-           percentile_cont(0.9) within group (order by e.delay_s) as p90_delay_s,
-           count(distinct e.service_date) as n_days
-    from marts.fct_stop_events e
-    where e.route_id = %s and e.service_date >= %s and e.status is not null
-      {wt_e} {dir_clause.replace("direction_id", "e.direction_id")}
-    group by 1 order by 1
-    """,
-    (route_id, start, *wt_params, *dir_params),
-)
-for c in ("median_delay_s", "p10_delay_s", "p90_delay_s"):
-    hourly[c] = hourly[c].astype(float)
-with card():
-    st.subheader(
-        f"When is route {route_name} late?",
-        help=LATENESS_CHART_NOTE + f" Every stop on route {route_name}, in the direction chosen "
-        "above; the dashed grey line is the typical bus on all routes together.",
-    )
-    fig = lateness_chart(
-        hourly,
-        f"route {route_name}",
-        reference=lateness(start, wt, "hour"),
-        min_n=5,
-    )
-    if fig is None:
-        st.caption("Not enough arrivals yet for an hour-by-hour view (needs 5 in an hour).")
-    else:
-        st.plotly_chart(fit_phone(fig), width="stretch")
+    for c in ("median_delay_s", "p10_delay_s", "p90_delay_s"):
+        hourly[c] = hourly[c].astype(float)
+    with card():
+        st.subheader(
+            "How close to the timetable, hour by hour?",
+            help=LATENESS_CHART_NOTE
+            + f" Every stop on route {route_name}, in the direction chosen "
+            "above; the dashed grey line is the typical bus on all routes together.",
+        )
+        fig = lateness_chart(
+            hourly,
+            f"route {route_name}",
+            reference=lateness(start, wt, "hour"),
+            min_n=5,
+        )
+        if fig is None:
+            st.caption("Not enough arrivals yet for an hour-by-hour view (needs 5 in an hour).")
+        else:
+            st.plotly_chart(fit_phone(fig), width="stretch")
 
 with card():
     st.subheader(
@@ -327,11 +331,11 @@ with card():
                     "first": "asc",
                     "help": "Order along the route",
                 },
-                {"key": "stop", "label": "Stop", "width": "minmax(9em, 2fr)", "bold": True},
+                {"key": "stop", "label": "Stop", "width": "minmax(9em, 1.4fr)", "bold": True},
                 {
                     "key": "typical",
                     "label": "Typical bus",
-                    "width": "minmax(7em, 0.8fr)",
+                    "width": "7.6em",
                     "help": TYPICAL_HELP,
                     "sort": "typical_s",
                 },

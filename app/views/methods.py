@@ -56,9 +56,10 @@ low end and one in ten later than the high end. Its width is how much you need t
 
 **Today so far.** The typical bus over today's service, as of the latest update (every 15 minutes).
 
-**Countdown accuracy.** Every predicted arrival LTD's countdown publishes is kept, with when it was displayed.
-"5 minutes out" means the countdown showed 5:00 to 5:59. Error = actual arrival − the arrival the countdown promised,
-so positive means the bus came later than the countdown said.
+**Prediction accuracy.** Every real-time arrival prediction LTD publishes is kept, with when it was shown.
+"5 minutes away" means the prediction said 5:00 to 5:59. Each bus arrival counts once at each distance (the
+prediction on show at that moment), and the timetable is measured on the same arrivals. Minutes off = how far the
+actual arrival was from the predicted one, early or late alike; the charts average it.
 
 **Observed arrival.** LTD's vehicle positions carry no stop information, so arrivals are derived geometrically: each
 position is placed along the route's shape as a fraction of the way along it (walked in time order, each position on

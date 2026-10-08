@@ -334,7 +334,7 @@ def route_chart(upcoming: pd.DataFrame, left: pd.DataFrame, now: pd.Timestamp) -
             )
     fig.add_vline(x=now.tz_convert(LOCAL_TZ), line_width=2, line_color="#333")
     fig.update_layout(
-        xaxis_title="time (Eugene) — the vertical line is now",
+        xaxis_title="Time (Eugene) — the vertical line is now",
         yaxis={
             "title": "",
             "categoryorder": "array",

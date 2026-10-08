@@ -290,7 +290,7 @@ per5 = q("""
 if not per5.empty:
     fig = px.bar(per5, x="bucket", y="fetches", color="feed", barmode="group")
     fig.update_layout(
-        xaxis_title="", yaxis_title="fetches per 5 min (expect 10; alerts 1)", legend_title=""
+        xaxis_title="", yaxis_title="Fetches per 5 min (expect 10; alerts 1)", legend_title=""
     )
     st.plotly_chart(fit_phone(fig), width="stretch")
 

@@ -388,6 +388,34 @@ def route_link(route_id, name) -> str | None:
     return f"/route?route={quote(str(route_id))}#{'' if name is None or pd.isna(name) else name}"
 
 
+def back_link(page: str, label: str) -> None:
+    """The way back from a report card to the list it came from, above the page title: larger
+    than a plain link (styled by its st-key-backlink container in streamlit_app.py)."""
+    with st.container(key=f"backlink_{re.sub(r'[^a-z]', '', label.lower())}"):
+        st.page_link(page, label=label)
+
+
+def route_chips(routes: pd.DataFrame) -> None:
+    """A button for every route (route_id, route_short_name), each opening that route's report
+    card with the page's filters."""
+    qs = filter_query()
+    links = "".join(
+        f"<a class='ebw-chip' target='_self' href='/route?route={quote(str(r.route_id))}"
+        + (f"&{qs}" if qs else "")
+        + f"'>{html_escape(str(r.route_short_name))}</a>"
+        for r in routes.itertuples()
+    )
+    st.html(
+        "<style>.ebw-chips { display: flex; flex-wrap: wrap; gap: 0.45rem; }"
+        ".ebw-chip { display: inline-block; min-width: 2.9rem; padding: 0.4rem 0.8rem;"
+        " border: 1px solid #c9d2cd; border-radius: 1.2rem; background: #fff; color: #262730;"
+        " text-align: center; text-decoration: none; font-size: 1.02rem; font-weight: 600; }"
+        ".ebw-chip:hover { border-color: #0b6e4f; color: #0b6e4f; background: #eef6f2; }"
+        "</style>"
+        f"<div class='ebw-chips'>{links}</div>"
+    )
+
+
 def col_route(label: str = "Route"):
     return st.column_config.LinkColumn(
         label, display_text=r"#(.*)$", help="Opens this route's report card (in a new tab)."
@@ -1061,7 +1089,10 @@ def page_filters() -> tuple[date, str | None]:
     Turn it into SQL with day_sql(). The choice follows the visitor from page to page and is
     kept in the page's address, so a shared or bookmarked link opens with it."""
     c1, c2 = st.columns([1, 1])
-    _remembered("f_period", "period", list(PERIODS), "7d")
+    # the default is the last 30 days: long enough that one odd day doesn't dominate, recent
+    # enough to follow timetable changes
+    DEFAULT_PERIOD = "30d"
+    _remembered("f_period", "period", list(PERIODS), DEFAULT_PERIOD)
     period = (
         c1.segmented_control(
             "Period",
@@ -1071,7 +1102,7 @@ def page_filters() -> tuple[date, str | None]:
             on_change=_keep_one,
             args=("f_period",),
         )
-        or "7d"
+        or DEFAULT_PERIOD
     )
     # "last 7 days" is today and the 6 days before it, as in marts.mart_lateness
     start = (
@@ -1113,7 +1144,7 @@ def page_filters() -> tuple[date, str | None]:
     st.session_state["_f_period"], st.session_state["_f_days"] = period, day
     st.session_state["_f_dow"] = one or "all"
     for param, value, default in (
-        ("period", period, "7d"),
+        ("period", period, DEFAULT_PERIOD),
         ("days", day, "all"),
         ("weekday", one if wt and wt.startswith("dow:") else None, None),
     ):
@@ -1128,10 +1159,10 @@ def filter_query() -> str:
     """The current period/days choice as a query string ('period=30d&days=weekday'), for links
     that open another page with the same filters. Empty when everything is at its default."""
     parts = []
-    period = st.session_state.get("_f_period", "7d")
+    period = st.session_state.get("_f_period", "30d")
     day = st.session_state.get("_f_days", "all")
     one = st.session_state.get("_f_dow", "all")
-    if period != "7d":
+    if period != "30d":
         parts.append(f"period={period}")
     if day != "all":
         parts.append(f"days={day}")
@@ -1357,7 +1388,7 @@ def route_table(rank: pd.DataFrame, start: date, key: str) -> None:
             {
                 "key": "typical",
                 "label": "Typical bus",
-                "width": "minmax(7em, 0.8fr)",
+                "width": "7.6em",
                 "help": TYPICAL_HELP,
                 "sort": "typical_s",
                 "first": "desc",
@@ -1366,7 +1397,7 @@ def route_table(rank: pd.DataFrame, start: date, key: str) -> None:
             {
                 "key": "worst",
                 "label": "Latest hour",
-                "width": "minmax(9.5em, 0.9fr)",
+                "width": "10.5em",
                 "hide_on_phone": True,
                 "help": "The hour of day when the typical bus on this route runs latest, and how "
                 "late it is then (hours with at least 10 arrivals). Sorts by time of day.",
@@ -1376,7 +1407,7 @@ def route_table(rank: pd.DataFrame, start: date, key: str) -> None:
             {
                 "key": "today",
                 "label": "Today so far",
-                "width": "minmax(6.5em, 0.7fr)",
+                "width": "7.6em",
                 "hide_on_phone": True,
                 "help": "The typical bus today, as of the latest update (every 15 minutes).",
                 "sort": "today_s",
@@ -1389,19 +1420,22 @@ def route_table(rank: pd.DataFrame, start: date, key: str) -> None:
     )
 
 
-# ------------------------------------------------- how far off the countdown is ----
+# ----------------------------------------------- how far off LTD's predictions are ----
 
-COUNTDOWN_BLUE = "#1f5f9e"
 TIMETABLE_COLOUR = "#b35900"
+AVERAGE_COLOUR = "#1c1c1c"
 
-COUNTDOWN_OFF_NOTE = (
+PREDICTION_OFF_NOTE = (
     "How many minutes, on average, the bus came from the time it was given, early or late "
-    "alike. Blue: LTD's countdown (on stop signs and in apps), by how many minutes away it said "
-    "the bus was; the thin lines are single routes, the thick one all of them together. Dashed: "
-    "the printed timetable for the same bus arrivals, flat because the timetable doesn't change "
-    "as the bus gets nearer. Lower is better. Measured on bus arrivals that had a countdown 15 "
-    "minutes out, each counted once at each distance; points with fewer than 20 are left out. "
-    "Hover a line for its numbers."
+    "alike; lower is better. Coloured lines: LTD's real-time predictions (what apps like Transit "
+    "show), one line per route, by how many minutes away the prediction said the bus was. "
+    "Black: the average over every route. Dashed: the printed timetable for the same bus "
+    "arrivals, flat because the timetable doesn't change as the bus gets nearer. Measured on "
+    "bus arrivals that had a prediction 15 minutes out, each counted once at each distance; "
+    "points with fewer than 20 are left out. Click a legend entry to hide or show a line."
+)
+PREDICTION_OFF_CAPTION = (
+    "Minutes away: what the prediction said at the time, not when the bus actually came."
 )
 
 
@@ -1446,15 +1480,16 @@ def countdown_off_chart(
     df: pd.DataFrame,
     names: dict[str, str],
     focus: str | None = None,
-    focus_label: str = "All routes",
+    average_label: str = "Average",
     min_n: int = 20,
 ) -> go.Figure | None:
-    """Average minutes off against how far away the countdown said the bus was: a thin line per
-    route, a thick one for `focus` (a route id, or None for all routes together), and the
-    timetable for the same arrivals as a flat dashed line. None without two points to draw."""
+    """Average minutes off against how many minutes away the prediction said the bus was.
+    Without `focus`: a line per route in its own colour, the average over all of them in black,
+    and the timetable for the same arrivals as a flat dashed line. With `focus` (a route id):
+    that route, the all-routes average for comparison, and that route's timetable. None
+    without two points to draw."""
     if df.empty:
         return None
-
     # route ids as text, "" for all routes together (pandas would turn None back into NaN)
     key = str(focus) if focus is not None else ""
     df = df.assign(
@@ -1463,74 +1498,49 @@ def countdown_off_chart(
     )
     sign = df[(df["basis"] == "sign") & df["ahead_min"].between(1, 15) & (df["n"] >= min_n)]
     sign = sign.sort_values("ahead_min")
-    tt = {
-        r: float(v)
-        for r, v, n in zip(
-            df[df["basis"] == "timetable"]["_r"],
-            df[df["basis"] == "timetable"]["off"],
-            df[df["basis"] == "timetable"]["n"],
-            strict=False,
-        )
-        if n >= min_n
-    }
-    main = sign[sign["_r"] == key]
-    if len(main) < 2:
+    tt_rows = df[(df["basis"] == "timetable") & (df["n"] >= min_n)]
+    tt = dict(zip(tt_rows["_r"], tt_rows["off"], strict=False))
+    lines = {r: g for r, g in sign.groupby("_r", sort=False) if len(g) >= 2}
+    if "" not in lines:
         return None
-    others = [
-        (r, g)
-        for r, g in sign[(sign["_r"] != "") & (sign["_r"] != key)].groupby("_r", sort=False)
-        if len(g) >= 2
-    ]
-    if focus is None and len(others) == 1:  # one route at the stop: it is the thick line
-        others = []
-    others.sort(key=lambda rg: (len(names.get(rg[0], rg[0])), names.get(rg[0], rg[0])))
+    colors = route_colors()
+
+    def route_name(r: str) -> str:
+        return f"Route {names.get(r, r)}"
 
     def hover(label: str, r: str, g: pd.DataFrame) -> list[str]:
         t = tt.get(r)
         return [
-            f"<b>{label}</b><br>countdown said {int(m)} min: {o:.1f} min off on average"
+            f"<b>{label}</b><br>predicted {int(m)} min away: {o:.1f} min off on average"
             + (f"<br>printed timetable: {t:.1f} min off" if t is not None else "")
             + f"<br>{int(n):,} bus arrivals"
             for m, o, n in zip(g["ahead_min"], g["off"], g["n"], strict=False)
         ]
 
+    routes = sorted(
+        (r for r in lines if r != ""), key=lambda r: (len(names.get(r, r)), names.get(r, r))
+    )
+    if focus is not None:
+        routes = [r for r in routes if r == key]
     fig = go.Figure()
-    label_ends = len(others) <= 8
-    top = max([*sign["off"].tolist(), *(v for r, v in tt.items() if r == key)])
-    for i, (r, g) in enumerate(others):
-        name = f"Route {names.get(r, r)}"
+    # legend order: the average, the timetable, then the routes (legendrank); the average is
+    # drawn last so it sits on top
+    if len(routes) == 1 and focus is None:  # one route here: the average is that route
+        average_label, routes = route_name(routes[0]), []
+    for r in routes:
+        g = lines[r]
         fig.add_trace(
             go.Scatter(
                 x=g["ahead_min"],
                 y=g["off"],
-                mode="lines",
-                name="Each route" if focus is None else "Other routes",
-                legendgroup="routes",
-                showlegend=i == 0,
-                line={"color": "rgba(31,95,158,0.35)", "width": 1.5},
-                hovertext=hover(name, r, g),
+                mode="lines+markers" if focus is not None else "lines",
+                name=route_name(r),
+                legendrank=100 + routes.index(r),
+                line={"color": colors.get(r, "#777777"), "width": 3 if focus is not None else 1.6},
+                hovertext=hover(route_name(r), r, g),
                 hoverinfo="text",
             )
         )
-    if label_ends and others:
-        # each route's name at the end of its line, nudged apart where lines end close together
-        ends = sorted(
-            (float(g["off"].iloc[-1]), float(g["ahead_min"].iloc[-1]), names.get(r, r))
-            for r, g in others
-        )
-        gap, placed = top * 1.12 * 0.05, []
-        for y, x, text in ends:
-            y = max(y, placed[-1] + gap) if placed else y
-            placed.append(y)
-            fig.add_annotation(
-                x=x,
-                y=y,
-                text=text,
-                showarrow=False,
-                xanchor="left",
-                xshift=4,
-                font={"size": 11, "color": "#5a7da3"},
-            )
     t = tt.get(key)
     if t is not None:
         fig.add_trace(
@@ -1538,45 +1548,40 @@ def countdown_off_chart(
                 x=[1, 15],
                 y=[t, t],
                 mode="lines",
-                name="Printed timetable",
+                name="Printed timetable" + (f", {route_name(key).lower()}" if focus else ""),
+                legendrank=2,
                 line={"color": TIMETABLE_COLOUR, "width": 2.5, "dash": "dash"},
-                hovertemplate=f"<b>Printed timetable</b>: {focus_label}<br>{t:.1f} min off on "
-                "average, for the same bus arrivals<extra></extra>",
+                hovertemplate=f"<b>Printed timetable</b><br>{t:.1f} min off on average, for "
+                "the same bus arrivals<extra></extra>",
             )
         )
-        fig.add_annotation(
-            x=1,
-            y=t,
-            text="printed timetable",
-            showarrow=False,
-            xanchor="left",
-            yanchor="bottom",
-            font={"size": 12, "color": TIMETABLE_COLOUR},
-        )
+    avg = lines[""]
     fig.add_trace(
         go.Scatter(
-            x=main["ahead_min"],
-            y=main["off"],
+            x=avg["ahead_min"],
+            y=avg["off"],
             mode="lines+markers",
-            name=f"Countdown: {focus_label}",
-            line={"color": COUNTDOWN_BLUE, "width": 4},
-            marker={"size": 7},
-            hovertext=hover(focus_label, key, main),
+            name=average_label if focus is None else "Average, all routes",
+            legendrank=1,
+            line={"color": AVERAGE_COLOUR, "width": 4 if focus is None else 2},
+            marker={"size": 7 if focus is None else 5},
+            hovertext=hover(average_label if focus is None else "Average, all routes", "", avg),
             hoverinfo="text",
         )
     )
+    many = len(routes) > 6
     fig.update_layout(
-        xaxis={
-            "title": "minutes away the countdown said",
-            "range": [0.6, 15.6],
-            "tickvals": [1, 2, 3, 5, 10, 15],
-            "zeroline": False,
-        },
-        yaxis={"title": "minutes off, on average", "range": [0, top * 1.12], "zeroline": False},
-        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0, "xanchor": "left"},
+        xaxis={"title": "Minutes away", "range": [0, 15.5], "dtick": 5, "zeroline": False},
+        # fitted to the lines, not from zero: the differences are what the chart is for
+        yaxis={"title": "Average minutes off", "zeroline": False},
+        legend=(
+            {"orientation": "v", "x": 1.02, "y": 1, "xanchor": "left", "yanchor": "top"}
+            if many
+            else {"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0, "xanchor": "left"}
+        ),
         hovermode="closest",
-        margin={"t": 30, "r": 30 if label_ends and others else 10},
-        height=420,
+        margin={"t": 30, "r": 10},
+        height=480 if many else 420,
     )
     return fig
 
@@ -1748,6 +1753,8 @@ def col_range(label: str = "Usual range"):
 
 # ------------------------------------------------------------- clickable tables ----
 
+# the width of the "−1 to 5 min" numbers beside each range strip, and that plus the gap
+RANGE_TEXT_PX = 92
 _TABLE_CSS = """
 <style>
 .ebw-t { border: 1px solid #e3e6ea; border-radius: 10px; overflow: auto; font-size: 15px;
@@ -1767,13 +1774,17 @@ a.ebw-r:hover { background: #eef6f2; }
 .ebw-k { font-weight: 700; }
 .ebw-s { color: #666; font-size: 14px; }
 .ebw-g { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
-.ebw-x { position: relative; display: inline-block; flex: none; max-width: 100%; height: 16px; }
+/* the strip takes the column's width less the numbers beside it, so the
+   heading's "on time" (ebw-ax, the same width) lines up with the green line in every row */
+.ebw-x { position: relative; display: block; flex: 1 1 auto; min-width: 70px; height: 16px; }
+.ebw-g > .ebw-s { flex: 0 0 RANGE_TEXT_PXpx; }
 .ebw-x > span { position: absolute; display: block; }
 .ebw-x0 { top: -10px; width: 2px; margin-left: -1px; height: calc(100% + 20px);
           background: #0b6e4f; }
 .ebw-x1 { top: 4px; height: 8px; border-radius: 3px; background: #9cc0e0; }
 .ebw-x2 { top: 0; width: 4px; height: 16px; border-radius: 1px; background: #123f6b; }
-.ebw-ax { position: relative; display: block; max-width: 100%; height: 15px; margin-top: 3px;
+.ebw-ax { position: relative; display: block; width: calc(100% - RANGE_GAP_PXpx); height: 15px;
+          margin-top: 3px;
           font-weight: 500; font-size: 11px; color: #777; }
 .ebw-ax > span { position: absolute; top: 0; transform: translateX(-50%); white-space: nowrap; }
 .ebw-ax > .ebw-ax0 { color: #0b6e4f; font-weight: 700; }
@@ -1781,13 +1792,15 @@ a.ebw-r:hover { background: #eef6f2; }
   .ebw-hide { display: none; } .ebw-t { font-size: 14px; }
   .ebw-r { grid-template-columns: var(--cols-phone); padding: 7px 8px; column-gap: 8px; }
   .ebw-g { flex-direction: column; align-items: stretch; gap: 2px; }
+  .ebw-g > .ebw-s { flex: none; }
+  .ebw-ax { width: 100%; }
   .ebw-x0 { top: -4px; height: calc(100% + 6px); }  /* clear of the numbers under the strip */
 }
 </style>
-"""
+""".replace("RANGE_TEXT_PX", str(RANGE_TEXT_PX)).replace("RANGE_GAP_PX", str(RANGE_TEXT_PX + 8))
 
 
-def range_strip(p10, med, p90, lo: float, hi: float, width: int = 130) -> str:
+def range_strip(p10, med, p90, lo: float, hi: float) -> str:
     """A small horizontal picture of where 8 in 10 buses fell (p10 to p90, seconds) with a tick at
     the typical bus and a green line at on time (0), on a shared scale lo..hi (minutes)."""
     if any(v is None or pd.isna(v) for v in (p10, med, p90)):
@@ -1800,7 +1813,7 @@ def range_strip(p10, med, p90, lo: float, hi: float, width: int = 130) -> str:
     # strip can shrink to fit a phone; the shared styles are the ebw-x classes above
     zero, a, b, m = x(0.0), x(p10), x(p90), x(med)
     return (
-        f"<span class='ebw-x' style='width:{width}px'>"
+        "<span class='ebw-x'>"
         f"<span class='ebw-x1' style='left:{a:.1f}%;width:max(2px,{b - a:.1f}%)'></span>"
         # on time, drawn over the range so it shows where on time falls within it
         f"<span class='ebw-x0' style='left:{zero:.1f}%'></span>"
@@ -1958,14 +1971,14 @@ def range_scale(df: pd.DataFrame, lo_col: str = "p10_delay_s", hi_col: str = "p9
     return lo, hi
 
 
-def range_axis(lo: float, hi: float, width: int = 130) -> str:
+def range_axis(lo: float, hi: float) -> str:
     """The heading over a column of range strips: just 'on time' at 0 (green, as the line
     running down through the strips); the numbers in each row give the scale."""
     x = (0 - lo) / (hi - lo) * 100
     # centred on the line, unless that would push the words past the column's edge
     shift = 0 if x < 18 else 100 if x > 82 else 50
     return (
-        f"<span class='ebw-ax' style='width:{width}px'>"
+        "<span class='ebw-ax'>"
         f"<span class='ebw-ax0' style='left:{x:.1f}%;transform:translateX(-{shift}%)'>"
         "on time</span></span>"
     )
@@ -1990,7 +2003,7 @@ def range_columns(lo: float, hi: float) -> list[dict]:
             "key": "range",
             "label": "8 in 10 buses (vs timetable)",
             "axis": range_axis(lo, hi),
-            "width": "minmax(13em, 1.6fr)",
+            "width": "minmax(16em, 3fr)",
             "phone_width": "minmax(6.8em, 1fr)",
             "html": True,
             "help": RANGE_HELP + " The green line is on time; the dark tick is the typical bus. "
@@ -2001,7 +2014,7 @@ def range_columns(lo: float, hi: float) -> list[dict]:
         {
             "key": "spread",
             "label": "Spread",
-            "width": "minmax(5em, 0.5fr)",
+            "width": "5.2em",
             "num": True,
             "hide_on_phone": True,
             "help": "How wide the 8-in-10 range is: the time to allow for the bus being early "
