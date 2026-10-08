@@ -10,18 +10,20 @@ import plotly.graph_objects as go
 import pydeck as pdk
 import streamlit as st
 from common import (
+    COUNTDOWN_OFF_NOTE,
     JUST_LEFT_MINUTES,
     LATENESS_CHART_NOTE,
     LIVE_CHECK_SECONDS,
     RANGE_HELP,
     STOP_ROWS_PER_ROUTE,
-    TOLD_CHART_NOTE,
     TYPICAL_HELP,
     busy_stops,
     card,
     clean_headsigns,
     col_hour,
     col_minutes,
+    countdown_off_at_stop,
+    countdown_off_chart,
     current_fv,
     data_note,
     day_label,
@@ -37,6 +39,7 @@ from common import (
     link_table,
     live_status_line,
     marts_ready,
+    minutes_axis,
     on_time_line,
     page_filters,
     q,
@@ -48,7 +51,6 @@ from common import (
     require_marts,
     route_colors,
     route_link,
-    route_picker,
     search_stops,
     service_hour_key,
     show_coming,
@@ -58,9 +60,6 @@ from common import (
     stop_link,
     table,
     today_lateness,
-    told_at_stop,
-    told_chart,
-    told_takeaway,
 )
 
 require_db()
@@ -180,7 +179,7 @@ def every_stop(start, wt) -> None:
         )
         shown = enough.copy()
         shown["color"] = shown["typical"].map(lateness_color)
-        shown["typical_txt"] = shown["typical"].map(lambda m: f"{m:+.1f} min")
+        shown["typical_txt"] = shown["typical"].map(lambda m: fmt_delay(m * 60))
         shown["code"] = shown["stop_code"].map(lambda c: f"#{c}" if c else "")
         picked_map = st.pydeck_chart(
             pdk.Deck(
@@ -594,8 +593,8 @@ with card():
             y = d["p50"] / 60
             hover = [
                 (
-                    f"<b>{label}</b>, {xx}<br>typically {p50 / 60:+.1f} min"
-                    f"<br>8 in 10 buses: {p10 / 60:+.0f} to {p90 / 60:+.0f} min"
+                    f"<b>{label}</b>, {xx}<br>typical bus {fmt_delay(p50)}"
+                    f"<br>8 in 10 buses: {fmt_range(p10, p90)}"
                     f"<br>{n:,} arrivals over {nd} days"
                 )
                 for xx, p10, p50, p90, n, nd in zip(
@@ -625,9 +624,10 @@ with card():
                 "categoryorder": "array",
                 "categoryarray": [x_of[h] for h in hours],
             },
-            yaxis_title="minutes behind the timetable",
-            yaxis_tickformat="+d",
-            yaxis_zeroline=False,
+            yaxis=minutes_axis(
+                list(chart["p50"] / 60)
+                + (list(chart["p10"] / 60) + list(chart["p90"] / 60) if one else [])
+            ),
             legend_title="",
             showlegend=not one,
             margin={"t": 30},
@@ -635,28 +635,23 @@ with card():
         st.plotly_chart(fit_phone(fig), width="stretch")
 
 
-# ---- timetable or the countdown? -------------------------------------------------------
+# ---- how far off the countdown is here ------------------------------------------------
 with card():
     st.subheader(
-        "Timetable or countdown: which to trust at this stop?",
-        help=TOLD_CHART_NOTE + " More on the Countdown page.",
+        "How far off is the countdown here?",
+        help=COUNTDOWN_OFF_NOTE + f" {period[0].upper() + period[1:]}. More on the Countdown page.",
     )
-    here_routes = (
-        tbl[["route_id", "route"]]
-        .drop_duplicates("route_id")
-        .rename(columns={"route": "route_short_name"})
+    here_routes = tbl[["route_id", "route"]].drop_duplicates("route_id")
+    fig = countdown_off_chart(
+        countdown_off_at_stop(stop_id, start, wt),
+        dict(
+            zip(here_routes["route_id"].astype(str), here_routes["route"].astype(str), strict=False)
+        ),
+        focus_label="All routes here",
     )
-    told_route = route_picker(here_routes, key=f"told_route_{stop_id}", query_param="told_route")
-    told = told_at_stop(stop_id, start, wt, told_route)
-    fig = told_chart(told)
     if fig is None:
-        st.caption(
-            "Not enough measured arrivals and countdown predictions here for this choice yet."
-        )
+        st.caption("Not enough measured arrivals with a countdown here yet for this period.")
     else:
-        line = told_takeaway(told)
-        if line:
-            st.markdown(line)
         st.plotly_chart(fit_phone(fig), width="stretch")
 
 # ---- arrive-by guidance ---------------------------------------------------
@@ -925,20 +920,16 @@ with card():
                 mode="lines+markers",
                 name="Typical bus",
                 line={"color": "#1f5f9e", "width": 2.5},
-                customdata=trend["n"].astype(int),
-                hovertemplate="%{x}: typical bus %{y:+.1f} min · %{customdata:,} arrivals"
-                "<extra></extra>",
+                hovertext=[
+                    f"{xx}: typical bus {fmt_delay(m * 60)} · {int(n):,} arrivals"
+                    for xx, m, n in zip(x, trend["median_delay"], trend["n"], strict=False)
+                ],
+                hoverinfo="text",
             )
         )
-        values = list(trend["p10"]) + list(trend["p90"]) + [0.0]
         fig.update_layout(
             xaxis={"type": "category", "title": ""},
-            yaxis={
-                "title": "minutes behind the timetable",
-                "tickformat": "+d",
-                "range": [min(values) - 0.5, max(values) + 0.5],
-                "zeroline": False,
-            },
+            yaxis=minutes_axis(list(trend["p10"]) + list(trend["p90"])),
             legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0, "xanchor": "left"},
             margin={"t": 30},
             height=340,

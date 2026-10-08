@@ -729,26 +729,51 @@ def main(settings: Settings, raw: bool = False) -> None:
             cur,
             """
             with site as (
-                select ahead_min, n, n_within_1min from marts.mart_told_vs_actual
+                select ahead_min, n, n_within_1min, mean_abs_s from marts.mart_told_vs_actual
                 where route_id is null and stop_id is null
             ),
             direct as (
                 select null::int ahead_min, count(*) n,
-                       count(*) filter (where abs(schedule_error_s) <= 60) n_within_1min
+                       count(*) filter (where abs(schedule_error_s) <= 60) n_within_1min,
+                       avg(abs(schedule_error_s)) mean_abs_s
                 from marts.fct_countdown_samples where in_comparison and ahead_min = 15
                 union all
-                select ahead_min, count(*), count(*) filter (where abs(error_s) <= 60)
+                select ahead_min, count(*), count(*) filter (where abs(error_s) <= 60),
+                       avg(abs(error_s))
                 from marts.fct_countdown_samples where in_comparison group by 1
             )
             select coalesce(d.ahead_min::text, 'timetable') countdown_at,
+                   round(s.mean_abs_s) site_avg_off_s, round(d.mean_abs_s) direct_avg_off_s,
                    round(100.0 * s.n_within_1min / s.n) site_within_1min_pct,
                    round(100.0 * d.n_within_1min / d.n) direct_within_1min_pct,
                    s.n site_n, d.n direct_n,
-                   case when s.n = d.n and s.n_within_1min = d.n_within_1min then 'PASS'
+                   case when s.n = d.n and s.n_within_1min = d.n_within_1min
+                         and abs(s.mean_abs_s - d.mean_abs_s) < 0.5 then 'PASS'
                         else 'DIFFERENT (the mart is up to an hour old)' end result
             from direct d left join site s on s.ahead_min is not distinct from d.ahead_min
             where d.ahead_min is null or d.ahead_min in (1, 2, 3, 5, 10, 15)
             order by d.ahead_min nulls first
+        """,
+        )
+        print(
+            "Countdown average minutes off, per route (the faint lines; timetable = the same "
+            "arrivals' average off the timetable):"
+        )
+        show(
+            cur,
+            """
+            select r.route_short_name route,
+                   round(avg(abs(c.schedule_error_s)) filter (where c.ahead_min = 15)) timetable_s,
+                   round(avg(abs(c.error_s)) filter (where c.ahead_min = 1)) at_1_s,
+                   round(avg(abs(c.error_s)) filter (where c.ahead_min = 5)) at_5_s,
+                   round(avg(abs(c.error_s)) filter (where c.ahead_min = 10)) at_10_s,
+                   round(avg(abs(c.error_s)) filter (where c.ahead_min = 15)) at_15_s,
+                   count(*) filter (where c.ahead_min = 15) arrivals
+            from marts.fct_countdown_samples c
+            join gtfs.routes r on r.route_id = c.route_id
+             and r.feed_version_id = (select max(feed_version_id) from gtfs.feed_version)
+            where c.in_comparison
+            group by 1 order by length(r.route_short_name), 1
         """,
         )
 

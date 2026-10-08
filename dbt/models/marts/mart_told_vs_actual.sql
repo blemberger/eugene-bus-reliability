@@ -7,7 +7,7 @@
 -- has one value, and the countdown at each distance is measured on the same buses as it.
 -- Positive = the bus came later than you were told. Rows for all routes and stops together
 -- (route_id and stop_id null), per route, and per stop. All data. Used by the Countdown page
--- (the bars, the "how often is it right" lines, the headline numbers and the routes table).
+-- (the "how far off" chart from mean_abs_s, the headline numbers and the routes table).
 -- Recomputed at most hourly (macros/hourly.sql).
 
 {{ config(indexes=[{'columns': ['route_id']}, {'columns': ['stop_id']}], **hourly_config()) }}
@@ -33,6 +33,8 @@ select
     percentile_cont(0.1) within group (order by error_s)      as p10_s,
     percentile_cont(0.9) within group (order by error_s)      as p90_s,
     percentile_cont(0.5) within group (order by abs(error_s)) as median_abs_s,
+    -- the average minutes off, early or late alike: what the "how far off" chart draws
+    avg(abs(error_s))                                         as mean_abs_s,
     count(*) filter (where abs(error_s) <= 60)                 as n_within_1min,
     count(*) filter (where abs(error_s) <= 120)                as n_within_2min,
     -- where the rest fell: more than a minute early, 1 to 3 minutes late, more than 3 late

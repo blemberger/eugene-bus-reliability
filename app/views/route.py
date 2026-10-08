@@ -27,6 +27,7 @@ from common import (
     lateness,
     lateness_chart,
     link_table,
+    minutes_axis,
     on_time_line,
     page_filters,
     q,
@@ -217,10 +218,10 @@ with card():
 with card():
     st.subheader(
         "Where does the delay build up?",
-        help="Lateness against the timetable at each stop, in the order the bus reaches them (top "
-        "to bottom); left of the dotted line = early. The shaded band is where 8 in 10 buses "
-        "fell. A line moving right means the bus loses time against the timetable there; moving "
-        "left means the timetable has slack there.",
+        help="Lateness against the timetable at each stop, in the order the bus reaches them (left "
+        "to right). The line is the typical bus; the shaded band is where 8 in 10 buses fell. A "
+        "line climbing means the bus loses time against the timetable there; falling means the "
+        "timetable has slack there.",
     )
     along = q(
         f"""
@@ -241,20 +242,21 @@ with card():
         st.caption("Not enough scored arrivals yet.")
     else:
         along["Stop"] = along["stop_sequence"].astype(str) + ". " + along["stop_name"]
-        if is_mobile():  # long stop names would squeeze the plot into a sliver on a phone
+        if is_mobile():  # long stop names would leave little room for the plot on a phone
             along["Stop"] = [
                 t if len(t) <= 20 else t[:19].rstrip() + "…" for t in along["Stop"].astype(str)
             ]
         along["p10_s"], along["p90_s"] = along["p10"].astype(float), along["p90"].astype(float)
+        along["med_s"] = along["median_delay"].astype(float)
         for c in ("median_delay", "p10", "p90"):
             along[c] = along[c].astype(float) / 60
         stops_order = along["Stop"].tolist()
         fig = go.Figure()
-        on_time_line(fig, vertical=True)
+        on_time_line(fig)
         fig.add_trace(
             go.Scatter(
-                y=stops_order + stops_order[::-1],
-                x=list(along["p90"]) + list(along["p10"])[::-1],
+                x=stops_order + stops_order[::-1],
+                y=list(along["p90"]) + list(along["p10"])[::-1],
                 fill="toself",
                 fillcolor="rgba(31,95,158,0.18)",
                 mode="lines",
@@ -265,31 +267,38 @@ with card():
         )
         fig.add_trace(
             go.Scatter(
-                y=stops_order,
-                x=along["median_delay"],
+                x=stops_order,
+                y=along["median_delay"],
                 mode="lines+markers",
                 name="Typical bus",
                 line={"color": "#1f5f9e", "width": 2.5},
-                customdata=list(
-                    zip(along["n"].astype(int), along["p10"], along["p90"], strict=False)
-                ),
-                hovertemplate="%{y}<br>typical %{x:+.1f} min<br>8 in 10 buses: %{customdata[1]:+.0f}"
-                " to %{customdata[2]:+.0f} min<br>%{customdata[0]} arrivals<extra></extra>",
+                hovertext=[
+                    f"{name}<br>typical bus {fmt_delay(m)}<br>8 in 10 buses: "
+                    f"{fmt_range(lo_, hi_)}<br>{int(n):,} arrivals"
+                    for name, m, lo_, hi_, n in zip(
+                        along["Stop"],
+                        along["med_s"],
+                        along["p10_s"],
+                        along["p90_s"],
+                        along["n"],
+                        strict=False,
+                    )
+                ],
+                hoverinfo="text",
             )
         )
-        values = list(along["p10"]) + list(along["p90"]) + [0.0]
         fig.update_layout(
             xaxis={
-                "title": "min behind timetable" if is_mobile() else "minutes behind the timetable",
-                "tickformat": "+d",
-                "range": [min(values) - 0.5, max(values) + 0.5],
-                "zeroline": False,
-                "side": "top",
+                "type": "category",
+                "categoryorder": "array",
+                "categoryarray": stops_order,
+                "tickangle": -45,
+                "title": "",
             },
-            yaxis={"categoryorder": "array", "categoryarray": stops_order, "autorange": "reversed"},
-            height=max(320, 22 * len(stops_order) + 120),
-            legend={"orientation": "h", "yanchor": "top", "y": -0.02, "x": 0, "xanchor": "left"},
-            margin={"l": 10, "r": 10, "t": 40, "b": 10},
+            yaxis=minutes_axis(list(along["p10"]) + list(along["p90"])),
+            height=460 if is_mobile() else 520,
+            legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0, "xanchor": "left"},
+            margin={"l": 10, "r": 10, "t": 30, "b": 10},
         )
         st.plotly_chart(fit_phone(fig), width="stretch")
 

@@ -83,6 +83,26 @@ def models_built_ok() -> bool:
     )
 
 
+def record_failure(settings: Settings, full: bool, version: str, message: str) -> None:
+    """Note a build that failed, in the database, so `wait-ready` can say so (and why) at once.
+    A build that fails while dbt reads the project (a compilation error) never reaches dbt's
+    own build_log, so without this the wait could only keep saying "waiting to start"."""
+    try:
+        with psycopg.connect(settings.database_url) as conn:
+            conn.execute("create schema if not exists analytics")
+            conn.execute(
+                "create table if not exists analytics.build_failure "
+                "(failed_at timestamptz, full_refresh boolean, version text, message text)"
+            )
+            conn.execute(
+                "insert into analytics.build_failure (failed_at, full_refresh, version, message) "
+                "values (now(), %s, %s, %s)",
+                (full, version, message),
+            )
+    except psycopg.Error:
+        log.exception("could not record the failed build")
+
+
 def run_dbt_build(settings: Settings) -> None:
     version = analysis_code_version()
     full = refreshed_version(settings) != version
@@ -95,6 +115,7 @@ def run_dbt_build(settings: Settings) -> None:
         log.error(
             "dbt build FAILED (exit %s)\n%s\n%s", result.returncode, tail, result.stderr[-2000:]
         )
+        record_failure(settings, full, version, (tail + "\n" + result.stderr[-1000:]).strip())
     if full and models_built_ok():
         with psycopg.connect(settings.database_url) as conn:
             conn.execute("delete from analytics.build_code")
@@ -144,10 +165,30 @@ def wait_ready(settings: Settings, timeout_minutes: int = 60, poll_seconds: int 
                 "select 1 from analytics.build_log where full_refresh and finished_at > %s",
                 (began,),
             ).fetchone()
+            crashed = None
+            if conn.execute("select to_regclass('analytics.build_failure') is not null").fetchone()[
+                0
+            ]:
+                # a failure of this very code (an earlier version's failures don't count)
+                crashed = conn.execute(
+                    """select failed_at, message from analytics.build_failure
+                       where version = %s order by failed_at desc limit 1""",
+                    (version,),
+                ).fetchone()
             previous = conn.execute(
                 """select percentile_cont(0.5) within group (order by extract(epoch from finished_at - started_at))
                    from analytics.build_log where full_refresh and finished_at is not null"""
             ).fetchone()
+        if crashed and not running:
+            print(
+                f"FAILED: the analysis build at {_clock(crashed[0])} stopped with an error "
+                "before it could run (it retries every 15 minutes, failing the same way until "
+                "the code is fixed):",
+                flush=True,
+            )
+            lines = [ln for ln in crashed[1].splitlines() if ln.strip()]
+            print("\n".join("   " + ln for ln in lines[-8:]), flush=True)
+            return 1
         if failed:
             print(
                 f"FAILED: the full rebuild that finished at {_clock(failed[0])} had {failed[1]} "
@@ -182,7 +223,10 @@ def wait_ready(settings: Settings, timeout_minutes: int = 60, poll_seconds: int 
 def run_source_freshness(settings: Settings) -> None:
     result = _dbt(["source", "freshness"], timeout=300)
     lines = [ln for ln in result.stdout.splitlines() if "freshness of" in ln]
-    if result.returncode != 0:
+    if result.returncode != 0 and not lines:
+        # dbt didn't get as far as checking (the same error as the build, usually)
+        log.error("source freshness could not run: dbt stopped before checking (see the build)")
+    elif result.returncode != 0:
         log.error("source freshness ERROR: collection has stalled\n%s", "\n".join(lines))
     elif any("WARN" in ln for ln in lines):
         log.warning("source freshness WARN: collection is falling behind\n%s", "\n".join(lines))

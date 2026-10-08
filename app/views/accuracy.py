@@ -3,17 +3,17 @@ timetable?"""
 
 from __future__ import annotations
 
-import math
-
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from common import (
-    TOLD_CHART_NOTE,
+    COUNTDOWN_OFF_NOTE,
     busy_stop_buttons,
     card,
     col_count,
     col_time,
+    countdown_off,
+    countdown_off_chart,
     current_fv,
     fit_phone,
     fmt_date,
@@ -31,9 +31,6 @@ from common import (
     service_hour_key,
     stop_buttons,
     table,
-    told_chart,
-    told_takeaway,
-    told_vs_actual,
 )
 
 require_db()
@@ -124,21 +121,33 @@ if not at15.empty:
         + SCORED,
     )
 
-# ---- timetable vs the sign -----------------------------------------------------------
+# ---- how far off: the countdown at each distance, every route, and the timetable ----------
 with card():
-    told = told_vs_actual(route_id=route_id)
     st.subheader(
-        "When you're told a time, when does the bus come?",
-        help=TOLD_CHART_NOTE
-        + (f" All data since {fmt_date(told['first_day'].min())}." if len(told) else ""),
+        "How far off is the countdown?",
+        help=COUNTDOWN_OFF_NOTE
+        + (
+            f" All data since {fmt_date(cal['first_day'].min())}."
+            if "first_day" in cal and len(cal)
+            else ""
+        ),
     )
-    fig0 = told_chart(told)
+    fig0 = countdown_off_chart(
+        countdown_off(),
+        dict(
+            zip(
+                routes["route_id"].astype(str), routes["route_short_name"].astype(str), strict=False
+            )
+        ),
+        focus=route_id,
+        focus_label="All routes"
+        if route_id is None
+        else f"Route {routes.set_index('route_id')['route_short_name'].astype(str).get(route_id, route_id)}",
+        min_n=30,
+    )
     if fig0 is None:
         st.caption("Not enough measured arrivals yet, or the numbers are being recalculated.")
     else:
-        line = told_takeaway(told)
-        if line:
-            st.markdown(line)
         st.plotly_chart(fit_phone(fig0), width="stretch")
 
 
@@ -225,89 +234,6 @@ with card():
             },
         )
         st.plotly_chart(fit_phone(fig3), width="stretch")
-
-
-# ---- calibration curve --------------------------------------------------------------
-with card():
-    st.subheader(
-        "How often is the countdown right?",
-        help="Solid lines: how often the bus came within 1 or 2 minutes of what the countdown "
-        "said, by how far ahead it said it. Dashed lines, same colours: how often the printed "
-        "timetable is that close for the same buses (flat, because the timetable doesn't "
-        "change as the bus gets nearer). Where a solid line is above its dashed twin, "
-        "the countdown is worth checking. Click a legend entry to hide or show a line. "
-        "LTD predicts as far ahead as the end of each trip; this page shows 1 to 15 minutes out, "
-        "the range in which people use a countdown to decide when to leave (our cut, not LTD's). "
-        "Each bus arrival counts once at each distance; distances with fewer than 30 are left out.",
-    )
-    # 1 to 15 minutes out, as in the first chart: the range in which riders decide when to leave.
-    # (0 is the countdown's "due" moment, when the bus is already pulling in: not a forecast.)
-    cal = cal[cal["horizon_min"].between(1, 15) & (cal["n_predictions"] >= 30)]
-    if cal.empty:
-        st.info(
-            "No distance has 30 measured bus arrivals yet for this selection; this chart needs more data."
-        )
-    else:
-        custom = list(
-            zip(
-                cal["n_predictions"].astype(int),
-                cal["n_days"].astype(int),
-                cal["first_day"].astype(str),
-                cal["last_day"].astype(str),
-                strict=False,
-            )
-        )
-        hover = (
-            "%{x} min out: %{y:.0%}<br>%{customdata[0]:,} bus arrivals over %{customdata[1]} day(s)"
-            "<br>%{customdata[2]} to %{customdata[3]}<extra>%{fullData.name}</extra>"
-        )
-        fig = go.Figure()
-        for k, color in (("1", "#2e8b57"), ("2", "#1f77b4")):
-            fig.add_trace(
-                go.Scatter(
-                    x=cal["horizon_min"],
-                    y=cal[f"n_within_{k}min"] / cal["n_predictions"],
-                    mode="lines+markers",
-                    name=f"countdown right to within {k} min",
-                    line={"color": color, "width": 3},
-                    customdata=custom,
-                    hovertemplate=hover,
-                )
-            )
-            # the timetable: one level, flat across every distance
-            level = tt1 if k == "1" else tt2
-            if level is not None:
-                fig.add_trace(
-                    go.Scatter(
-                        x=[0.5, 15.5],
-                        y=[level, level],
-                        mode="lines",
-                        name=f"printed timetable within {k} min",
-                        line={"color": color, "dash": "dash", "width": 2},
-                        hovertemplate=f"printed timetable: right to within {k} min "
-                        f"{level:.0%} of the time<extra></extra>",
-                    )
-                )
-        shares = pd.concat(
-            [cal[f"n_within_{k}min"] / cal["n_predictions"] for k in ("1", "2")]
-            + [pd.Series([v for v in (tt1, tt2) if v is not None], dtype=float)]
-        )
-        fig.update_layout(
-            xaxis_title="minutes the countdown said",
-            yaxis_title="share right",
-            yaxis_tickformat=".0%",
-            # fitted to the data, to the nearest 10%: the differences are what matter here
-            yaxis_range=[
-                max(0.0, math.floor(shares.min() * 10) / 10),
-                min(1.0, math.ceil(shares.max() * 10) / 10),
-            ],
-            xaxis_range=[0.5, 15.5],
-            xaxis_dtick=1,
-            legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0, "xanchor": "left"},
-            legend_title="",
-            margin={"t": 30},
-        )
-        st.plotly_chart(fit_phone(fig), width="stretch")
 
 
 # ---- by route at 5 and 10 min ------------------------------------------------------------

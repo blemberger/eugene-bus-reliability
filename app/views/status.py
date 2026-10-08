@@ -115,17 +115,24 @@ else:
         },
     )
 
+# the latest revision of each trip-stop revised in the last 5 minutes: those rows are all in
+# the last 5 minutes (a later revision of the same stop would be newer still), so this reads only
+# recent history through the closed_at index instead of a trip-stop's whole day for every row
 revs = q(f"""
+    with recent as (
+        select distinct on (trip_id, start_date, stop_sequence)
+               trip_id, start_date, stop_sequence, stop_id, closed_at, arrival_time, departure_time
+        from rt.prediction_history
+        where closed_at > now() - interval '5 minutes'
+        order by trip_id, start_date, stop_sequence, last_seen_at desc
+    )
     select h.closed_at, r.route_short_name as route, t.trip_headsign as headsign, s.stop_name,
            coalesce(h.arrival_time, h.departure_time) as old_time, coalesce(c.arrival_time, c.departure_time) as new_time
-    from rt.prediction_history h
+    from recent h
     join rt.prediction_current c using (trip_id, start_date, stop_sequence)
     left join gtfs.trips t  on t.trip_id = h.trip_id and t.feed_version_id = {FV}
     left join gtfs.routes r on r.route_id = t.route_id and r.feed_version_id = t.feed_version_id
     left join gtfs.stops s  on s.stop_id = h.stop_id and s.feed_version_id = t.feed_version_id
-    where h.closed_at > now() - interval '5 minutes'
-      and h.last_seen_at = (select max(last_seen_at) from rt.prediction_history x
-                            where x.trip_id = h.trip_id and x.start_date = h.start_date and x.stop_sequence = h.stop_sequence)
     order by h.closed_at desc limit 25
 """)
 n_revs = q(

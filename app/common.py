@@ -403,7 +403,7 @@ TYPICAL_HELP = "Median minutes behind the timetable: half the buses were later t
 def col_typical(label: str = "Typical bus vs timetable", max_minutes: float = 5.0):
     """Typical minutes late, drawn as a bar from 0 (on schedule) up to max_minutes."""
     return st.column_config.ProgressColumn(
-        label, format="%+.1f min", min_value=0.0, max_value=float(max_minutes), help=TYPICAL_HELP
+        label, format="%.1f min", min_value=0.0, max_value=float(max_minutes), help=TYPICAL_HELP
     )
 
 
@@ -657,11 +657,7 @@ def log_page_view(page: str) -> None:
 
 def fit_phone(fig):
     """On a phone, move a chart's legend from beside the plot to above it, so the plot keeps the
-    screen's full width. On every screen, minute axes signed +/− label zero plain "0"."""
-    for axis in ("xaxis", "yaxis"):
-        fmt = getattr(fig.layout, axis).tickformat or ""
-        if fmt.startswith("+"):
-            fig.update_layout({axis: {"labelalias": {"+0": "0", "+0.0": "0"}}})
+    screen's full width."""
     if is_mobile():
         fig.update_layout(
             legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0, "xanchor": "left"}
@@ -895,7 +891,7 @@ def col_hour(label: str = "Hour", help: str | None = None):
 def col_late(label: str = "Min late (vs timetable)", help: str | None = None):
     return st.column_config.NumberColumn(
         label,
-        format="%+.1f",
+        format="%.1f",
         help=help or "Minutes behind the printed timetable; negative = early.",
     )
 
@@ -1393,201 +1389,229 @@ def route_table(rank: pd.DataFrame, start: date, key: str) -> None:
     )
 
 
-# ------------------------------------------- what you were told vs when the bus came ----
+# ------------------------------------------------- how far off the countdown is ----
 
-# How far ahead the countdown said the bus was, top to bottom of the chart (far to near).
-# Riders decide when to leave within about 15 minutes, so the chart stops there.
-TOLD_AHEAD = (15, 10, 5, 3, 2, 1)
+COUNTDOWN_BLUE = "#1f5f9e"
+TIMETABLE_COLOUR = "#b35900"
 
-# Where the bus came against what you were told, early to late: (column, legend, colour).
-TOLD_PARTS = [
-    ("n_early", "1+ min early", "#e6a100"),
-    ("n_within", "within 1 min", "#2e8b57"),
-    ("n_late13", "1–3 min late", "#ef9a9a"),
-    ("n_late3", "3+ min late", "#c62828"),
-]
-
-TOLD_CHART_NOTE = (
-    "Each bar is 100% of the same bus arrivals (those that had a countdown 15 minutes out), "
-    "each counted once. The top bar compares when the bus came with the printed timetable; the "
-    "others with LTD's countdown (on stop signs and in apps) when it said the bus was 15, 10, "
-    "5, 3, 2 or 1 minutes away. Green: within a minute of what you were told. "
-    "Amber: the bus came more than a minute early, so you could have missed it. Red: it came "
-    "later than you were told. The more green, the more you can rely on it. Distances with "
-    "fewer than 20 arrivals are left out."
+COUNTDOWN_OFF_NOTE = (
+    "How many minutes, on average, the bus came from the time it was given, early or late "
+    "alike. Blue: LTD's countdown (on stop signs and in apps), by how many minutes away it said "
+    "the bus was; the thin lines are single routes, the thick one all of them together. Dashed: "
+    "the printed timetable for the same bus arrivals, flat because the timetable doesn't change "
+    "as the bus gets nearer. Lower is better. Measured on bus arrivals that had a countdown 15 "
+    "minutes out, each counted once at each distance; points with fewer than 20 are left out. "
+    "Hover a line for its numbers."
 )
 
 
-def _told_counts(err: str) -> str:
-    """SQL counts of an error column (seconds, positive = later than told) for TOLD_PARTS."""
-    return (
-        f"count(*) as n, count(*) filter (where {err} < -60) as n_early, "
-        f"count(*) filter (where abs({err}) <= 60) as n_within, "
-        f"count(*) filter (where {err} > 60 and {err} <= 180) as n_late13, "
-        f"count(*) filter (where {err} > 180) as n_late3, min(service_date) as first_day"
-    )
-
-
-def told_vs_actual(route_id: str | None = None) -> pd.DataFrame:
-    """The timetable and the countdown at each distance, all stops, all routes or one route,
-    all data (marts.mart_told_vs_actual). Empty until the mart has the early/late split."""
-    if not q("select to_regclass('marts.mart_told_vs_actual') is not null as ok")["ok"][0]:
-        return pd.DataFrame()
+def countdown_off(route_id: str | None = None) -> pd.DataFrame:
+    """Average minutes off for the countdown at each distance (basis 'sign', ahead_min 1-15) and
+    the timetable (basis 'timetable'), all stops, for all routes together (route_id null) and
+    each route; all data (marts.mart_told_vs_actual). Empty while the mart is rebuilt."""
     try:
         return q(
             """
-            select basis, ahead_min, n, n_early_1min as n_early, n_within_1min as n_within,
-                   n_late_1_3min as n_late13, n_late_3min as n_late3, first_day
-            from marts.mart_told_vs_actual
-            where route_id is not distinct from %s and stop_id is null
-            """,
-            (route_id,),
+            select basis, ahead_min, route_id, n, mean_abs_s
+            from marts.mart_told_vs_actual where stop_id is null
+            """
         )
-    except Exception:  # noqa: BLE001 — the mart predates the split until the next rebuild
+    except Exception:  # noqa: BLE001 — the mart is being rebuilt with mean_abs_s
         return pd.DataFrame()
 
 
-def told_at_stop(stop_id: str, start: date, wt: str | None, route_id: str | None) -> pd.DataFrame:
-    """told_vs_actual() for one stop, computed on the spot (fct_countdown_samples) so it follows
-    the page's period, days and route. The same bus arrivals for the timetable and the
-    countdown: those with a countdown 15 minutes out; each counts once per bar."""
+def countdown_off_at_stop(stop_id: str, start: date, wt: str | None) -> pd.DataFrame:
+    """countdown_off() for one stop, all its routes together and each route, computed on the
+    spot (fct_countdown_samples) so it follows the page's period and days."""
     wt_e, wt_params = day_sql(wt)
-    route_sql = "and route_id = %s" if route_id else ""
-    route_params = (route_id,) if route_id else ()
+    cut = "where stop_id = %s and in_comparison and service_date >= %s " + wt_e
     return q(
         f"""
-        select 'timetable' as basis, null::int as ahead_min, {_told_counts("schedule_error_s")}
-        from marts.fct_countdown_samples
-        where stop_id = %s and in_comparison and ahead_min = 15 and service_date >= %s
-          {wt_e} {route_sql}
+        select 'timetable' as basis, null::int as ahead_min,
+               case when grouping(route_id) = 0 then route_id end as route_id,
+               count(*) as n, avg(abs(schedule_error_s)) as mean_abs_s
+        from marts.fct_countdown_samples {cut} and ahead_min = 15
+        group by grouping sets ((), (route_id))
         union all
-        select 'sign', ahead_min, {_told_counts("error_s")}
-        from marts.fct_countdown_samples
-        where stop_id = %s and in_comparison and ahead_min = any(%s) and service_date >= %s
-          {wt_e} {route_sql}
-        group by ahead_min
+        select 'sign', ahead_min, case when grouping(route_id) = 0 then route_id end,
+               count(*), avg(abs(error_s))
+        from marts.fct_countdown_samples {cut}
+        group by grouping sets ((ahead_min), (route_id, ahead_min))
         """,
-        (
-            stop_id,
-            start,
-            *wt_params,
-            *route_params,
-            stop_id,
-            list(TOLD_AHEAD),
-            start,
-            *wt_params,
-            *route_params,
-        ),
+        (stop_id, start, *wt_params, stop_id, start, *wt_params),
     )
 
 
-def _told_rows(df: pd.DataFrame, min_n: int) -> pd.DataFrame:
-    """The chart's rows, top to bottom: the timetable, then the countdown far to near."""
+def countdown_off_chart(
+    df: pd.DataFrame,
+    names: dict[str, str],
+    focus: str | None = None,
+    focus_label: str = "All routes",
+    min_n: int = 20,
+) -> go.Figure | None:
+    """Average minutes off against how far away the countdown said the bus was: a thin line per
+    route, a thick one for `focus` (a route id, or None for all routes together), and the
+    timetable for the same arrivals as a flat dashed line. None without two points to draw."""
     if df.empty:
-        return df
-    df = df[df["n"] >= min_n].copy()
-    tt = df[df["basis"] == "timetable"].assign(label="Timetable", order=0)
-    sign = df[(df["basis"] == "sign") & df["ahead_min"].isin(TOLD_AHEAD)].copy()
-    sign["label"] = sign["ahead_min"].map(lambda m: f"Countdown at {int(m)} min")
-    sign["order"] = sign["ahead_min"].map(lambda m: TOLD_AHEAD.index(int(m)) + 1)
-    return pd.concat([tt, sign]).sort_values("order")
-
-
-def told_chart(df: pd.DataFrame, min_n: int = 20) -> go.Figure | None:
-    """When you're told a time, when does the bus come? One 100% bar per source of the time:
-    the timetable, then the countdown at 15 minutes out down to 1, each split into early /
-    within a minute / 1-3 min late / 3+ min late. None without the timetable and two
-    countdown distances."""
-    rows = _told_rows(df, min_n)
-    if rows.empty or (rows["basis"] == "sign").sum() < 2:
         return None
-    labels = rows["label"].tolist()
+
+    # route ids as text, "" for all routes together (pandas would turn None back into NaN)
+    key = str(focus) if focus is not None else ""
+    df = df.assign(
+        _r=df["route_id"].astype(object).where(df["route_id"].notna(), "").astype(str),
+        off=df["mean_abs_s"].astype(float) / 60,
+    )
+    sign = df[(df["basis"] == "sign") & df["ahead_min"].between(1, 15) & (df["n"] >= min_n)]
+    sign = sign.sort_values("ahead_min")
+    tt = {
+        r: float(v)
+        for r, v, n in zip(
+            df[df["basis"] == "timetable"]["_r"],
+            df[df["basis"] == "timetable"]["off"],
+            df[df["basis"] == "timetable"]["n"],
+            strict=False,
+        )
+        if n >= min_n
+    }
+    main = sign[sign["_r"] == key]
+    if len(main) < 2:
+        return None
+    others = [
+        (r, g)
+        for r, g in sign[(sign["_r"] != "") & (sign["_r"] != key)].groupby("_r", sort=False)
+        if len(g) >= 2
+    ]
+    if focus is None and len(others) == 1:  # one route at the stop: it is the thick line
+        others = []
+    others.sort(key=lambda rg: (len(names.get(rg[0], rg[0])), names.get(rg[0], rg[0])))
+
+    def hover(label: str, r: str, g: pd.DataFrame) -> list[str]:
+        t = tt.get(r)
+        return [
+            f"<b>{label}</b><br>countdown said {int(m)} min: {o:.1f} min off on average"
+            + (f"<br>printed timetable: {t:.1f} min off" if t is not None else "")
+            + f"<br>{int(n):,} bus arrivals"
+            for m, o, n in zip(g["ahead_min"], g["off"], g["n"], strict=False)
+        ]
+
     fig = go.Figure()
-    for col, name, colour in TOLD_PARTS:
-        share = rows[col] / rows["n"]
+    label_ends = len(others) <= 8
+    top = max([*sign["off"].tolist(), *(v for r, v in tt.items() if r == key)])
+    for i, (r, g) in enumerate(others):
+        name = f"Route {names.get(r, r)}"
         fig.add_trace(
-            go.Bar(
-                y=labels,
-                x=share,
-                orientation="h",
-                name=name,
-                marker={"color": colour, "line": {"color": "white", "width": 1}},
-                text=[f"{v:.0%}" if v >= 0.07 else "" for v in share],
-                textposition="inside",
-                insidetextanchor="middle",
-                textfont={"color": "white" if col in ("n_within", "n_late3") else "#222"},
-                customdata=list(zip(rows["n"].astype(int), rows["basis"], strict=False)),
-                hovertemplate="<b>%{y}</b><br>%{x:.0%} of buses came "
-                + name
-                + ", against the time it gave<br>%{customdata[0]:,} measured<extra></extra>",
+            go.Scatter(
+                x=g["ahead_min"],
+                y=g["off"],
+                mode="lines",
+                name="Each route" if focus is None else "Other routes",
+                legendgroup="routes",
+                showlegend=i == 0,
+                line={"color": "rgba(31,95,158,0.35)", "width": 1.5},
+                hovertext=hover(name, r, g),
+                hoverinfo="text",
             )
         )
+    if label_ends and others:
+        # each route's name at the end of its line, nudged apart where lines end close together
+        ends = sorted(
+            (float(g["off"].iloc[-1]), float(g["ahead_min"].iloc[-1]), names.get(r, r))
+            for r, g in others
+        )
+        gap, placed = top * 1.12 * 0.05, []
+        for y, x, text in ends:
+            y = max(y, placed[-1] + gap) if placed else y
+            placed.append(y)
+            fig.add_annotation(
+                x=x,
+                y=y,
+                text=text,
+                showarrow=False,
+                xanchor="left",
+                xshift=4,
+                font={"size": 11, "color": "#5a7da3"},
+            )
+    t = tt.get(key)
+    if t is not None:
+        fig.add_trace(
+            go.Scatter(
+                x=[1, 15],
+                y=[t, t],
+                mode="lines",
+                name="Printed timetable",
+                line={"color": TIMETABLE_COLOUR, "width": 2.5, "dash": "dash"},
+                hovertemplate=f"<b>Printed timetable</b>: {focus_label}<br>{t:.1f} min off on "
+                "average, for the same bus arrivals<extra></extra>",
+            )
+        )
+        fig.add_annotation(
+            x=1,
+            y=t,
+            text="printed timetable",
+            showarrow=False,
+            xanchor="left",
+            yanchor="bottom",
+            font={"size": 12, "color": TIMETABLE_COLOUR},
+        )
+    fig.add_trace(
+        go.Scatter(
+            x=main["ahead_min"],
+            y=main["off"],
+            mode="lines+markers",
+            name=f"Countdown: {focus_label}",
+            line={"color": COUNTDOWN_BLUE, "width": 4},
+            marker={"size": 7},
+            hovertext=hover(focus_label, key, main),
+            hoverinfo="text",
+        )
+    )
     fig.update_layout(
-        barmode="stack",
         xaxis={
-            "tickformat": ".0%",
-            "range": [0, 1.005],
-            "tickvals": [0, 0.2, 0.4, 0.6, 0.8, 1],
-            "title": "share of buses",
+            "title": "minutes away the countdown said",
+            "range": [0.6, 15.6],
+            "tickvals": [1, 2, 3, 5, 10, 15],
+            "zeroline": False,
         },
-        yaxis={
-            "categoryorder": "array",
-            "categoryarray": labels,
-            "autorange": "reversed",
-            "title": "",
-        },
-        legend={
-            "orientation": "h",
-            "yanchor": "bottom",
-            "y": 1.02,
-            "x": 0,
-            "xanchor": "left",
-            "traceorder": "normal",
-        },
-        bargap=0.25,
-        margin={"t": 40, "l": 10, "r": 10},
-        height=90 + 44 * len(labels),
+        yaxis={"title": "minutes off, on average", "range": [0, top * 1.12], "zeroline": False},
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0, "xanchor": "left"},
+        hovermode="closest",
+        margin={"t": 30, "r": 30 if label_ends and others else 10},
+        height=420,
     )
     return fig
-
-
-def told_takeaway(df: pd.DataFrame, min_n: int = 20) -> str:
-    """The chart in one sentence: the countdown at 5 minutes against the timetable."""
-    rows = _told_rows(df, min_n)
-    if rows.empty:
-        return ""
-    tt = rows[rows["basis"] == "timetable"]
-    at5 = rows[rows["ahead_min"] == 5]
-    if tt.empty or at5.empty:
-        return ""
-    c = float(at5["n_within"].iloc[0] / at5["n"].iloc[0])
-    t = float(tt["n_within"].iloc[0] / tt["n"].iloc[0])
-    return (
-        f"When the countdown says 5 minutes, the bus comes within a minute of that **{c:.0%}** "
-        f"of the time. The printed timetable is that close **{t:.0%}** of the time."
-    )
 
 
 ON_TIME_GREEN = "#0b6e4f"
 
 
-def on_time_line(fig: go.Figure, vertical: bool = False, label: str = "on time") -> None:
+def on_time_line(fig: go.Figure) -> None:
     """The 'on time' reference (0 minutes against the timetable) on a minutes axis: a solid
-    green line, labelled, drawn over the bands, the same green as the on-time line in tables."""
-    style = {"line_width": 1.5, "line_color": ON_TIME_GREEN, "layer": "above"}
-    font = {"color": ON_TIME_GREEN, "size": 12}
-    if vertical:
-        fig.add_vline(
-            x=0, annotation_text=label, annotation_position="bottom", annotation_font=font, **style
-        )
-    else:
-        fig.add_hline(
-            y=0,
-            annotation_text=label,
-            annotation_position="bottom right",
-            annotation_font=font,
-            **style,
-        )
+    green line drawn over the bands, the same green as the on-time line in tables. The axis
+    labels it (minutes_axis)."""
+    fig.add_hline(y=0, line_width=1.5, line_color=ON_TIME_GREEN, layer="above")
+
+
+def minutes_axis(values, pad: float = 0.5) -> dict:
+    """A minutes-against-the-timetable axis fitted to the values (and 0), labelled in words:
+    'on time' in green at 0, then '2 min late', '1 min early' (no signs to decode)."""
+    vals = [float(v) for v in values if v is not None and not pd.isna(v)] + [0.0]
+    lo, hi = min(vals) - pad, max(vals) + pad
+    span = hi - lo
+    step = 1 if span <= 7 else 2 if span <= 14 else 5 if span <= 35 else 10
+    ticks = list(range(math.ceil(lo / step) * step, math.floor(hi / step) * step + 1, step))
+
+    def word(t: int) -> str:
+        if t == 0:
+            return f"<span style='color:{ON_TIME_GREEN}'><b>on time</b></span>"
+        return f"{abs(t)} min {'late' if t > 0 else 'early'}"
+
+    return {
+        "range": [lo, hi],
+        "tickvals": ticks,
+        "ticktext": [word(t) for t in ticks],
+        "zeroline": False,
+        "title": "",
+    }
 
 
 def service_hour_key(h) -> int:
@@ -1650,14 +1674,18 @@ def lateness_chart(
                 name=f"Typical bus, {reference_label}",
                 mode="lines",
                 line={"color": "#888", "width": 1.5, "dash": "dash"},
-                hovertemplate="%{x}: typically %{y:+.1f} min<extra>" + reference_label + "</extra>",
+                hovertext=[
+                    f"{x_of[int(h)]}: typical bus {fmt_delay(v)}"
+                    for h, v in zip(ref["hour_local"], ref["median_delay_s"], strict=False)
+                ],
+                hoverinfo="text",
             )
         )
     days = d["n_days"] if "n_days" in d else pd.Series([None] * len(d), index=d.index)
     hover = [
         (
-            f"<b>{label}</b>, {xx}<br>typical bus {m / 60:+.1f} min"
-            f"<br>8 in 10 buses: {lo / 60:+.0f} to {hi / 60:+.0f} min"
+            f"<b>{label}</b>, {xx}<br>typical bus {fmt_delay(m)}"
+            f"<br>8 in 10 buses: {fmt_range(lo, hi)}"
             f"<br>{int(n):,} arrivals" + (f" over {int(nd)} days" if pd.notna(nd) else "")
         )
         for xx, m, lo, hi, n, nd in zip(
@@ -1681,17 +1709,12 @@ def lateness_chart(
             hoverinfo="text",
         )
     )
-    values = list(d["p10_delay_s"] / 60) + list(d["p90_delay_s"] / 60) + [0.0]
+    values = list(d["p10_delay_s"] / 60) + list(d["p90_delay_s"] / 60)
     if ref is not None and len(ref):
         values += list(ref["median_delay_s"] / 60)
     fig.update_layout(
         xaxis={"type": "category", "categoryorder": "array", "categoryarray": list(x_of.values())},
-        yaxis={
-            "title": "minutes behind the timetable",
-            "tickformat": "+d",
-            "range": [min(values) - 0.5, max(values) + 0.5],
-            "zeroline": False,
-        },
+        yaxis=minutes_axis(values),
         legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0, "xanchor": "left"},
         legend_title="",
         margin={"t": 30},
@@ -1701,13 +1724,14 @@ def lateness_chart(
 
 
 def fmt_range(p10, p90) -> str:
-    """The range 8 in 10 buses fell in, in whole minutes against the timetable: '−1 to +6 min'."""
+    """The range 8 in 10 buses fell in, in whole minutes against the timetable: '−1 to 6 min'
+    (negative = early; no plus sign, which read as 'ahead' rather than 'late')."""
     if p10 is None or p90 is None or pd.isna(p10) or pd.isna(p90):
         return ""
 
     def m(v: float) -> str:
         r = round(float(v) / 60)
-        return "0" if r == 0 else f"{r:+d}".replace("-", "−")
+        return f"{r:d}".replace("-", "−")
 
     return f"{m(p10)} to {m(p90)} min"
 
@@ -1935,20 +1959,16 @@ def range_scale(df: pd.DataFrame, lo_col: str = "p10_delay_s", hi_col: str = "p9
 
 
 def range_axis(lo: float, hi: float, width: int = 130) -> str:
-    """The minutes scale over a column of range strips, with 'on time' marked at 0 (green, as
-    the line running down through the strips)."""
-    span = hi - lo
-    step = 1 if span <= 6 else 2 if span <= 14 else 5
-    ticks = []
-    t = math.ceil(lo / step) * step
-    while t <= hi:
-        x = (t - lo) / span * 100
-        if t == 0:
-            ticks.append(f"<span class='ebw-ax0' style='left:{x:.1f}%'>on time</span>")
-        elif abs(t) >= step and 8 < x < 92:  # keep labels inside, clear of "on time"
-            ticks.append(f"<span style='left:{x:.1f}%'>{t:+d}</span>")
-        t += step
-    return f"<span class='ebw-ax' style='width:{width}px'>{''.join(ticks)}</span>"
+    """The heading over a column of range strips: just 'on time' at 0 (green, as the line
+    running down through the strips); the numbers in each row give the scale."""
+    x = (0 - lo) / (hi - lo) * 100
+    # centred on the line, unless that would push the words past the column's edge
+    shift = 0 if x < 18 else 100 if x > 82 else 50
+    return (
+        f"<span class='ebw-ax' style='width:{width}px'>"
+        f"<span class='ebw-ax0' style='left:{x:.1f}%;transform:translateX(-{shift}%)'>"
+        "on time</span></span>"
+    )
 
 
 def range_fields(p10, med, p90, lo: float, hi: float) -> dict:
@@ -2378,7 +2398,7 @@ def show_coming(coming: pd.DataFrame, empty: str) -> None:
                 "80% of the time": coming["usual_range"],
                 "Scheduled": local_times(coming["scheduled"]),
                 "Min late": [
-                    "" if v is None or pd.isna(v) else f"{float(v):+.1f}"
+                    "" if v is None or pd.isna(v) else f"{float(v):.1f}"
                     for v in late_minutes(coming["delay_s"])
                 ],
                 "Time from": coming["source"].map(
