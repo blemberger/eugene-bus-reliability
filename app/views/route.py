@@ -10,16 +10,17 @@ import plotly.graph_objects as go
 import streamlit as st
 from common import (
     LATENESS_CHART_NOTE,
+    LINE_MAIN,
+    MARKER_MAIN,
     RANGE_HELP,
     TYPICAL_HELP,
-    back_link,
+    back_button,
     card,
     clean_headsign,
     current_fv,
     data_note,
     day_label,
     day_sql,
-    fit_phone,
     fmt_date,
     fmt_delay,
     fmt_range,
@@ -39,7 +40,9 @@ from common import (
     require_db,
     require_marts,
     route_rank,
+    route_tiles,
     service_hour_key,
+    show_chart,
     stop_link,
     table,
     today_lateness,
@@ -47,10 +50,10 @@ from common import (
 )
 
 require_db()
-back_link("views/routes.py", "← All routes")
-title_slot = st.empty()  # filled in once the route is known (below the pickers)
+back_button("← All routes", page="views/routes.py")
+title_slot = st.empty()  # filled in once the route is known
 require_marts()
-# the route buttons, its numbers and the hour-by-hour chart first, then the period and days
+# the route's numbers and the hour-by-hour chart first, then the period and days
 # filters (which everything on the page follows), then the rest (drawn in that order, though
 # the filters are read first)
 top = st.container()
@@ -91,40 +94,18 @@ with top:
             strict=False,
         )
     )
-    if st.session_state.get("route_id") not in ids:
-        wanted = st.query_params.get("route")
-        st.session_state["route_id"] = wanted if wanted in ids else ids[0]
-    for k in ("route_chips", "route_select"):
-        if st.session_state.get(k) not in ids:
-            st.session_state[k] = st.session_state["route_id"]
-
-    def _sync(source: str) -> None:
-        rid = st.session_state[source]
-        st.session_state["route_id"] = rid
-        st.session_state["route_chips"] = rid
-        st.session_state["route_select"] = rid
-
-    st.pills(
-        "Route",
-        ids,
-        format_func=lambda r: short[r],
-        key="route_chips",
-        required=True,
-        on_change=_sync,
-        args=("route_chips",),
-    )
-    st.selectbox(
-        "Or find it by name",
-        ids,
-        format_func=lambda r: full[r],
-        key="route_select",
-        on_change=_sync,
-        args=("route_select",),
-    )
-    route_id = st.session_state["route_id"]
-    st.query_params["route"] = route_id
+    # the route comes from the page address (?route=...): every link to a route's report card
+    # carries it
+    route_id = st.query_params.get("route")
+    if route_id not in ids:
+        route_id = ids[0]
+        st.query_params["route"] = route_id
     route_name = short[route_id]
-    title_slot.title(f"Route {full[route_id]}")
+    long_name = full[route_id].split(" — ", 1)[1] if " — " in full[route_id] else ""
+    st.set_page_config(page_title=f"Route {full[route_id]}: how reliable? · Eugene Bus Watch")
+    title_slot.title(
+        f"How reliable is route {route_name}" + (f" ({long_name})" if long_name else "") + "?"
+    )
     me = rank[rank["route_id"].astype(str) == route_id].iloc[0]
     today = today_lateness(route_id=route_id)
     n_today = int(today["n"].iloc[0]) if len(today) else 0
@@ -217,7 +198,7 @@ with top:
         if fig is None:
             st.caption("Not enough arrivals yet for an hour-by-hour view (needs 5 in an hour).")
         else:
-            st.plotly_chart(fit_phone(fig), width="stretch")
+            show_chart(fig)
 
 with card():
     st.subheader(
@@ -275,7 +256,8 @@ with card():
                 y=along["median_delay"],
                 mode="lines+markers",
                 name="Typical bus",
-                line={"color": "#1f5f9e", "width": 2.5},
+                line={"color": "#1f5f9e", "width": LINE_MAIN},
+                marker={"size": MARKER_MAIN},
                 hovertext=[
                     f"{name}<br>typical bus {fmt_delay(m)}<br>8 in 10 buses: "
                     f"{fmt_range(lo_, hi_)}<br>{int(n):,} arrivals"
@@ -304,7 +286,7 @@ with card():
             legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0, "xanchor": "left"},
             margin={"l": 10, "r": 10, "t": 30, "b": 10},
         )
-        st.plotly_chart(fit_phone(fig), width="stretch")
+        show_chart(fig)
 
         # every stop on the route, sortable: by order along the route, typical bus or range
         lo, hi = range_scale(along, "p10_s", "p90_s")
@@ -475,6 +457,11 @@ with card():
             width="content",
         )
         st.caption(f"{day_label(wt).capitalize()} since {fmt_date(start)}, every stop.")
+
+# ---- the other routes --------------------------------------------------------------------
+with card():
+    st.subheader("Other routes' report cards")
+    route_tiles(rank_sorted[rank_sorted["route_id"].astype(str) != route_id])
 
 st.divider()
 data_note(start)

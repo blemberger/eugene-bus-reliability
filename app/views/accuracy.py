@@ -17,7 +17,6 @@ from common import (
     countdown_off,
     countdown_off_chart,
     current_fv,
-    fit_phone,
     fmt_date,
     fmt_minutes,
     hour_label,
@@ -30,6 +29,7 @@ from common import (
     route_picker,
     search_stops,
     service_hour_key,
+    show_chart,
     stop_buttons,
     table,
 )
@@ -74,7 +74,7 @@ with card():
     if fig0 is None:
         st.caption("Not enough measured arrivals yet for this route.")
     else:
-        st.plotly_chart(fit_phone(fig0), width="stretch")
+        show_chart(fig0)
         st.caption(PREDICTION_OFF_CAPTION)
 
 
@@ -160,7 +160,7 @@ with card():
                 "traceorder": "normal",
             },
         )
-        st.plotly_chart(fit_phone(fig3), width="stretch")
+        show_chart(fig3)
 
 
 # ---- by route: average minutes off at 5 and 10 minutes away, and the timetable -------------
@@ -345,7 +345,7 @@ with card():
                 legend_title="",
                 height=420,
             )
-            st.plotly_chart(fit_phone(fig4), width="stretch")
+            show_chart(fig4)
             latest = hist.sort_values("first_seen_at").groupby("Bus", as_index=False).last()
             table(
                 pd.DataFrame(

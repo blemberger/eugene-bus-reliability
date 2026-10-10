@@ -12,12 +12,17 @@ import streamlit as st
 from common import (
     JUST_LEFT_MINUTES,
     LATENESS_CHART_NOTE,
+    LINE_MAIN,
+    LINE_ROUTE,
     LIVE_CHECK_SECONDS,
+    MARKER_MAIN,
+    MARKER_REF,
     PREDICTION_OFF_CAPTION,
     PREDICTION_OFF_NOTE,
     RANGE_HELP,
     STOP_ROWS_PER_ROUTE,
     TYPICAL_HELP,
+    back_button,
     busy_stops,
     card,
     clean_headsigns,
@@ -29,7 +34,6 @@ from common import (
     data_note,
     day_label,
     day_sql,
-    fit_phone,
     fmt_date,
     fmt_delay,
     fmt_range,
@@ -54,11 +58,12 @@ from common import (
     route_link,
     search_stops,
     service_hour_key,
+    show_chart,
     show_coming,
     show_left,
     stop_buses,
-    stop_buttons,
     stop_link,
+    stop_tiles,
     table,
     today_lateness,
 )
@@ -98,7 +103,7 @@ def all_stops_summary(start, wt) -> None:
         )
         fig = lateness_chart(lateness(start, wt, "hour"), "all stops")
         if fig is not None:
-            st.plotly_chart(fit_phone(fig), width="stretch")
+            show_chart(fig)
         t = tot.iloc[0]
         c1, c2 = st.columns(2)
         c1.metric(
@@ -225,26 +230,16 @@ def every_stop(start, wt, table_slot) -> None:
         )
         objs = (picked_map.selection.objects or {}).get("stops") if picked_map is not None else None
         clicked = objs[0]["stop_id"] if objs else None
+        # only a new click counts (the map keeps its last selection when it is drawn again)
         if clicked and clicked != st.session_state.get("stop_overview_last"):
             st.session_state["stop_overview_last"] = clicked
-            st.session_state["stop_id"] = clicked
+            st.query_params["stop"] = clicked
             st.rerun()
 
 
-def stop_button_grid(df: pd.DataFrame, key_prefix: str, show_code: bool = False) -> None:
-    clicked = stop_buttons(df, key_prefix, show_code=show_code)
-    if clicked:
-        st.session_state["stop_id"] = clicked
-        st.session_state["_clear_stop_search"] = True
-        st.rerun()  # redraw for the chosen stop
-
-
-def stop_finder(with_map: bool) -> None:
-    """Search by name or sign number (matches appear as buttons), the busiest stops as buttons
-    until something is typed, and (once a stop is chosen, inside "Choose a different stop") a
-    map to click a stop on; before a stop is chosen the coloured map further down does that."""
-    if st.session_state.pop("_clear_stop_search", False):
-        st.session_state["stop_search"] = ""
+def stop_finder() -> None:
+    """Search by name or sign number (matches appear as cards that open the stop), and the
+    busiest stops as cards until something is typed."""
     example = q(f"""
         select stop_code, stop_name from gtfs.stops
         where feed_version_id = {FV} and location_type = 0 and stop_code is not null
@@ -268,64 +263,22 @@ def stop_finder(with_map: bool) -> None:
         if matches.empty:
             st.warning("No stop matches that. Try part of a street name.")
         else:
-            stop_button_grid(matches, "stop", show_code=True)
+            stop_tiles(matches)
     else:
-        stop_button_grid(busy_stops(9), "busy")
-    if not with_map:
-        return
-    pts = q(f"""
-        select stop_id, stop_code, stop_name, stop_lat as lat, stop_lon as lon from gtfs.stops
-        where feed_version_id = {FV} and location_type = 0
-    """)
-    pts["code"] = pts["stop_code"].map(lambda c: f"#{c}" if c else "")
-    picked_map = st.pydeck_chart(
-        pdk.Deck(
-            layers=[
-                pdk.Layer(
-                    "ScatterplotLayer",
-                    id="stops",
-                    data=pts,
-                    get_position="[lon, lat]",
-                    get_fill_color=[11, 110, 79, 200],
-                    get_line_color=[255, 255, 255],
-                    stroked=True,
-                    line_width_min_pixels=1,
-                    get_radius=12,
-                    radius_min_pixels=4,
-                    radius_max_pixels=9,
-                    pickable=True,
-                )
-            ],
-            initial_view_state=pdk.ViewState(latitude=44.05, longitude=-123.09, zoom=12),
-            map_style=None,
-            tooltip={"html": "<b>{stop_name}</b> {code}<br/>click to open this stop"},
-        ),
-        height=420,
-        on_select="rerun",
-        selection_mode="single-object",
-        key="stop_pick_map",
-    )
-    objs = (picked_map.selection.objects or {}).get("stops") if picked_map is not None else None
-    clicked = objs[0]["stop_id"] if objs else None
-    # only a new click counts, so it doesn't override later picks made another way
-    if clicked and clicked != st.session_state.get("stop_pick_map_last"):
-        st.session_state["stop_pick_map_last"] = clicked
-        st.session_state["stop_id"] = clicked
-        st.rerun()
+        st.caption("Busy stops:")
+        stop_tiles(busy_stops(9))
 
 
-# a stop arriving in the link opens straight away
-if "stop" in st.query_params and not st.session_state.get("stop_id"):
-    st.session_state["stop_id"] = st.query_params["stop"]
-
-stop_id = st.session_state.get("stop_id")
+# The stop comes from the page address only (?stop=...), so the Stops tab, the "All stops"
+# button and the browser's back button always lead to the list of every stop.
+stop_id = st.query_params.get("stop")
 if not stop_id:
     # no stop yet: find one, every stop in a table, the filters, every stop on a map, all stops
     # together
     title_slot.title("How reliable is my stop?")
     with card():
         st.subheader("Find your stop")
-        stop_finder(with_map=False)
+        stop_finder()
     every_slot = st.container()
     start, wt = page_filters()
     every_stop(start, wt, every_slot)
@@ -333,25 +286,32 @@ if not stop_id:
     st.divider()
     data_note(start)
     st.stop()
-st.query_params["stop"] = stop_id
+found = q(
+    f"select stop_id, stop_code, stop_name, stop_lat, stop_lon from gtfs.stops where stop_id = %s and feed_version_id = {FV}",
+    (stop_id,),
+)
 
 
 def _all_stops() -> None:
-    """Back to the Stops page without a stop: every stop, the search and the map."""
-    st.session_state.pop("stop_id", None)
+    """Back to the list of every stop."""
     st.query_params.pop("stop", None)
 
 
 with title_slot:
-    with st.container(key="backlink_stops"):  # styled like common.back_link
-        st.button("← All stops", type="tertiary", on_click=_all_stops)
-    st.title("How reliable is my stop?")
-stop = q(
-    f"select stop_id, stop_code, stop_name, stop_lat, stop_lon from gtfs.stops where stop_id = %s and feed_version_id = {FV}",
-    (stop_id,),
-).iloc[0]
-st.subheader(f"{stop['stop_name']}" + (f"  ·  #{stop['stop_code']}" if stop["stop_code"] else ""))
-st.page_link("views/map.py", label="What's coming to this stop right now →")
+    back_button("← All stops", on_click=_all_stops)
+    if found.empty:
+        st.title("How reliable is my stop?")
+        st.warning("That stop isn't in the current timetable.")
+        st.stop()
+stop = found.iloc[0]
+code = f" (#{stop['stop_code']})" if stop["stop_code"] else ""
+st.set_page_config(page_title=f"{stop['stop_name']}{code}: how reliable? · Eugene Bus Watch")
+with title_slot:
+    st.title(f"How reliable is the stop at {stop['stop_name']}{code}?")
+    st.markdown(
+        "[Where is it? Open in Google Maps ↗](https://www.google.com/maps/search/?api=1&query="
+        f"{float(stop['stop_lat']):.6f},{float(stop['stop_lon']):.6f})"
+    )
 
 
 # ---- right now at this stop ------------------------------------------------------------
@@ -620,11 +580,12 @@ with hour_slot, card():
                     mode="lines+markers",
                     line={
                         "color": color,
-                        "width": 2.5,
+                        "width": LINE_MAIN if one else LINE_ROUTE,
                         "dash": "dot"
                         if d["route"].iloc[0] in both_ways and d["direction_id"].iloc[0] == 1
                         else "solid",
                     },
+                    marker={"size": MARKER_MAIN if one else MARKER_REF},
                     hovertext=hover,
                     hoverinfo="text",
                 )
@@ -643,7 +604,7 @@ with hour_slot, card():
             showlegend=not one,
             margin={"t": 30},
         )
-        st.plotly_chart(fit_phone(fig), width="stretch")
+        show_chart(fig)
 
 
 # ---- how far off LTD's predictions are here ------------------------------------------------
@@ -663,7 +624,7 @@ with card():
     if fig is None:
         st.caption("Not enough measured arrivals with a prediction here yet for this period.")
     else:
-        st.plotly_chart(fit_phone(fig), width="stretch")
+        show_chart(fig)
         st.caption(PREDICTION_OFF_CAPTION)
 
 # ---- arrive-by guidance ---------------------------------------------------
@@ -924,7 +885,8 @@ with card():
                 y=trend["median_delay"] / 60,
                 mode="lines+markers",
                 name="Typical bus",
-                line={"color": "#1f5f9e", "width": 2.5},
+                line={"color": "#1f5f9e", "width": LINE_MAIN},
+                marker={"size": MARKER_MAIN},
                 hovertext=[
                     f"{when(d)}: typical bus {fmt_delay(m)} · {int(n):,} arrivals"
                     for d, m, n in zip(trend["d"], trend["median_delay"], trend["n"], strict=False)
@@ -939,21 +901,10 @@ with card():
             margin={"t": 20},
             height=320,
         )
-        st.plotly_chart(fit_phone(fig), width="stretch")
+        show_chart(fig)
     else:
         st.caption("A trend needs at least two days with 5 or more arrivals here.")
 
-
-# ---- another stop ------------------------------------------------------------------------
-with st.expander("Choose a different stop"):
-    stop_finder(with_map=True)
-with st.expander("Where is this stop?", expanded=False):
-    st.map(
-        pd.DataFrame({"lat": [float(stop["stop_lat"])], "lon": [float(stop["stop_lon"])]}),
-        zoom=15,
-        size=25,
-        height=260,
-    )
 
 st.divider()
 data_note(start)

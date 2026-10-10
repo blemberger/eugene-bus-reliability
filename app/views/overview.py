@@ -12,7 +12,6 @@ from common import (
     current_fv,
     data_note,
     day_label,
-    fit_phone,
     fmt_date,
     fmt_delay,
     fmt_range,
@@ -29,6 +28,7 @@ from common import (
     route_table,
     routes_by_service,
     selection_lateness,
+    show_chart,
     today_lateness,
 )
 
@@ -102,7 +102,7 @@ with card():
             if fig is None:
                 st.caption("Not enough arrivals yet for an hour-by-hour view (needs 5 in an hour).")
             else:
-                st.plotly_chart(fit_phone(fig), width="stretch")
+                show_chart(fig)
         today = today_lateness(route_id=route_id, stop_id=stop_id)
         n_today = int(today["n"].iloc[0]) if len(today) else 0
         m1, m2, m3 = st.columns(3)
@@ -142,6 +142,10 @@ n_now = q("""
 st.page_link(
     "views/map.py",
     label=f"{int(n_now or 0)} buses on the road right now: see them on the live map →",
+)
+st.page_link(
+    "views/accuracy.py",
+    label="How far off are LTD's real-time arrival predictions? →",
 )
 st.divider()
 data_note(start)

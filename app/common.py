@@ -5,7 +5,9 @@ from __future__ import annotations
 import inspect
 import math
 import os
+import queue
 import re
+import threading
 import time
 import uuid
 from datetime import date, datetime, timedelta
@@ -217,14 +219,44 @@ def _query_label(sql: str) -> str:
     return " ".join(sql.split())[:110]
 
 
+# Open database connections kept for reuse: a new connection costs a login (password hashing
+# and a server process) every time, and a page runs a dozen or more queries.
+_POOL: queue.LifoQueue = queue.LifoQueue(maxsize=6)
+
+
+def _connection() -> psycopg.Connection:
+    while True:
+        try:
+            conn = _POOL.get_nowait()
+        except queue.Empty:
+            return psycopg.connect(DATABASE_URL, connect_timeout=5)
+        if not conn.closed and conn.info.transaction_status == psycopg.pq.TransactionStatus.IDLE:
+            return conn
+        conn.close()
+
+
+def _release(conn: psycopg.Connection) -> None:
+    try:
+        _POOL.put_nowait(conn)
+    except queue.Full:
+        conn.close()
+
+
 def _run(sql: str, params: tuple = ()) -> pd.DataFrame:
     """Run one read-only query and return a DataFrame (no caching)."""
     t0 = time.monotonic()
-    with psycopg.connect(DATABASE_URL) as conn, conn.transaction(), conn.cursor() as cur:
-        cur.execute("SET TRANSACTION READ ONLY")
-        cur.execute(sql, params)
-        cols = [d.name for d in cur.description]
-        df = readable_stop_names(pd.DataFrame(cur.fetchall(), columns=cols))
+    conn = _connection()
+    try:
+        with conn.transaction(), conn.cursor() as cur:
+            cur.execute("SET TRANSACTION READ ONLY")
+            cur.execute(sql, params)
+            cols = [d.name for d in cur.description]
+            rows = cur.fetchall()
+    except BaseException:
+        conn.close()  # a failed or interrupted connection is not reused
+        raise
+    _release(conn)
+    df = readable_stop_names(pd.DataFrame(rows, columns=cols))
     seconds = time.monotonic() - t0
     QUERY_LOG.append((seconds, _query_label(sql)))
     del QUERY_LOG[:-500]
@@ -257,12 +289,68 @@ def _q_built(sql: str, params: tuple, marker: str) -> pd.DataFrame:
     return _run(sql, params)
 
 
+# The analysis queries visitors have run recently (query and parameters -> when last used), so
+# warm_caches() can run them again as soon as a new analysis build lands: the next visitor then
+# finds them ready instead of waiting for the database.
+_RECENT_QUERIES: dict[tuple[str, tuple], float] = {}
+WARM_WITHIN_HOURS = 24
+WARM_MAX_QUERIES = 400
+
+
 def q(sql: str, params: tuple = ()) -> pd.DataFrame:
     """Run a read-only query and return a DataFrame. Queries on the raw realtime tables (rt.*)
     are cached for 60 s; everything else until the next analysis build (at most an hour)."""
     if _RAW_TABLES.search(sql):
         return _q_raw(sql, params)
+    try:
+        _RECENT_QUERIES[(sql, params)] = time.time()
+    except TypeError:  # parameters that can't be a key (a list): not warmed
+        pass
     return _q_built(sql, params, build_marker())
+
+
+def warm_caches() -> None:
+    """Forever, in a background thread: when a new analysis build finishes, re-run the queries
+    visitors used in the last day (most recent first) so their results are cached before anyone
+    asks. Started once per server by streamlit_app.py."""
+    warmed = None
+    while True:
+        time.sleep(20)
+        try:
+            marker = build_marker()
+            if marker == warmed or not marker:
+                continue
+            cutoff = time.time() - WARM_WITHIN_HOURS * 3600
+            for key, used in list(_RECENT_QUERIES.items()):
+                if used < cutoff:
+                    _RECENT_QUERIES.pop(key, None)
+            recent = sorted(_RECENT_QUERIES.items(), key=lambda kv: -kv[1])[:WARM_MAX_QUERIES]
+            t0 = time.monotonic()
+            for (sql, params), _ in recent:
+                if build_marker() != marker:  # a newer build landed meanwhile: start over
+                    break
+                try:
+                    _q_built(sql, params, marker)
+                except Exception:  # noqa: BLE001 — one failing query must not stop the rest
+                    pass
+                time.sleep(0.05)  # leave the database room for visitors
+            else:
+                warmed = marker
+                if recent:
+                    print(
+                        f"cache warmer: {len(recent)} queries ready for the build of {marker} "
+                        f"in {time.monotonic() - t0:.0f} s",
+                        flush=True,
+                    )
+        except Exception:  # noqa: BLE001 — keep warming on the next build
+            pass
+
+
+@st.cache_resource
+def start_cache_warmer() -> threading.Thread:
+    t = threading.Thread(target=warm_caches, name="cache-warmer", daemon=True)
+    t.start()
+    return t
 
 
 @st.cache_data(ttl=10, show_spinner=False)
@@ -388,32 +476,78 @@ def route_link(route_id, name) -> str | None:
     return f"/route?route={quote(str(route_id))}#{'' if name is None or pd.isna(name) else name}"
 
 
-def back_link(page: str, label: str) -> None:
-    """The way back from a report card to the list it came from, above the page title: larger
-    than a plain link (styled by its st-key-backlink container in streamlit_app.py)."""
-    with st.container(key=f"backlink_{re.sub(r'[^a-z]', '', label.lower())}"):
-        st.page_link(page, label=label)
+# Links that open another page (a route's or a stop's report card) look like cards with an
+# arrow, never like the rounded buttons that change what the current page shows.
+_TILE_CSS = (
+    "<style>.ebw-tiles { display: grid; gap: 0.5rem;"
+    " grid-template-columns: repeat(auto-fill, minmax(var(--tile-w, 10.5rem), 1fr)); }"
+    ".ebw-tile { display: flex; align-items: center; gap: 0.6rem; padding: 0.55rem 0.75rem;"
+    " border: 1px solid #c9d2cd; border-left: 4px solid #0b6e4f; border-radius: 6px;"
+    " background: #fff; color: #262730; text-decoration: none; line-height: 1.25; }"
+    ".ebw-tile:hover { background: #eef6f2; border-color: #0b6e4f; }"
+    ".ebw-tile b { font-size: 1.05rem; }"
+    ".ebw-tile small { display: block; color: #666; font-size: 0.85rem; }"
+    ".ebw-tile .ebw-go { margin-left: auto; color: #0b6e4f; font-weight: 700; font-size: 1.1rem; }"
+    "</style>"
+)
 
 
-def route_chips(routes: pd.DataFrame) -> None:
-    """A button for every route (route_id, route_short_name), each opening that route's report
-    card with the page's filters."""
+def nav_tiles(items: list[tuple[str, str, str]], min_width: str = "10.5rem") -> None:
+    """Cards that each open another page: (href, title, subtitle). The page's period and days
+    filters go along."""
     qs = filter_query()
-    links = "".join(
-        f"<a class='ebw-chip' target='_self' href='/route?route={quote(str(r.route_id))}"
-        + (f"&{qs}" if qs else "")
-        + f"'>{html_escape(str(r.route_short_name))}</a>"
-        for r in routes.itertuples()
+    tiles = "".join(
+        f"<a class='ebw-tile' target='_self' href='{html_escape(href + (('&' if '?' in href else '?') + qs if qs else ''))}'>"
+        f"<span><b>{html_escape(title)}</b>"
+        + (f"<small>{html_escape(sub)}</small>" if sub else "")
+        + "</span><span class='ebw-go'>→</span></a>"
+        for href, title, sub in items
     )
-    st.html(
-        "<style>.ebw-chips { display: flex; flex-wrap: wrap; gap: 0.45rem; }"
-        ".ebw-chip { display: inline-block; min-width: 2.9rem; padding: 0.4rem 0.8rem;"
-        " border: 1px solid #c9d2cd; border-radius: 1.2rem; background: #fff; color: #262730;"
-        " text-align: center; text-decoration: none; font-size: 1.02rem; font-weight: 600; }"
-        ".ebw-chip:hover { border-color: #0b6e4f; color: #0b6e4f; background: #eef6f2; }"
-        "</style>"
-        f"<div class='ebw-chips'>{links}</div>"
+    st.html(f"{_TILE_CSS}<div class='ebw-tiles' style='--tile-w:{min_width}'>{tiles}</div>")
+
+
+def route_tiles(routes: pd.DataFrame) -> None:
+    """A card per route (route_id, route_short_name, and route_long_name if known), each
+    opening that route's report card."""
+    names = routes["route_long_name"] if "route_long_name" in routes else [""] * len(routes)
+    nav_tiles(
+        [
+            (
+                f"/route?route={quote(str(rid))}",
+                f"Route {short}",
+                "" if not isinstance(long, str) or long == str(short) else long,
+            )
+            for rid, short, long in zip(
+                routes["route_id"], routes["route_short_name"], names, strict=False
+            )
+        ]
     )
+
+
+def stop_tiles(stops: pd.DataFrame, show_code: bool = True) -> None:
+    """A card per stop (stop_id, stop_name, stop_code), each opening that stop's report card."""
+    nav_tiles(
+        [
+            (
+                f"/stops?stop={quote(str(r.stop_id))}",
+                str(r.stop_name),
+                f"Stop #{r.stop_code}" if show_code and r.stop_code else "",
+            )
+            for r in stops.itertuples()
+        ],
+        min_width="15rem",
+    )
+
+
+def back_button(label: str, page: str | None = None, on_click=None) -> None:
+    """The way back from a report card to the list of every route or stop: an outlined button
+    above the title (styled by its st-key-backlink container in streamlit_app.py). A page link
+    when the list is another page, a button (with on_click) when it is the same page."""
+    with st.container(key=f"backlink_{re.sub(r'[^a-z]', '', label.lower())}"):
+        if page:
+            st.page_link(page, label=label)
+        else:
+            st.button(label, on_click=on_click)
 
 
 def col_route(label: str = "Route"):
@@ -670,17 +804,22 @@ def log_page_view(page: str) -> None:
         if BOT_AGENTS.search(ua)
         else ("phone" if "Mobi" in ua or "Android" in ua else "computer")
     )
-    try:
-        with psycopg.connect(DATABASE_URL, connect_timeout=3) as conn:
-            conn.read_only = (
-                False  # the site's login is read-only by default; this table takes inserts
-            )
-            conn.execute(
-                "insert into site.page_view (session_id, page, detail, device) values (%s, %s, %s, %s)",
-                (session_id, page, detail, device),
-            )
-    except Exception:  # noqa: BLE001 — a missing table or a busy database must not break the page
-        pass
+
+    def insert() -> None:
+        try:
+            with psycopg.connect(DATABASE_URL, connect_timeout=3) as conn:
+                # the site's login is read-only by default; this table takes inserts
+                conn.read_only = False
+                conn.execute(
+                    "insert into site.page_view (session_id, page, detail, device) "
+                    "values (%s, %s, %s, %s)",
+                    (session_id, page, detail, device),
+                )
+        except Exception:  # noqa: BLE001 — a missing table or a busy database is ignored
+            pass
+
+    # in the background: the visitor's page doesn't wait for the count
+    threading.Thread(target=insert, daemon=True).start()
 
 
 def fit_phone(fig):
@@ -1536,7 +1675,10 @@ def countdown_off_chart(
                 mode="lines+markers" if focus is not None else "lines",
                 name=route_name(r),
                 legendrank=100 + routes.index(r),
-                line={"color": colors.get(r, "#777777"), "width": 3 if focus is not None else 1.6},
+                line={
+                    "color": colors.get(r, "#777777"),
+                    "width": LINE_MAIN if focus is not None else LINE_ROUTE,
+                },
                 hovertext=hover(route_name(r), r, g),
                 hoverinfo="text",
             )
@@ -1550,7 +1692,7 @@ def countdown_off_chart(
                 mode="lines",
                 name="Printed timetable" + (f", {route_name(key).lower()}" if focus else ""),
                 legendrank=2,
-                line={"color": TIMETABLE_COLOUR, "width": 2.5, "dash": "dash"},
+                line={"color": TIMETABLE_COLOUR, "width": LINE_REF + 0.5, "dash": "dash"},
                 hovertemplate=f"<b>Printed timetable</b><br>{t:.1f} min off on average, for "
                 "the same bus arrivals<extra></extra>",
             )
@@ -1563,8 +1705,8 @@ def countdown_off_chart(
             mode="lines+markers",
             name=average_label if focus is None else "Average, all routes",
             legendrank=1,
-            line={"color": AVERAGE_COLOUR, "width": 4 if focus is None else 2},
-            marker={"size": 7 if focus is None else 5},
+            line={"color": AVERAGE_COLOUR, "width": LINE_MAIN + 1 if focus is None else LINE_REF},
+            marker={"size": MARKER_MAIN if focus is None else MARKER_REF},
             hovertext=hover(average_label if focus is None else "Average, all routes", "", avg),
             hoverinfo="text",
         )
@@ -1588,12 +1730,66 @@ def countdown_off_chart(
 
 ON_TIME_GREEN = "#0b6e4f"
 
+# One look for every chart on the site: line weights, the grey of comparison lines, and (in
+# show_chart) the text sizes and behaviour.
+LINE_MAIN = 3.5  # the line a chart is about
+MARKER_MAIN = 8
+LINE_ROUTE = 2.5  # one of several lines of equal standing (a line per route)
+LINE_REF = 2.5  # a comparison line (all routes together, the timetable)
+MARKER_REF = 6
+REF_GREY = "#9aa0a6"
+
+
+CHART_TEXT = "#31333f"  # Streamlit's text colour, so charts read as part of the page
+CHART_GRID = "#e4e8ea"
+
+
+def show_chart(fig: go.Figure) -> None:
+    """Draw a Plotly chart the way every chart on the site is drawn: the page's font at a
+    readable size, light grid lines, the legend above the plot on a phone, no toolbar, and no
+    zooming or panning by accident (dragging a finger over a chart on a phone should scroll the
+    page); hovering still shows the numbers. Margins a chart sets itself are kept."""
+    margin = {
+        side: default
+        for side, default in (("l", 10), ("r", 10), ("t", 30), ("b", 10))
+        if getattr(fig.layout.margin, side) is None
+    }
+    fig.update_layout(
+        template="plotly_white",
+        font={
+            "family": '"Source Sans", "Source Sans Pro", sans-serif',
+            "size": 15,
+            "color": CHART_TEXT,
+        },
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        hoverlabel={"font": {"size": 15}},
+        legend={"font": {"size": 15}},
+        margin=margin,
+        dragmode=False,
+    )
+    axis = {
+        "tickfont": {"size": 14},
+        "title_font": {"size": 15},
+        "gridcolor": CHART_GRID,
+        "automargin": True,
+        "fixedrange": True,
+    }
+    fig.update_xaxes(**axis, showgrid=False)
+    fig.update_yaxes(**axis)
+    st.plotly_chart(
+        fit_phone(fig),
+        width="stretch",
+        theme=None,
+        config={"displayModeBar": False, "scrollZoom": False},
+    )
+
 
 def on_time_line(fig: go.Figure) -> None:
     """The 'on time' reference (0 minutes against the timetable) on a minutes axis: a solid
     green line drawn over the bands, the same green as the on-time line in tables. The axis
     labels it (minutes_axis)."""
-    fig.add_hline(y=0, line_width=1.5, line_color=ON_TIME_GREEN, layer="above")
+    fig.add_hline(y=0, line_width=2, line_color=ON_TIME_GREEN, layer="above")
 
 
 def minutes_axis(values, pad: float = 0.5) -> dict:
@@ -1677,10 +1873,11 @@ def lateness_chart(
                 x=[x_of[int(h)] for h in ref["hour_local"]],
                 y=ref["median_delay_s"] / 60,
                 name=f"Typical bus, {reference_label}",
-                mode="lines",
-                line={"color": "#888", "width": 1.5, "dash": "dash"},
+                mode="lines+markers",
+                line={"color": REF_GREY, "width": LINE_REF},
+                marker={"size": MARKER_REF},
                 hovertext=[
-                    f"{x_of[int(h)]}: typical bus {fmt_delay(v)}"
+                    f"<b>{reference_label.capitalize()}</b>, {x_of[int(h)]}<br>typical bus {fmt_delay(v)}"
                     for h, v in zip(ref["hour_local"], ref["median_delay_s"], strict=False)
                 ],
                 hoverinfo="text",
@@ -1709,7 +1906,8 @@ def lateness_chart(
             y=d["median_delay_s"] / 60,
             name=f"Typical bus, {label}",
             mode="lines+markers",
-            line={"color": color, "width": 2.5},
+            line={"color": color, "width": LINE_MAIN},
+            marker={"size": MARKER_MAIN},
             hovertext=hover,
             hoverinfo="text",
         )
@@ -1771,6 +1969,7 @@ a.ebw-r:hover { background: #eef6f2; }
 .ebw-so::after { content: ' ↕'; color: #b5b5b5; }
 .ebw-sr { display: none; }
 .ebw-n { text-align: right; font-variant-numeric: tabular-nums; }
+.ebw-go { color: #0b6e4f; font-weight: 700; text-align: right; }
 .ebw-k { font-weight: 700; }
 .ebw-s { color: #666; font-size: 14px; }
 .ebw-g { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
@@ -1850,13 +2049,16 @@ def link_table(
     the first click; numbers default to latest/largest first).
     key: unique per page, so two tables' sort buttons don't interfere. Links carry the page's
     period and days filters along, so the next page opens with the same choice."""
-    tracks = " ".join(c["width"] for c in columns)
+    # rows that open another page end in a green arrow, like the site's other links to a page
+    linked = any(r.get("href") for r in rows)
+    go_col = "1.1em " if linked else ""
+    tracks = " ".join(c["width"] for c in columns) + (" " + go_col if linked else "")
     # on a phone the hidden columns get no track; flexible columns may shrink to their content
     phone = " ".join(
         c.get("phone_width", re.sub(r"minmax\([^,]+,", "minmax(min-content,", c["width"]))
         for c in columns
         if not c.get("hide_on_phone")
-    )
+    ) + (" " + go_col if linked else "")
     tid = "ebw-" + re.sub(r"[^a-z0-9]", "", key.lower())
     qs = filter_query()
 
@@ -1930,6 +2132,8 @@ def link_table(
             style.append(f"--a{j}:{rank[i]};--d{j}:{n - 1 - rank[i]}")
         tip = f" title='{html_escape(r['hover'])}'" if r.get("hover") else ""
         body = "".join(cell(c, r.get(c["key"])) for c in columns)
+        if linked:
+            body += "<div class='ebw-go'>→</div>" if r.get("href") else "<div></div>"
         if r.get("href"):
             href = r["href"] + (("&" if "?" in r["href"] else "?") + qs if qs else "")
             return (
@@ -1948,6 +2152,7 @@ def link_table(
         + f"--cols-phone:{phone}'>"
         + "<div class='ebw-r ebw-h'>"
         + "".join(head)
+        + ("<div></div>" if linked else "")
         + "</div>"
         + "".join(row(i, r) for i, r in enumerate(rows))
         + "</div>"

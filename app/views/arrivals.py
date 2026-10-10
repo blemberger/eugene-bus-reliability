@@ -40,6 +40,7 @@ from common import (
     route_picker,
     schedule_join,
     share_pct,
+    show_chart,
     stop_link,
     table,
 )
@@ -257,7 +258,7 @@ def flow_chart(
             },
         ],
     )
-    st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+    show_chart(fig)
     st.caption(
         "Each badge is one bus at one stop, labelled with its route number, as of the time of LTD's data "
         "above. Right of the line: due at a stop in that minute. Left: left a stop in that minute (faded). "
@@ -345,7 +346,7 @@ def route_chart(upcoming: pd.DataFrame, left: pd.DataFrame, now: pd.Timestamp) -
         legend_title="",
         margin={"l": 0, "r": 0, "t": 10, "b": 0},
     )
-    st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+    show_chart(fig)
     st.caption(
         "Each point is one bus at one stop: stops in route order down the side, time across. Solid points are "
         "LTD's predicted times still to come; faded points are stops just left. Color = minutes late "

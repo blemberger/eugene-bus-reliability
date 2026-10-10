@@ -14,13 +14,13 @@ from common import (
     col_date,
     col_minutes,
     collection_start,
-    fit_phone,
     fmt_date,
     fmt_pct,
     local_today,
     marts_ready,
     q,
     require_db,
+    show_chart,
     table,
 )
 
@@ -97,32 +97,35 @@ with card():
             cov["Date"] = cov["service_date"].map(fmt_date)
             for c in ("trips_due", "trips_reported", "mid_stops_due", "mid_stops_timed"):
                 cov[c] = pd.to_numeric(cov[c]).fillna(0)
-            cov["Trips LTD reported"] = cov["trips_reported"] / cov["trips_due"].where(
-                cov["trips_due"] > 0
-            )
-            cov["Stops we timed on them"] = cov["mid_stops_timed"] / cov["mid_stops_due"].where(
-                cov["mid_stops_due"] > 0
-            )
+            cov["Scheduled trips in LTD's live feed"] = cov["trips_reported"] / cov[
+                "trips_due"
+            ].where(cov["trips_due"] > 0)
+            cov["Stops we timed on those trips"] = cov["mid_stops_timed"] / cov[
+                "mid_stops_due"
+            ].where(cov["mid_stops_due"] > 0)
             # today is still in progress: its measures move all day, so charts and the 7-day
             # numbers use finished days only
             done = cov[pd.to_datetime(cov["service_date"]).dt.date < local_today()]
             week = done.tail(7)
             c1, c2, c3 = st.columns(3)
             c1.metric(
-                "Trips LTD reported, last 7 days",
+                "Scheduled trips in LTD's live feed, last 7 days",
                 fmt_pct(int(week["trips_reported"].sum()), int(week["trips_due"].sum())),
-                help="Scheduled trips that appeared in LTD's realtime feed at all.",
+                help="Of the trips in LTD's published timetable, the share that ever appeared in "
+                "LTD's live feed. The timetable says which trips should run, so a trip missing "
+                "from the feed is known: usually a cancelled trip, or a bus whose tracker was off.",
             )
             c2.metric(
-                "Stops we timed on them, last 7 days",
+                "Stops we timed on those trips, last 7 days",
                 fmt_pct(int(week["mid_stops_timed"].sum()), int(week["mid_stops_due"].sum())),
-                help="On those trips, the stops whose arrival we measured, leaving out each "
-                "trip's first and last stop.",
+                help="Only on the trips that were in the live feed: the share of their stops whose "
+                "arrival we measured, leaving out each trip's first and last stop. A different "
+                "base from the measure beside it, so it can be higher or lower.",
             )
             c3.metric("Stop events scored, all days", f"{int(cov['stop_events_observed'].sum()):,}")
             long = done.melt(
                 id_vars=["Date"],
-                value_vars=["Trips LTD reported", "Stops we timed on them"],
+                value_vars=["Scheduled trips in LTD's live feed", "Stops we timed on those trips"],
                 var_name="Measure",
                 value_name="Share",
             )
@@ -153,9 +156,11 @@ with card():
                 },
                 legend_title="",
             )
-            st.plotly_chart(fit_phone(fig), width="stretch")
+            show_chart(fig)
             st.caption(
-                "Both should sit near 100%. A dip in **trips LTD reported** is on LTD's side (a "
+                "Both should sit near 100%. They measure different things against different bases: the "
+                "first, out of every trip in the timetable; the second, out of the stops on the "
+                "trips that were in the feed. A dip in **scheduled trips in LTD's live feed** is on LTD's side (a "
                 "cancelled trip, or a bus whose tracker was off) or a gap in our own collection: "
                 "check Feed gaps in the table. A dip in **stops we timed** means our measurement "
                 "missed stops on trips that did report: gaps between a bus's GPS reports, detours, "
@@ -171,7 +176,7 @@ with card():
                         "Date": pd.to_datetime(cov["service_date"]).dt.date,
                         "Buses seen": cov["vehicles_reporting"],
                         "Trips scheduled": cov["trips_scheduled"],
-                        "Trips seen": cov["trips_seen"],
+                        "Trips in live feed": cov["trips_seen"],
                         "Mid-trip stops due": cov["mid_stops_due"],
                         "Timed": cov["mid_stops_timed"],
                         "Stop events scheduled": cov["stop_events_scheduled"],
@@ -195,8 +200,8 @@ with card():
                     "Trips scheduled": col_count(
                         "Trips scheduled", help="Trips in LTD's timetable for that day."
                     ),
-                    "Trips seen": col_count(
-                        "Trips seen",
+                    "Trips in live feed": col_count(
+                        "Trips in live feed",
                         help="Scheduled trips that appeared in LTD's live feed at all.",
                     ),
                     "Mid-trip stops due": col_count(

@@ -14,7 +14,6 @@ from common import (
     col_minutes,
     col_time,
     current_fv,
-    fit_phone,
     fmt_ago,
     fmt_dt,
     late_minutes,
@@ -23,6 +22,7 @@ from common import (
     q,
     require_db,
     schedule_join,
+    show_chart,
     table,
 )
 
@@ -292,7 +292,7 @@ if not per5.empty:
     fig.update_layout(
         xaxis_title="", yaxis_title="Fetches per 5 min (expect 10; alerts 1)", legend_title=""
     )
-    st.plotly_chart(fit_phone(fig), width="stretch")
+    show_chart(fig)
 
 unchanged = q(
     "select feed::text as feed, sum(unchanged_count) as discarded from rt.fetch_unchanged where hour > now() - interval '24 hours' group by 1"

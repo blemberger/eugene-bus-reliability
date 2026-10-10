@@ -633,8 +633,11 @@ with card():
         st.session_state["live_stop_id"] = stop_id
     if stop_id:
         st.markdown(f"**{st.session_state.get('live_stop_name', stop_id)}**")
-        st.session_state["stop_id"] = stop_id  # so the Stops page opens on the same stop
-        st.page_link("views/stops.py", label="How reliable is this stop? →")
+        st.page_link(
+            "views/stops.py",
+            label="How reliable is this stop? Its report card →",
+            query_params={"stop": stop_id},
+        )
         stop_arrivals(stop_id)
 
 

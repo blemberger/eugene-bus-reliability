@@ -140,7 +140,7 @@ def quiet_streamlit_logs() -> None:
             logging.getLogger(name).setLevel(logging.ERROR)
 
 
-def run_page(page: str, label: str, state: dict | None = None) -> None:
+def run_page(page: str, label: str, state: dict | None = None, params: dict | None = None) -> None:
     from streamlit.testing.v1 import AppTest
 
     quiet_streamlit_logs()
@@ -153,6 +153,8 @@ def run_page(page: str, label: str, state: dict | None = None) -> None:
         at.switch_page(page)
         for k, v in (state or {}).items():
             at.session_state[k] = v
+        for k, v in (params or {}).items():  # the page address (?stop=..., ?route=...)
+            at.query_params[k] = v
         # timed from an empty cache: the worst case, a visitor when nobody else has been
         # on the site since the last analysis build
         import streamlit as st
@@ -310,13 +312,13 @@ def main() -> None:
         run_page(
             "views/route.py",
             f"views/route.py with route {ex['route_id']}",
-            {"route_id": ex["route_id"]},
+            params={"route": ex["route_id"]},
         )
     if ex.get("stop_id"):
         run_page(
             "views/stops.py",
             f"views/stops.py with stop {ex['stop_id']}",
-            {"stop_id": ex["stop_id"]},
+            params={"stop": ex["stop_id"]},
         )
         run_page(
             "views/accuracy.py",
