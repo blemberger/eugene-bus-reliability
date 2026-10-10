@@ -10,6 +10,7 @@ import plotly.graph_objects as go
 import pydeck as pdk
 import streamlit as st
 from common import (
+    ALL_ROUTES,
     JUST_LEFT_MINUTES,
     LATENESS_CHART_NOTE,
     LINE_MAIN,
@@ -23,6 +24,7 @@ from common import (
     STOP_ROWS_PER_ROUTE,
     TYPICAL_HELP,
     back_button,
+    busiest_route,
     busy_stops,
     card,
     clean_headsigns,
@@ -56,6 +58,7 @@ from common import (
     require_marts,
     route_colors,
     route_link,
+    route_toggles,
     search_stops,
     service_hour_key,
     show_chart,
@@ -265,7 +268,7 @@ def stop_finder() -> None:
         else:
             stop_tiles(matches)
     else:
-        st.caption("Busy stops:")
+        st.caption("Busy stops (each opens the stop's report card):")
         stop_tiles(busy_stops(9))
 
 
@@ -615,12 +618,21 @@ with card():
         + f" {period[0].upper() + period[1:]}. More on the Predictions page.",
     )
     here_routes = tbl[["route_id", "route"]].drop_duplicates("route_id")
-    fig = countdown_off_chart(
-        countdown_off_at_stop(stop_id, start, wt),
-        dict(
-            zip(here_routes["route_id"].astype(str), here_routes["route"].astype(str), strict=False)
-        ),
+    here_names = dict(
+        zip(here_routes["route_id"].astype(str), here_routes["route"].astype(str), strict=False)
     )
+    at_stop = countdown_off_at_stop(stop_id, start, wt)
+    here_ids = sorted({str(r) for r in at_stop["route_id"].dropna()})
+    # every route here together, and the route with the most bus arrivals here to compare
+    busiest = busiest_route(at_stop) if len(here_ids) > 1 else None
+    lines = route_toggles(
+        here_ids,
+        here_names,
+        [ALL_ROUTES, *([busiest] if busiest else [])],
+        key=f"stop_pred_lines_{stop_id}",
+        all_label="All routes here",
+    )
+    fig = countdown_off_chart(at_stop, here_names, lines, all_label="All routes here")
     if fig is None:
         st.caption("Not enough measured arrivals with a prediction here yet for this period.")
     else:

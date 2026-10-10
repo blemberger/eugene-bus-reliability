@@ -7,26 +7,32 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from common import (
+    ALL_ROUTES,
     PREDICTION_OFF_CAPTION,
     PREDICTION_OFF_NOTE,
-    TIMETABLE_COLOUR,
+    busiest_route,
     busy_stop_buttons,
     card,
     col_count,
     col_time,
-    countdown_off,
+    countdown_off_at_stop,
     countdown_off_chart,
     current_fv,
+    day_label,
+    day_sql,
     fmt_date,
     fmt_minutes,
     hour_label,
     link_table,
     local_times,
+    page_filters,
+    prediction_off,
     q,
     q_live,
     require_db,
     require_marts,
     route_picker,
+    route_toggles,
     search_stops,
     service_hour_key,
     show_chart,
@@ -46,33 +52,45 @@ FV = str(current_fv())  # schedule version in force today
 routes = q(
     f"select route_id, route_short_name from gtfs.routes where feed_version_id = {FV} order by length(route_short_name), route_short_name"
 )
-route_id = route_picker(routes, key="pred_route")
 short = dict(
     zip(routes["route_id"].astype(str), routes["route_short_name"].astype(str), strict=False)
 )
-scope = "All routes" if route_id is None else f"Route {short.get(str(route_id), route_id)}"
+
+# the first chart, then the period and days filters that everything on the page follows (drawn
+# in that order, though the filters are read first)
+chart_slot = st.container()
+start, wt = page_filters()
+period = f"{day_label(wt)} since {fmt_date(start)}"
 
 # Average minutes off for the prediction at each distance and the timetable, on the same bus
-# arrivals, each counted once per distance (marts.mart_told_vs_actual, from
-# fct_countdown_samples): all routes together and each route.
-off = countdown_off()
-if off.empty or "mean_abs_s" not in off or off["mean_abs_s"].isna().all():
-    st.info("The prediction numbers are being recalculated; they reappear within about 20 minutes.")
+# arrivals, each counted once per distance (marts.mart_prediction_daily): all routes together
+# and each route, for the chosen period and days.
+off = prediction_off(start, wt)
+if off.empty or off["n"].sum() == 0:
+    with chart_slot:
+        st.info(
+            "No measured predictions for this period yet, or the numbers are being "
+            "recalculated (they reappear within about 20 minutes)."
+        )
     st.stop()
-first_day = q("select min(first_day) as d from marts.mart_told_vs_actual where stop_id is null")[
-    "d"
-][0]
+with_data = sorted({str(r) for r in off["route_id"].dropna()})
 
-# ---- how far off: the prediction at each distance, every route, and the timetable ----------
-with card():
+# ---- how far off: the prediction at each distance, by route, and the timetable ----------------
+with chart_slot, card():
     st.subheader(
-        f"How far off are the predictions? {scope}",
-        help=PREDICTION_OFF_NOTE
-        + (f" All data since {fmt_date(first_day)}." if first_day is not None else ""),
+        "How far off are the predictions?",
+        help=PREDICTION_OFF_NOTE + f" {period[0].upper() + period[1:]}.",
     )
-    fig0 = countdown_off_chart(off, short, focus=route_id, min_n=30)
+    # every route together, and one route to compare: the one asked for in the address (a row
+    # of the routes table below), else the route with the most bus arrivals
+    wanted = st.query_params.get("route")
+    compare = wanted if wanted in with_data else busiest_route(off)
+    lines = route_toggles(
+        with_data, short, [ALL_ROUTES, *([compare] if compare else [])], key="pred_lines"
+    )
+    fig0 = countdown_off_chart(off, short, lines, min_n=30)
     if fig0 is None:
-        st.caption("Not enough measured arrivals yet for this route.")
+        st.caption("Pick a route above (or All routes); this one needs more measured arrivals.")
     else:
         show_chart(fig0)
         st.caption(PREDICTION_OFF_CAPTION)
@@ -80,12 +98,18 @@ with card():
 
 # ---- by time of day ---------------------------------------------------------------------
 with card():
-    st.subheader(
-        f"Does accuracy depend on the time of day? {scope}",
-        help="Predictions made about this far ahead, by the hour they were made. Each bar builds "
-        "up: the dark part is the share right to within 1 minute; add the middle part for within "
-        "2 minutes; the whole bar is within 3 minutes. The space above is how often the bus came "
-        "more than 3 minutes off. Hours with fewer than 20 predictions are left out.",
+    title_slot = st.empty()  # the title names the route picked just below it
+    tod_route = route_picker(
+        routes[routes["route_id"].astype(str).isin(with_data)], key="tod_route"
+    )
+    scope = "All routes" if tod_route is None else f"Route {short.get(str(tod_route), tod_route)}"
+    title_slot.subheader(
+        f"Does accuracy depend on the time of day? {scope}, {day_label(wt)}",
+        help="Predictions made about this far ahead, by the hour they were on show. Each bar "
+        "builds up: the dark part is the share right to within 1 minute; add the middle part "
+        "for within 2 minutes; the whole bar is within 3 minutes. The space above is how often "
+        "the bus came more than 3 minutes off. Hours with fewer than 20 bus arrivals are left "
+        f"out. {period[0].upper() + period[1:]}.",
     )
     AHEAD_CHOICES = {"2 min": (1, 2), "5 min": (5, 5), "10 min": (10, 10), "15 min": (15, 15)}
     ahead = (
@@ -98,21 +122,19 @@ with card():
         or "5 min"
     )
     lo, hi = AHEAD_CHOICES[ahead]
-    tod = (
-        q(
-            """
+    clause, params = day_sql(wt)
+    tod = q(
+        f"""
         select hour_local, sum(n)::bigint as n, sum(n_within_1min)::bigint as within1,
                sum(n_within_2min)::bigint as within2, sum(n_within_3min)::bigint as within3
-        from marts.mart_accuracy_by_hour
-        where horizon_min between %s and %s and route_id is not distinct from %s
+        from marts.mart_prediction_daily
+        where basis = 'sign' and ahead_min between %s and %s and service_date >= %s {clause}
+          {"and route_id = %s" if tod_route else ""}
         group by 1 order by 1
         """,
-            (lo, hi, route_id),
-        )
-        if q("select to_regclass('marts.mart_accuracy_by_hour') is not null as ok")["ok"][0]
-        else pd.DataFrame()
+        (lo, hi, start, *params, *([tod_route] if tod_route else [])),
     )
-    tod = tod[tod["n"] >= 20].copy() if not tod.empty else tod
+    tod = tod[tod["n"] >= 20].copy()
     if tod.empty:
         st.caption("Not enough measured bus arrivals this far ahead yet (needs 20 in an hour).")
     else:
@@ -164,97 +186,108 @@ with card():
 
 
 # ---- by route: average minutes off at 5 and 10 minutes away, and the timetable -------------
-if route_id is None:
-    with card():
-        st.subheader(
-            "Which routes have the best predictions?",
-            help="Average minutes the bus came from the time it was given, early or late alike, "
-            "on the same bus arrivals: the prediction when it said 5 and 10 minutes away, and the "
-            "printed timetable. Lower is better. Routes with at least 50 bus arrivals measured. "
-            "Click a column heading to sort.",
+with card():
+    st.subheader(
+        f"Which routes have the best predictions? {day_label(wt).capitalize()}",
+        help="Average minutes the bus came from the time it was given, early or late alike, on "
+        "the same bus arrivals: the prediction when it said 5 and 10 minutes away, and the "
+        "printed timetable. Lower is better. Routes with at least 50 bus arrivals measured. "
+        f"{period[0].upper() + period[1:]}. Click a column heading to sort; click a route to "
+        "show it in the chart at the top.",
+    )
+    per = off[off["route_id"].notna()].copy()
+    per["route_id"] = per["route_id"].astype(str)
+    at = {
+        k: per[(per["basis"] == "sign") & (per["ahead_min"] == k)].set_index("route_id")
+        for k in (5, 10, 15)
+    }
+    tt = per[per["basis"] == "timetable"].set_index("route_id")
+    ids = [r for r in tt.index if r in at[15].index and at[15].loc[r, "n"] >= 50]
+    if not ids:
+        st.caption("Not enough measured bus arrivals per route yet for this period.")
+    else:
+
+        def minutes(frame: pd.DataFrame, r: str) -> float | None:
+            if r not in frame.index or pd.isna(frame.loc[r, "mean_abs_s"]):
+                return None
+            return float(frame.loc[r, "mean_abs_s"]) / 60
+
+        values = {r: (minutes(at[5], r), minutes(at[10], r), minutes(tt, r)) for r in ids}
+        top = max(v for vs in values.values() for v in vs if v is not None)
+
+        def bar(v: float | None, colour: str) -> str:
+            if v is None:
+                return ""
+            return (
+                "<span class='ebw-g'><span class='ebw-x'>"
+                f"<span class='ebw-x1' style='left:0;top:4px;width:{v / top * 100:.0f}%;"
+                f"background:{colour}'></span></span><span class='ebw-s'>{v:.1f} min</span>"
+                "</span>"
+            )
+
+        rows = []
+        for r in sorted(ids, key=lambda r: (len(short.get(r, r)), short.get(r, r))):
+            c5, c10, t = values[r]
+            rows.append(
+                {
+                    "href": f"/accuracy?route={r}",
+                    "hover": f"Route {short.get(r, r)}: measured on "
+                    f"{int(at[15].loc[r, 'n']):,} bus arrivals",
+                    "route": short.get(r, r),
+                    "c5": bar(c5, "#1f5f9e"),
+                    "c5_s": c5,
+                    "c10": bar(c10, "#1f5f9e"),
+                    "c10_s": c10,
+                    "tt": bar(t, "#8a8f94"),
+                    "tt_s": t,
+                }
+            )
+        cols = [{"key": "route", "label": "Route", "width": "3.4em", "bold": True}]
+        for k, label, tip in (
+            (
+                "c5",
+                "Prediction, 5 min away",
+                "Average minutes off when the prediction said 5 minutes.",
+            ),
+            (
+                "c10",
+                "Prediction, 10 min away",
+                "Average minutes off when the prediction said 10 minutes.",
+            ),
+            (
+                "tt",
+                "Printed timetable",
+                "Average minutes off the printed timetable, same bus arrivals.",
+            ),
+        ):
+            cols.append(
+                {
+                    "key": k,
+                    "label": label,
+                    "width": "minmax(9em, 1fr)",
+                    "html": True,
+                    "help": tip,
+                    "sort": f"{k}_s",
+                    "first": "asc",
+                }
+            )
+        link_table(
+            rows,
+            cols,
+            max_height=640,
+            key="pred_routes",
+            default_sort="c5:asc",
+            go_label="Show",
         )
-        per = off[off["route_id"].notna()].copy()
-        per["route_id"] = per["route_id"].astype(str)
-        at = {
-            k: per[(per["basis"] == "sign") & (per["ahead_min"] == k)].set_index("route_id")
-            for k in (5, 10, 15)
-        }
-        tt = per[per["basis"] == "timetable"].set_index("route_id")
-        ids = [r for r in tt.index if r in at[15].index and at[15].loc[r, "n"] >= 50]
-        if ids:
-
-            def minutes(frame: pd.DataFrame, r: str) -> float | None:
-                if r not in frame.index or pd.isna(frame.loc[r, "mean_abs_s"]):
-                    return None
-                return float(frame.loc[r, "mean_abs_s"]) / 60
-
-            values = {r: (minutes(at[5], r), minutes(at[10], r), minutes(tt, r)) for r in ids}
-            top = max(v for vs in values.values() for v in vs if v is not None)
-
-            def bar(v: float | None, colour: str) -> str:
-                if v is None:
-                    return ""
-                return (
-                    "<span class='ebw-g'><span class='ebw-x'>"
-                    f"<span class='ebw-x1' style='left:0;top:4px;width:{v / top * 100:.0f}%;"
-                    f"background:{colour}'></span></span><span class='ebw-s'>{v:.1f} min</span>"
-                    "</span>"
-                )
-
-            rows = []
-            for r in sorted(ids, key=lambda r: (len(short.get(r, r)), short.get(r, r))):
-                c5, c10, t = values[r]
-                rows.append(
-                    {
-                        "href": f"/accuracy?route={r}",
-                        "hover": f"Route {short.get(r, r)}: measured on "
-                        f"{int(at[15].loc[r, 'n']):,} bus arrivals",
-                        "route": short.get(r, r),
-                        "c5": bar(c5, "#1f5f9e"),
-                        "c5_s": c5,
-                        "c10": bar(c10, "#1f5f9e"),
-                        "c10_s": c10,
-                        "tt": bar(t, TIMETABLE_COLOUR),
-                        "tt_s": t,
-                    }
-                )
-            cols = [{"key": "route", "label": "Route", "width": "3.4em", "bold": True}]
-            for k, label, tip in (
-                (
-                    "c5",
-                    "Prediction, 5 min away",
-                    "Average minutes off when the prediction said 5 minutes.",
-                ),
-                (
-                    "c10",
-                    "Prediction, 10 min away",
-                    "Average minutes off when the prediction said 10 minutes.",
-                ),
-                (
-                    "tt",
-                    "Printed timetable",
-                    "Average minutes off the printed timetable, same bus arrivals.",
-                ),
-            ):
-                cols.append(
-                    {
-                        "key": k,
-                        "label": label,
-                        "width": "minmax(9em, 1fr)",
-                        "html": True,
-                        "help": tip,
-                        "sort": f"{k}_s",
-                        "first": "asc",
-                    }
-                )
-            link_table(rows, cols, max_height=640, key="pred_routes", default_sort="c5:asc")
-            st.caption("Click a route to see this page for that route alone.")
 
 
 # ---- one stop, right now: how each coming bus's prediction has been revised --------------
 with card():
-    st.subheader("One stop, right now")
-    st.caption("Pick a stop to see how each coming bus's predicted arrival has changed.")
+    st.subheader(
+        "One stop",
+        help="How far off the predictions are at one stop, by route (for the period and days "
+        "above), and how each bus coming there now has had its predicted arrival changed.",
+    )
     example = q(f"""
         select stop_code, stop_name from gtfs.stops
         where feed_version_id = {FV} and location_type = 0 and stop_code is not null and stop_code <> ''
@@ -288,7 +321,28 @@ with card():
 
     pstop = st.session_state.get("pred_stop_id")
     if pstop:
-        st.markdown(f"**{st.session_state.get('pred_stop_name', pstop)}**")
+        st.markdown(f"#### {st.session_state.get('pred_stop_name', pstop)}")
+        st.page_link(
+            "views/stops.py", label="This stop's report card →", query_params={"stop": pstop}
+        )
+        # how far off the predictions are here, by route (the same chart as at the top)
+        at_stop = countdown_off_at_stop(pstop, start, wt)
+        here_ids = sorted({str(r) for r in at_stop["route_id"].dropna()})
+        # every route here together, and (where several stop here) the busiest one to compare
+        busiest = busiest_route(at_stop) if len(here_ids) > 1 else None
+        here_lines = route_toggles(
+            here_ids,
+            short,
+            [ALL_ROUTES, *([busiest] if busiest else [])],
+            key=f"pred_stop_lines_{pstop}",
+            all_label="All routes here",
+        )
+        fig_s = countdown_off_chart(at_stop, short, here_lines, all_label="All routes here")
+        if fig_s is None:
+            st.caption("Not enough measured arrivals with a prediction here yet for this period.")
+        else:
+            show_chart(fig_s)
+        st.markdown("**Right now: how each coming bus's predicted arrival has changed**")
         hist = q_live(
             f"""
             with coming as (

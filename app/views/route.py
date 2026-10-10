@@ -42,10 +42,10 @@ from common import (
     route_rank,
     route_tiles,
     service_hour_key,
+    service_today,
     show_chart,
     stop_link,
     table,
-    today_lateness,
     worst_hour_label,
 )
 
@@ -106,25 +106,6 @@ with top:
     title_slot.title(
         f"How reliable is route {route_name}" + (f" ({long_name})" if long_name else "") + "?"
     )
-    me = rank[rank["route_id"].astype(str) == route_id].iloc[0]
-    today = today_lateness(route_id=route_id)
-    n_today = int(today["n"].iloc[0]) if len(today) else 0
-    with card():
-        m1, m2, m3 = st.columns(3)
-        m1.metric(
-            "Typical bus vs timetable",
-            fmt_delay(me["median_delay"]),
-            help=TYPICAL_HELP
-            + f" {int(me['n']):,} arrivals measured, {day_label(wt)} since {fmt_date(start)}.",
-        )
-        m2.metric("8 in 10 buses", fmt_range(me["p10_delay_s"], me["p90_delay_s"]), help=RANGE_HELP)
-        m3.metric(
-            "Today so far",
-            fmt_delay(today["median_delay_s"].iloc[0]) if n_today >= 10 else "—",
-            help="The typical bus today, as of the latest update (every 15 minutes)"
-            + (f", from {n_today:,} arrivals." if n_today else "; none measured yet."),
-        )
-
     dirs = q(
         f"""
         select direction_id, string_agg(distinct trip_headsign, ' / ') as headsigns
@@ -161,6 +142,41 @@ with top:
             direction = next(iter(dir_labels))
     dir_clause = "and direction_id = %s" if direction is not None else ""
     dir_params: tuple = (direction,) if direction is not None else ()
+
+    # the route's numbers for the direction chosen above, like everything below them
+    wt_m = day_sql(wt)[0]
+    numbers_sql = f"""
+        select count(*) as n,
+               percentile_cont(0.5) within group (order by delay_s) as median_delay,
+               percentile_cont(0.1) within group (order by delay_s) as p10_delay_s,
+               percentile_cont(0.9) within group (order by delay_s) as p90_delay_s
+        from marts.fct_stop_events
+        where route_id = %s and status is not null {dir_clause} and {{when}}
+    """
+    me = q(
+        numbers_sql.format(when=f"service_date >= %s {wt_m}"),
+        (route_id, *dir_params, start, *wt_params),
+    ).iloc[0]
+    today = q(
+        numbers_sql.format(when="service_date = %s"), (route_id, *dir_params, service_today())
+    ).iloc[0]
+    me["n_today"], me["median_today"] = today["n"], today["median_delay"]
+    n_today = int(me["n_today"] or 0)
+    with card():
+        m1, m2, m3 = st.columns(3)
+        m1.metric(
+            "Typical bus vs timetable",
+            fmt_delay(me["median_delay"]),
+            help=TYPICAL_HELP
+            + f" {int(me['n']):,} arrivals measured, {day_label(wt)} since {fmt_date(start)}.",
+        )
+        m2.metric("8 in 10 buses", fmt_range(me["p10_delay_s"], me["p90_delay_s"]), help=RANGE_HELP)
+        m3.metric(
+            "Today so far",
+            fmt_delay(me["median_today"]) if n_today >= 10 else "—",
+            help="The typical bus today, as of the latest update (every 15 minutes)"
+            + (f", from {n_today:,} arrivals." if n_today else "; none measured yet."),
+        )
 
     # ---- by hour: this route against all routes ------------------------------------------------
     wt_e = day_sql(wt, "e.service_date", "e.weekday_type")[0]

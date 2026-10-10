@@ -729,8 +729,9 @@ def main(settings: Settings, raw: bool = False) -> None:
             cur,
             """
             with site as (
-                select ahead_min, n, n_within_1min, mean_abs_s from marts.mart_told_vs_actual
-                where route_id is null and stop_id is null
+                select ahead_min, sum(n) n, sum(n_within_1min) n_within_1min,
+                       sum(sum_abs_s)::float8 / sum(n) mean_abs_s
+                from marts.mart_prediction_daily group by 1
             ),
             direct as (
                 select null::int ahead_min, count(*) n,
@@ -756,8 +757,8 @@ def main(settings: Settings, raw: bool = False) -> None:
         """,
         )
         print(
-            "Countdown average minutes off, per route (the faint lines; timetable = the same "
-            "arrivals' average off the timetable):"
+            "Prediction average minutes off, per route (timetable = the same arrivals' average "
+            "off the timetable):"
         )
         show(
             cur,
@@ -774,6 +775,90 @@ def main(settings: Settings, raw: bool = False) -> None:
              and r.feed_version_id = (select max(feed_version_id) from gtfs.feed_version)
             where c.in_comparison
             group by 1 order by length(r.route_short_name), 1
+        """,
+        )
+
+        section("OUTLIER STOPS: typically over 5 min late, or 8 in 10 starting over 5 min early")
+        print(
+            "Last 30 days, stops with 20+ arrivals. timepoint/first/last = share of the stop's\n"
+            "arrivals that are a timepoint / a trip's first stop / its last stop. methods_* compare\n"
+            "our GPS time with LTD's own time for the same arrival (LTD's is a real measurement at\n"
+            "timepoints only): a big gap where it's measured points at our method, not the bus."
+        )
+        show(
+            cur,
+            """
+            select e.stop_id, max(s.stop_name) stop_name, string_agg(distinct e.route_short_name, ',') routes,
+                   count(*) n, round(percentile_cont(0.5) within group (order by e.delay_s)) median_s,
+                   round(percentile_cont(0.1) within group (order by e.delay_s)) p10_s,
+                   round(percentile_cont(0.9) within group (order by e.delay_s)) p90_s,
+                   round(100.0 * avg(e.is_timepoint::int)) timepoint_pct,
+                   round(100.0 * avg(e.is_first_stop::int)) first_pct,
+                   round(100.0 * avg(e.is_last_stop::int)) last_pct,
+                   round(percentile_cont(0.5) within group (order by e.methods_diff_s)) methods_median_s,
+                   round(100.0 * count(*) filter (where abs(e.methods_diff_s) > 120)
+                         / nullif(count(e.methods_diff_s), 0)) methods_over_2min_pct
+            from marts.fct_stop_events e
+            left join gtfs.stops s on s.stop_id = e.stop_id
+             and s.feed_version_id = (select max(feed_version_id) from gtfs.feed_version)
+            where e.status is not null and e.service_date >= current_date - 30
+            group by 1
+            having count(*) >= 20
+               and (percentile_cont(0.5) within group (order by e.delay_s) > 300
+                    or percentile_cont(0.1) within group (order by e.delay_s) < -300)
+            order by abs(percentile_cont(0.5) within group (order by e.delay_s)) desc
+            limit 25
+        """,
+        )
+        print("How many stops are outliers, and how early arrivals split by kind of stop:")
+        show(
+            cur,
+            """
+            select case when is_first_stop then 'first stop' when is_last_stop then 'last stop'
+                        when is_timepoint then 'timepoint' else 'other stop' end kind,
+                   count(*) n,
+                   round(100.0 * count(*) filter (where delay_s < -180) / count(*), 1) pct_over_3min_early,
+                   round(100.0 * count(*) filter (where delay_s < -300) / count(*), 1) pct_over_5min_early,
+                   round(100.0 * count(*) filter (where delay_s > 300) / count(*), 1) pct_over_5min_late
+            from marts.fct_stop_events
+            where status is not null and service_date >= current_date - 30
+            group by 1 order by 1
+        """,
+        )
+
+        section("WHERE OUR GPS METHOD AND LTD DISAGREE MOST: stops on the worst routes")
+        show(
+            cur,
+            """
+            with worst as (
+                select route_short_name from marts.fct_stop_events
+                where methods_diff_s is not null and is_bounded and service_date >= current_date - 30
+                group by 1 having count(*) >= 200
+                order by avg((abs(methods_diff_s) > 300)::int) desc limit 3
+            )
+            select e.route_short_name route, e.stop_sequence seq, max(s.stop_name) stop_name,
+                   bool_or(e.is_timepoint) timepoint, count(*) n,
+                   round(percentile_cont(0.5) within group (order by e.methods_diff_s)) methods_median_s,
+                   round(100.0 * avg((abs(e.methods_diff_s) > 120)::int)) over_2min_pct,
+                   round(percentile_cont(0.5) within group (order by e.uncertainty_s)) uncertainty_s
+            from marts.fct_stop_events e
+            join worst w using (route_short_name)
+            left join gtfs.stops s on s.stop_id = e.stop_id
+             and s.feed_version_id = (select max(feed_version_id) from gtfs.feed_version)
+            where e.methods_diff_s is not null and e.is_bounded and e.service_date >= current_date - 30
+            group by 1, 2 having count(*) >= 10
+            order by 1, abs(percentile_cont(0.5) within group (order by e.methods_diff_s)) desc
+        """,
+        )
+
+        section("CANCELLED TRIPS: does LTD's feed flag them? (trip updates marked CANCELED)")
+        show(
+            cur,
+            """
+            select f.fetched_at::date as fetch_day, count(distinct u.trip_id) trips_marked_cancelled
+            from rt.trip_update u join rt.fetch f using (fetch_id)
+            where u.schedule_relationship = 3 and f.fetched_at > now() - interval '14 days'
+            group by 1 order by 1
         """,
         )
 

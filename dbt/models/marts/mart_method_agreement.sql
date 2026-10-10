@@ -31,7 +31,8 @@ select
         filter (where is_timepoint)                                        as median_diff_timepoints_s,
     percentile_cont(0.5) within group (order by abs(methods_diff_s))
         filter (where is_timepoint)                                        as median_abs_diff_timepoints_s,
-    count(*) filter (where abs(methods_diff_s) <= 60 and is_timepoint)     as n_within_1min_timepoints
+    count(*) filter (where abs(methods_diff_s) <= 60 and is_timepoint and is_bounded)
+                                                                           as n_within_1min_timepoints
 from {{ ref('fct_stop_events') }}
 where trip_had_realtime and {{ recent_days() }}
 group by 1, 2, 3
