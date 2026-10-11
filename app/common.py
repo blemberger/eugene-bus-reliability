@@ -477,76 +477,91 @@ def route_link(route_id, name) -> str | None:
 
 
 # Links that open another page (a route's or a stop's report card) look like cards with an
-# arrow, never like the rounded buttons that change what the current page shows.
+# arrow, never like the rounded buttons that change what the current page shows. Route cards are
+# edged in blue, stop cards in green, the same on every page. The cards fill whole rows: 7 routes
+# a row on a computer (LTD's 28 routes make 4 full rows), 4 stops (12 busy stops, 3 rows).
+ROUTE_TILE_COLOUR = "#1f5f9e"
+STOP_TILE_COLOUR = "#0b6e4f"
 _TILE_CSS = (
-    "<style>.ebw-tiles { display: grid; gap: 0.5rem;"
-    " grid-template-columns: repeat(auto-fill, minmax(var(--tile-w, 10.5rem), 1fr)); }"
-    ".ebw-tile { display: flex; align-items: center; gap: 0.6rem; padding: 0.55rem 0.75rem;"
-    " border: 1px solid #c9d2cd; border-left: 4px solid #0b6e4f; border-radius: 6px;"
-    " background: #fff; color: #262730; text-decoration: none; line-height: 1.25; }"
-    ".ebw-tile:hover { background: #eef6f2; border-color: #0b6e4f; }"
-    ".ebw-tile b { font-size: 1.05rem; }"
+    "<style>.ebw-tiles { display: grid; gap: 0.5rem; }"
+    ".ebw-tiles.route { grid-template-columns: repeat(7, minmax(0, 1fr)); }"
+    ".ebw-tiles.stop { grid-template-columns: repeat(4, minmax(0, 1fr)); }"
+    "@media (max-width: 1100px) { .ebw-tiles.route { grid-template-columns: repeat(4, minmax(0, 1fr)); }"
+    " .ebw-tiles.stop { grid-template-columns: repeat(3, minmax(0, 1fr)); } }"
+    "@media (max-width: 800px) { .ebw-tiles.stop { grid-template-columns: repeat(2, minmax(0, 1fr)); } }"
+    "@media (max-width: 640px) { .ebw-tiles.route { grid-template-columns: repeat(2, minmax(0, 1fr)); }"
+    " .ebw-tiles.stop { grid-template-columns: minmax(0, 1fr); } }"
+    ".ebw-tile { display: flex; align-items: center; gap: 0.5rem; padding: 0.45rem 0.65rem;"
+    " border: 1px solid #c9d2cd; border-left: 4px solid var(--edge); border-radius: 6px;"
+    " background: #fff; color: #262730; text-decoration: none; line-height: 1.25; min-width: 0; }"
+    ".ebw-tile:hover { background: #f1f5f8; border-color: var(--edge); }"
+    ".ebw-tile b { font-size: 1rem; }"
+    ".ebw-tile > span:first-child { min-width: 0; overflow: hidden; }"
     ".ebw-tile small { display: block; color: #666; font-size: 0.85rem; white-space: nowrap;"
-    " overflow: hidden; text-overflow: ellipsis; max-width: 100%; }"
-    ".ebw-tile > span:first-child { min-width: 0; }"
-    ".ebw-tile .ebw-go { margin-left: auto; color: #0b6e4f; font-weight: 700; font-size: 1.1rem; }"
+    " overflow: hidden; text-overflow: ellipsis; }"
+    # a long stop name wraps (all tiles in a row grow together) rather than hiding the number
+    ".ebw-tile .ebw-one { display: block; overflow-wrap: anywhere; }"
+    ".ebw-tile .ebw-code { color: #666; font-weight: 400; white-space: nowrap; }"
+    ".ebw-tile .ebw-go { margin-left: auto; color: var(--edge); font-weight: 700; font-size: 1.05rem; }"
     "</style>"
 )
 
 
-def nav_tiles(items: list[tuple], min_width: str = "10.5rem") -> None:
-    """Cards that each open another page: (href, title, subtitle[, accent colour]). The page's
-    period and days filters go along."""
+def nav_tiles(items: list[tuple[str, str]], kind: str) -> None:
+    """Cards that each open another page: (href, inner HTML), kind 'route' or 'stop'. The
+    page's period and days filters go along."""
     qs = filter_query()
-
-    def tile(href: str, title: str, sub: str, colour: str | None = None) -> str:
-        url = href + (("&" if "?" in href else "?") + qs if qs else "")
-        edge = f" style='border-left-color:{colour}'" if colour else ""
-        return (
-            f"<a class='ebw-tile' target='_self' href='{html_escape(url)}'{edge}>"
-            f"<span><b>{html_escape(title)}</b>"
-            + (f"<small>{html_escape(sub)}</small>" if sub else "")
-            + "</span><span class='ebw-go'>→</span></a>"
-        )
-
-    tiles = "".join(tile(*item) for item in items)
-    st.html(f"{_TILE_CSS}<div class='ebw-tiles' style='--tile-w:{min_width}'>{tiles}</div>")
+    edge = ROUTE_TILE_COLOUR if kind == "route" else STOP_TILE_COLOUR
+    tiles = "".join(
+        f"<a class='ebw-tile' target='_self' title='Open the report card' "
+        f"href='{html_escape(href + (('&' if '?' in href else '?') + qs if qs else ''))}'>"
+        f"<span>{inner}</span><span class='ebw-go'>→</span></a>"
+        for href, inner in items
+    )
+    st.html(f"{_TILE_CSS}<div class='ebw-tiles {kind}' style='--edge:{edge}'>{tiles}</div>")
 
 
 def route_tiles(routes: pd.DataFrame) -> None:
     """A compact card per route (route_id, route_short_name, and route_long_name if known),
-    edged in the route's own colour (as in the charts), each opening that route's report
-    card."""
+    each opening that route's report card."""
     names = routes["route_long_name"] if "route_long_name" in routes else [""] * len(routes)
-    colors = route_colors()
     nav_tiles(
         [
             (
                 f"/route?route={quote(str(rid))}",
-                f"Route {short}",
-                "" if not isinstance(long, str) or long == str(short) else long,
-                colors.get(str(rid)),
+                f"<b>Route {html_escape(str(short))}</b>"
+                + (
+                    f"<small>{html_escape(long)}</small>"
+                    if isinstance(long, str) and long and long != str(short)
+                    else "<small>&nbsp;</small>"
+                ),
             )
             for rid, short, long in zip(
                 routes["route_id"], routes["route_short_name"], names, strict=False
             )
         ],
-        min_width="8.6rem",
+        "route",
     )
 
 
 def stop_tiles(stops: pd.DataFrame, show_code: bool = True) -> None:
-    """A card per stop (stop_id, stop_name, stop_code), each opening that stop's report card."""
+    """A one-line card per stop (stop_id, stop_name, stop_code): its name and sign number, each
+    opening that stop's report card."""
     nav_tiles(
         [
             (
                 f"/stops?stop={quote(str(r.stop_id))}",
-                str(r.stop_name),
-                f"Stop #{r.stop_code}" if show_code and r.stop_code else "",
+                f"<span class='ebw-one'><b>{html_escape(str(r.stop_name))}</b>"
+                + (
+                    f" <span class='ebw-code'>· #{html_escape(str(r.stop_code))}</span>"
+                    if show_code and r.stop_code
+                    else ""
+                )
+                + "</span>",
             )
             for r in stops.itertuples()
         ],
-        min_width="15rem",
+        "stop",
     )
 
 
@@ -1575,17 +1590,18 @@ def route_table(rank: pd.DataFrame, start: date, key: str) -> None:
 TIMETABLE_COLOUR = "#b35900"
 AVERAGE_COLOUR = "#1c1c1c"
 
+# shown in place of an hour-by-hour chart without enough data; .format(n=the chart's min_n)
+NOT_ENOUGH_HOURLY = "Not enough arrivals yet for an hour-by-hour view (needs {n} in an hour)."
+
 PREDICTION_OFF_NOTE = (
     "How many minutes, on average, the bus came from the time it was given, early or late "
     "alike; lower is better. Thick line with dots: LTD's real-time predictions (what apps like "
     "Transit show), by how many minutes away the prediction said the bus was. Thin straight line "
     "in the same colour: the printed timetable for the same bus arrivals (flat, because the "
-    "timetable doesn't change as the bus gets nearer). Pick routes with the buttons; each adds "
-    "its two lines. Measured on bus arrivals that had a prediction 15 minutes out, each counted "
+    "timetable doesn't change as the bus gets nearer). Minutes away is what the prediction said "
+    "at the time, not when the bus actually came. Switch lines on and off above the chart; "
+    "each adds its two. Measured on bus arrivals that had a prediction 15 minutes out, each counted "
     "once at each distance; points with fewer than 20 are left out."
-)
-PREDICTION_OFF_CAPTION = (
-    "Minutes away: what the prediction said at the time, not when the bus actually came."
 )
 
 # the key for "every route together" in prediction_off() and countdown_off_chart()
@@ -1636,6 +1652,51 @@ def countdown_off_at_stop(stop_id: str, start: date, wt: str | None) -> pd.DataF
     )
 
 
+def countdown_off_on_route(
+    route_id: str, direction: int | None, start: date, wt: str | None, stop_ids: list[str]
+) -> pd.DataFrame:
+    """prediction_off() along one route (in one direction): every stop together (route_id
+    null) and each stop asked for (its stop_id in the route_id column, so the same chart draws
+    it), computed on the spot (fct_countdown_samples) for the page's period and days."""
+    wt_e, wt_params = day_sql(wt)
+    dir_sql = (
+        "and trip_id in (select trip_id from gtfs.trips where route_id = %s and direction_id = %s)"
+        if direction is not None
+        else ""
+    )
+    dir_params = (route_id, direction) if direction is not None else ()
+    cut = f"where route_id = %s and in_comparison and service_date >= %s {wt_e} {dir_sql}"
+    stops = list(stop_ids) or ["-"]
+    return q(
+        f"""
+        select 'timetable' as basis, null::int as ahead_min,
+               case when grouping(stop_id) = 0 then stop_id end as route_id,
+               count(*) as n, avg(abs(schedule_error_s)) as mean_abs_s
+        from marts.fct_countdown_samples {cut} and ahead_min = 15
+        group by grouping sets ((), (stop_id))
+        having grouping(stop_id) = 1 or stop_id = any(%s)
+        union all
+        select 'sign', ahead_min, case when grouping(stop_id) = 0 then stop_id end,
+               count(*), avg(abs(error_s))
+        from marts.fct_countdown_samples {cut}
+        group by grouping sets ((ahead_min), (stop_id, ahead_min))
+        having grouping(stop_id) = 1 or stop_id = any(%s)
+        """,
+        (
+            route_id,
+            start,
+            *wt_params,
+            *dir_params,
+            stops,
+            route_id,
+            start,
+            *wt_params,
+            *dir_params,
+            stops,
+        ),
+    )
+
+
 def busiest_route(df: pd.DataFrame) -> str | None:
     """The route with the most bus arrivals measured in a prediction_off() result."""
     tt = df[(df["basis"] == "timetable") & df["route_id"].notna()]
@@ -1673,6 +1734,7 @@ def countdown_off_chart(
     selected: list[str],
     all_label: str = "All routes",
     min_n: int = 20,
+    colors: dict[str, str] | None = None,
 ) -> go.Figure | None:
     """Average minutes off against how many minutes away the prediction said the bus was. For
     each selected key (ALL_ROUTES or a route id) two lines in one colour: the prediction (thick,
@@ -1688,7 +1750,7 @@ def countdown_off_chart(
     sign = sign.sort_values("ahead_min")
     tt_rows = df[(df["basis"] == "timetable") & (df["n"] >= min_n)]
     tt = dict(zip(tt_rows["_r"], tt_rows["off"], strict=False))
-    colors = route_colors()
+    colors = route_colors() if colors is None else colors
     fig = go.Figure()
     drawn = 0
     for rank, key in enumerate(selected):
@@ -1696,7 +1758,7 @@ def countdown_off_chart(
         if len(g) < 2:
             continue
         drawn += 1
-        label = all_label if key == ALL_ROUTES else f"Route {names.get(key, key)}"
+        label = all_label if key == ALL_ROUTES else names.get(key, key)
         colour = AVERAGE_COLOUR if key == ALL_ROUTES else colors.get(key, "#777777")
         t = tt.get(key)
         fig.add_trace(
@@ -1705,7 +1767,7 @@ def countdown_off_chart(
                 y=g["off"],
                 mode="lines+markers",
                 name=f"{label}: predictions",
-                legendgroup=key,
+                legendgroup=key or "all",
                 legendrank=2 * rank,
                 line={"color": colour, "width": LINE_MAIN},
                 marker={"size": MARKER_MAIN},
@@ -1725,7 +1787,7 @@ def countdown_off_chart(
                     y=[t, t],
                     mode="lines",
                     name=f"{label}: timetable",
-                    legendgroup=key,
+                    legendgroup=key or "all",
                     legendrank=2 * rank + 1,
                     line={"color": colour, "width": 1.6},
                     hovertemplate=f"<b>{label}: printed timetable</b><br>{t:.1f} min off on "
@@ -1738,7 +1800,16 @@ def countdown_off_chart(
         xaxis={"title": "Minutes away", "range": [0, 15.5], "dtick": 5, "zeroline": False},
         # fitted to the lines, not from zero: the differences are what the chart is for
         yaxis={"title": "Average minutes off", "zeroline": False},
-        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0, "xanchor": "left"},
+        # each choice's two lines (predictions, timetable) stacked as a pair in the legend
+        legend={
+            "orientation": "h",
+            "yanchor": "bottom",
+            "y": 1.02,
+            "x": 0,
+            "xanchor": "left",
+            "traceorder": "grouped",
+            "tracegroupgap": 18,
+        },
         hovermode="closest",
         height=440,
     )
@@ -1792,7 +1863,9 @@ def show_chart(fig: go.Figure) -> None:
         "automargin": True,
         "fixedrange": True,
     }
-    fig.update_xaxes(**axis, showgrid=False)
+    fig.update_xaxes(**axis)
+    if fig.layout.xaxis.showgrid is None:  # no vertical grid lines unless a chart asks for them
+        fig.update_xaxes(showgrid=False)
     fig.update_yaxes(**axis)
     st.plotly_chart(
         fit_phone(fig),
@@ -1856,92 +1929,279 @@ def lateness_chart(
 ) -> go.Figure | None:
     """Typical minutes late by hour of day with the range 8 in 10 buses fall in, from rows with
     hour_local, n, median_delay_s, p10_delay_s, p90_delay_s (and n_days). reference, if given,
-    is drawn as a thin grey dashed line for comparison."""
-    d = hourly[hourly["n"] >= min_n] if len(hourly) else hourly
-    if d is None or d.empty:
+    is drawn as a grey comparison line. One line of hourly_lines_chart()."""
+    return hourly_lines_chart(
+        [{"label": label, "df": hourly, "color": color}],
+        reference=reference,
+        reference_label=reference_label,
+        min_n=min_n,
+    )
+
+
+def hourly_lines_chart(
+    lines: list[dict],
+    reference: pd.DataFrame | None = None,
+    reference_label: str = "all routes",
+    min_n: int = 10,
+) -> go.Figure | None:
+    """Typical minutes late by hour of day, one line per entry of `lines` (dicts with 'label',
+    'df' (rows with hour_local, n, median_delay_s, p10_delay_s, p90_delay_s, optionally
+    n_days), 'color' and optionally 'dash'). With one line, the band where 8 in 10 of its buses
+    fell is drawn too; with several, the lines alone, so they can be compared. `reference`
+    (same columns) is drawn as a grey line with dots, only over the hours the lines cover.
+    None when no line has an hour with min_n arrivals."""
+    kept = []
+    for line in lines:
+        d = line["df"]
+        d = d[d["n"] >= min_n] if len(d) else d
+        if d is not None and len(d):
+            kept.append({**line, "df": d})
+    if not kept:
         return None
-    d = d.assign(_k=d["hour_local"].map(service_hour_key)).sort_values("_k")
-    hours = sorted(set(d["hour_local"].astype(int)), key=service_hour_key)
-    ref = None
-    if reference is not None and len(reference):
-        # the comparison line only where the chosen route or stop has buses: the chart spans
-        # the hours with data, not the whole service day
-        ref = reference[(reference["n"] >= min_n) & reference["hour_local"].isin(hours)]
-        ref = ref.assign(_k=ref["hour_local"].map(service_hour_key)).sort_values("_k")
+    hours = sorted({int(h) for ln in kept for h in ln["df"]["hour_local"]}, key=service_hour_key)
     x_of = {h: hour_label(h) for h in hours}
-    x = [x_of[int(h)] for h in d["hour_local"]]
+    one = len(kept) == 1
     fig = go.Figure()
     on_time_line(fig)
-    fig.add_trace(
-        go.Scatter(
-            x=x + x[::-1],
-            y=list(d["p90_delay_s"] / 60) + list(d["p10_delay_s"] / 60)[::-1],
-            fill="toself",
-            fillcolor=color,
-            opacity=0.18,
-            mode="lines",
-            line_width=0,
-            hoverinfo="skip",
-            name="8 in 10 buses",
-        )
-    )
-    if ref is not None and len(ref):
+    values: list[float] = []
+    for ln in kept:
+        d = ln["df"].assign(_k=ln["df"]["hour_local"].map(service_hour_key)).sort_values("_k")
+        x = [x_of[int(h)] for h in d["hour_local"]]
+        if one:
+            fig.add_trace(
+                go.Scatter(
+                    x=x + x[::-1],
+                    y=list(d["p90_delay_s"] / 60) + list(d["p10_delay_s"] / 60)[::-1],
+                    fill="toself",
+                    fillcolor=ln["color"],
+                    opacity=0.18,
+                    mode="lines",
+                    line_width=0,
+                    hoverinfo="skip",
+                    name="8 in 10 buses",
+                )
+            )
+            values += list(d["p10_delay_s"] / 60) + list(d["p90_delay_s"] / 60)
+        days = d["n_days"] if "n_days" in d else pd.Series([None] * len(d), index=d.index)
+        hover = [
+            (
+                f"<b>{ln['label']}</b>, {xx}<br>typical bus {fmt_delay(m)}"
+                f"<br>8 in 10 buses: {fmt_range(lo, hi)}"
+                f"<br>{int(n):,} arrivals" + (f" over {int(nd)} days" if pd.notna(nd) else "")
+            )
+            for xx, m, lo, hi, n, nd in zip(
+                x,
+                d["median_delay_s"],
+                d["p10_delay_s"],
+                d["p90_delay_s"],
+                d["n"],
+                days,
+                strict=False,
+            )
+        ]
         fig.add_trace(
             go.Scatter(
-                x=[x_of[int(h)] for h in ref["hour_local"]],
-                y=ref["median_delay_s"] / 60,
-                name=f"Typical bus, {reference_label}",
+                x=x,
+                y=d["median_delay_s"] / 60,
+                name=f"Typical bus, {ln['label']}" if one else ln["label"],
                 mode="lines+markers",
-                line={"color": REF_GREY, "width": LINE_REF},
-                marker={"size": MARKER_REF},
-                hovertext=[
-                    f"<b>{reference_label.capitalize()}</b>, {x_of[int(h)]}<br>typical bus {fmt_delay(v)}"
-                    for h, v in zip(ref["hour_local"], ref["median_delay_s"], strict=False)
-                ],
+                line={
+                    "color": ln["color"],
+                    "width": LINE_MAIN if one else LINE_ROUTE,
+                    "dash": ln.get("dash", "solid"),
+                },
+                marker={"size": MARKER_MAIN if one else MARKER_REF},
+                hovertext=hover,
                 hoverinfo="text",
             )
         )
-    days = d["n_days"] if "n_days" in d else pd.Series([None] * len(d), index=d.index)
-    hover = [
-        (
-            f"<b>{label}</b>, {xx}<br>typical bus {fmt_delay(m)}"
-            f"<br>8 in 10 buses: {fmt_range(lo, hi)}"
-            f"<br>{int(n):,} arrivals" + (f" over {int(nd)} days" if pd.notna(nd) else "")
-        )
-        for xx, m, lo, hi, n, nd in zip(
-            x,
-            d["median_delay_s"],
-            d["p10_delay_s"],
-            d["p90_delay_s"],
-            d["n"],
-            days,
-            strict=False,
-        )
-    ]
-    fig.add_trace(
-        go.Scatter(
-            x=x,
-            y=d["median_delay_s"] / 60,
-            name=f"Typical bus, {label}",
-            mode="lines+markers",
-            line={"color": color, "width": LINE_MAIN},
-            marker={"size": MARKER_MAIN},
-            hovertext=hover,
-            hoverinfo="text",
-        )
-    )
-    values = list(d["p10_delay_s"] / 60) + list(d["p90_delay_s"] / 60)
-    if ref is not None and len(ref):
-        values += list(ref["median_delay_s"] / 60)
+        values += list(d["median_delay_s"] / 60)
+    if reference is not None and len(reference):
+        # the comparison line only where the chosen lines have buses: the chart spans the hours
+        # with data, not the whole service day
+        ref = reference[(reference["n"] >= min_n) & reference["hour_local"].isin(hours)]
+        ref = ref.assign(_k=ref["hour_local"].map(service_hour_key)).sort_values("_k")
+        if len(ref):
+            fig.add_trace(
+                go.Scatter(
+                    x=[x_of[int(h)] for h in ref["hour_local"]],
+                    y=ref["median_delay_s"] / 60,
+                    name=f"Typical bus, {reference_label}",
+                    mode="lines+markers",
+                    line={"color": REF_GREY, "width": LINE_REF},
+                    marker={"size": MARKER_REF},
+                    hovertext=[
+                        f"<b>{reference_label.capitalize()}</b>, {x_of[int(h)]}<br>typical bus "
+                        f"{fmt_delay(v)}"
+                        for h, v in zip(ref["hour_local"], ref["median_delay_s"], strict=False)
+                    ],
+                    hoverinfo="text",
+                )
+            )
+            values += list(ref["median_delay_s"] / 60)
     fig.update_layout(
         xaxis={"type": "category", "categoryorder": "array", "categoryarray": list(x_of.values())},
         yaxis=minutes_axis(values),
         legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0, "xanchor": "left"},
         legend_title="",
         margin={"t": 30},
-        height=380,
+        height=400,
     )
     return fig
+
+
+# the help text of the hour-by-hour charts on the report cards, where lines can be compared
+LINES_HELP = (
+    "Against the printed timetable, by the hour the bus was scheduled. Each line is the typical "
+    "bus (the median); below the green line = early. With one line showing, the shaded band is "
+    "where 8 in 10 of its buses fell. Switch {all} and any {one} on or off to compare them; the "
+    "grey line is the whole network for the same hours. An hour needs 5 arrivals to show. Hover "
+    "a point for the numbers."
+)
+# the most a report card's table (every route at a stop, every stop on a route) takes up before
+# it scrolls within itself, so a long one doesn't push the rest of the page down
+REPORT_TABLE_HEIGHT = 360
+NETWORK = "whole network"
+
+HOURLY_LINES_SQL = """
+    select {key} as key, hour_local, count(*) as n,
+           percentile_cont(0.5) within group (order by delay_s) as median_delay_s,
+           percentile_cont(0.1) within group (order by delay_s) as p10_delay_s,
+           percentile_cont(0.9) within group (order by delay_s) as p90_delay_s,
+           count(distinct service_date) as n_days
+    from marts.fct_stop_events
+    where status is not null and service_date >= %s {where}
+    group by grouping sets ((hour_local), ({key}, hour_local))
+"""
+
+
+def hourly_by(key: str, where: str, params: tuple, start: date, wt: str | None) -> pd.DataFrame:
+    """Lateness by hour from fct_stop_events for the page's period and days, for everything
+    matching `where` together (key '' in the result) and for each value of `key` (a column or
+    SQL expression), so a chart can draw any of them as lines."""
+    clause, wt_params = day_sql(wt)
+    df = q(
+        HOURLY_LINES_SQL.format(key=key, where=f"{clause} {where}"),
+        (start, *wt_params, *params),
+    )
+    df["key"] = df["key"].astype(object).where(df["key"].notna(), ALL_ROUTES).astype(str)
+    for c in ("median_delay_s", "p10_delay_s", "p90_delay_s"):
+        df[c] = df[c].astype(float)
+    return df
+
+
+def line_choice(
+    options: list[str],
+    labels: dict[str, str],
+    default: list[str],
+    key: str,
+    all_label: str,
+    many: bool = False,
+) -> list[str]:
+    """Switch lines on and off: everything together (ALL_ROUTES) first, then each option, any
+    number at once. A row of buttons for a handful of options (routes at a stop); a searchable
+    list to add from when there are many (stops along a route). Returns the keys switched
+    on, in the order given."""
+    opts = [ALL_ROUTES, *options]
+    if key not in st.session_state:
+        st.session_state[key] = [k for k in default if k in opts] or [ALL_ROUTES]
+    else:
+        st.session_state[key] = [k for k in st.session_state[key] if k in opts]
+
+    def fmt(k: str) -> str:
+        return all_label if k == ALL_ROUTES else labels.get(k, k)
+
+    if many:
+        picked = st.multiselect(
+            "Lines to show",
+            opts,
+            format_func=fmt,
+            key=key,
+            placeholder="Add stops to compare (type to search)",
+            label_visibility="collapsed",
+        )
+    else:
+        with st.container(key=f"rp_{key}"):  # styled like the other route buttons
+            picked = st.pills(
+                "Lines to show",
+                opts,
+                selection_mode="multi",
+                format_func=fmt,
+                key=key,
+                label_visibility="collapsed",
+            )
+    return [k for k in opts if k in (picked or [])]
+
+
+def trend_chart(where: str, params: tuple, what: str) -> None:
+    """'Is it getting better?': the typical bus over time for everything matching `where` in
+    fct_stop_events (all days, all data), one point per day; per week once there are more
+    than TREND_MAX_POINTS days of data, per month after that many weeks. Draws the card's
+    chart or a note."""
+    span = q(
+        f"select min(service_date) as d0, max(service_date) as d1 from marts.fct_stop_events "
+        f"where status is not null {where}",
+        params,
+    ).iloc[0]
+    days = 0 if pd.isna(span["d0"]) else (span["d1"] - span["d0"]).days + 1
+    unit = (
+        "day" if days <= TREND_MAX_POINTS else "week" if days <= 7 * TREND_MAX_POINTS else "month"
+    )
+    trend = q(
+        f"""
+        select date_trunc(%s, service_date)::date as d, count(*) as n,
+               percentile_cont(0.5) within group (order by delay_s) as median_delay
+        from marts.fct_stop_events
+        where status is not null {where}
+        group by 1 having count(*) >= 5 order by 1
+        """,
+        (unit, *params),
+    )
+    if len(trend) < 2:
+        st.caption(f"A trend needs at least two days with 5 or more arrivals {what}.")
+        return
+    trend["median_delay"] = trend["median_delay"].astype(float)
+    when = {
+        "day": lambda d: pd.Timestamp(d).strftime("%a %b %-d"),
+        "week": lambda d: "Week of " + pd.Timestamp(d).strftime("%b %-d, %Y"),
+        "month": lambda d: pd.Timestamp(d).strftime("%B %Y"),
+    }[unit]
+    fig = go.Figure()
+    on_time_line(fig)
+    fig.add_trace(
+        go.Scatter(
+            x=pd.to_datetime(trend["d"]),
+            y=trend["median_delay"] / 60,
+            mode="lines+markers",
+            name="Typical bus",
+            line={"color": "#1f5f9e", "width": LINE_MAIN},
+            marker={"size": MARKER_MAIN},
+            hovertext=[
+                f"{when(d)}: typical bus {fmt_delay(m)} · {int(n):,} arrivals"
+                for d, m, n in zip(trend["d"], trend["median_delay"], trend["n"], strict=False)
+            ],
+            hoverinfo="text",
+        )
+    )
+    fig.update_layout(
+        xaxis={"type": "date", "title": ""},
+        yaxis=minutes_axis(list(trend["median_delay"] / 60)),
+        showlegend=False,
+        margin={"t": 20},
+        height=320,
+    )
+    show_chart(fig)
+
+
+# One point per day in "Is it getting better?"; per week once there's more than this many days
+# of data, per month once there's more than this many weeks, so the chart stays readable.
+TREND_MAX_POINTS = 120
+TREND_HELP = (
+    "The typical bus against the timetable, all days, one point per day: per week once there "
+    f"are more than {TREND_MAX_POINTS} days of data, per month after {TREND_MAX_POINTS} weeks. "
+    "Points with fewer than 5 arrivals are left out. All data: this chart doesn't follow the "
+    "period and days filters."
+)
 
 
 def fmt_range(p10, p90) -> str:
@@ -2424,23 +2684,23 @@ def busy_stops(n: int = 9) -> pd.DataFrame:
     )
 
 
-def busy_stop_buttons(key_prefix: str, n: int = 9) -> str | None:
-    """Buttons for the busiest well-measured stops; returns the stop_id clicked."""
+def busy_stop_buttons(key_prefix: str, n: int = 12) -> str | None:
+    """Buttons for the busiest stops (as on the Stops page); returns the stop_id clicked."""
     return stop_buttons(busy_stops(n), key_prefix)
 
 
-def stop_buttons(df: pd.DataFrame, key_prefix: str, show_code: bool = False) -> str | None:
-    """Three columns of stop buttons; returns the stop_id clicked, if any. The sign number
-    (#code) is shown only when asked (search results) or when two buttons share a name."""
+def stop_buttons(df: pd.DataFrame, key_prefix: str) -> str | None:
+    """Stop buttons that pick a stop on this page, drawn like the stop cards that open a stop's
+    report card (stop_tiles): name and sign number on one line, the stops' green edge, four to
+    a row. Returns the stop_id clicked, if any."""
     clicked = None
-    cols = st.columns(3)
-    dup = df["stop_name"].duplicated(keep=False)
-    for i, r in enumerate(df.itertuples()):
-        with_code = (show_code or dup.iloc[i]) and r.stop_code
-        label = f"{r.stop_name}" + (f"  ·  #{r.stop_code}" if with_code else "")
-        if cols[i % 3].button(label, key=f"{key_prefix}_{r.stop_id}", width="stretch"):
-            clicked = r.stop_id
-            st.session_state[f"{key_prefix}_name"] = r.stop_name
+    with st.container(key=f"stopbtn_{key_prefix}"):  # styled in streamlit_app.py
+        cols = st.columns(4)
+        for i, r in enumerate(df.itertuples()):
+            label = f"**{r.stop_name}**" + (f" :gray[· #{r.stop_code}]" if r.stop_code else "")
+            if cols[i % 4].button(label, key=f"{key_prefix}_{r.stop_id}", width="stretch"):
+                clicked = r.stop_id
+                st.session_state[f"{key_prefix}_name"] = r.stop_name
     return clicked
 
 

@@ -8,7 +8,6 @@ import plotly.graph_objects as go
 import streamlit as st
 from common import (
     ALL_ROUTES,
-    PREDICTION_OFF_CAPTION,
     PREDICTION_OFF_NOTE,
     busiest_route,
     busy_stop_buttons,
@@ -55,6 +54,7 @@ routes = q(
 short = dict(
     zip(routes["route_id"].astype(str), routes["route_short_name"].astype(str), strict=False)
 )
+chart_names = {k: f"Route {v}" for k, v in short.items()}  # how charts name each route
 
 # the first chart, then the period and days filters that everything on the page follows (drawn
 # in that order, though the filters are read first)
@@ -88,28 +88,25 @@ with chart_slot, card():
     lines = route_toggles(
         with_data, short, [ALL_ROUTES, *([compare] if compare else [])], key="pred_lines"
     )
-    fig0 = countdown_off_chart(off, short, lines, min_n=30)
+    fig0 = countdown_off_chart(off, chart_names, lines, min_n=30)
     if fig0 is None:
         st.caption("Pick a route above (or All routes); this one needs more measured arrivals.")
     else:
         show_chart(fig0)
-        st.caption(PREDICTION_OFF_CAPTION)
 
 
 # ---- by time of day ---------------------------------------------------------------------
 with card():
-    title_slot = st.empty()  # the title names the route picked just below it
-    tod_route = route_picker(
-        routes[routes["route_id"].astype(str).isin(with_data)], key="tod_route"
-    )
-    scope = "All routes" if tod_route is None else f"Route {short.get(str(tod_route), tod_route)}"
-    title_slot.subheader(
-        f"Does accuracy depend on the time of day? {scope}, {day_label(wt)}",
+    st.subheader(
+        "Does accuracy depend on the time of day?",
         help="Predictions made about this far ahead, by the hour they were on show. Each bar "
         "builds up: the dark part is the share right to within 1 minute; add the middle part "
         "for within 2 minutes; the whole bar is within 3 minutes. The space above is how often "
         "the bus came more than 3 minutes off. Hours with fewer than 20 bus arrivals are left "
         f"out. {period[0].upper() + period[1:]}.",
+    )
+    tod_route = route_picker(
+        routes[routes["route_id"].astype(str).isin(with_data)], key="tod_route"
     )
     AHEAD_CHOICES = {"2 min": (1, 2), "5 min": (5, 5), "10 min": (10, 10), "15 min": (15, 15)}
     ahead = (
@@ -188,7 +185,7 @@ with card():
 # ---- by route: average minutes off at 5 and 10 minutes away, and the timetable -------------
 with card():
     st.subheader(
-        f"Which routes have the best predictions? {day_label(wt).capitalize()}",
+        "Which routes have the best predictions?",
         help="Average minutes the bus came from the time it was given, early or late alike, on "
         "the same bus arrivals: the prediction when it said 5 and 10 minutes away, and the "
         "printed timetable. Lower is better. Routes with at least 50 bus arrivals measured. "
@@ -213,15 +210,20 @@ with card():
             return float(frame.loc[r, "mean_abs_s"]) / 60
 
         values = {r: (minutes(at[5], r), minutes(at[10], r), minutes(tt, r)) for r in ids}
-        top = max(v for vs in values.values() for v in vs if v is not None)
+        # the two prediction columns share a scale (so 5 and 10 minutes away compare); the
+        # timetable column has its own, so its few very large values don't shrink the rest
+        top_pred = max(v for vs in values.values() for v in vs[:2] if v is not None)
+        top_tt = max((vs[2] for vs in values.values() if vs[2] is not None), default=1.0)
 
-        def bar(v: float | None, colour: str) -> str:
+        def bar(v: float | None, colour: str, top: float) -> str:
             if v is None:
                 return ""
             return (
                 "<span class='ebw-g'><span class='ebw-x'>"
                 f"<span class='ebw-x1' style='left:0;top:4px;width:{v / top * 100:.0f}%;"
-                f"background:{colour}'></span></span><span class='ebw-s'>{v:.1f} min</span>"
+                f"background:{colour}'></span></span>"
+                # a short number, so the bar gets the rest of the column
+                f"<span class='ebw-s' style='flex:0 0 3.6em'>{v:.1f} min</span>"
                 "</span>"
             )
 
@@ -234,11 +236,11 @@ with card():
                     "hover": f"Route {short.get(r, r)}: measured on "
                     f"{int(at[15].loc[r, 'n']):,} bus arrivals",
                     "route": short.get(r, r),
-                    "c5": bar(c5, "#1f5f9e"),
+                    "c5": bar(c5, "#1f5f9e", top_pred),
                     "c5_s": c5,
-                    "c10": bar(c10, "#1f5f9e"),
+                    "c10": bar(c10, "#1f5f9e", top_pred),
                     "c10_s": c10,
-                    "tt": bar(t, "#8a8f94"),
+                    "tt": bar(t, "#8a8f94", top_tt),
                     "tt_s": t,
                 }
             )
@@ -337,7 +339,7 @@ with card():
             key=f"pred_stop_lines_{pstop}",
             all_label="All routes here",
         )
-        fig_s = countdown_off_chart(at_stop, short, here_lines, all_label="All routes here")
+        fig_s = countdown_off_chart(at_stop, chart_names, here_lines, all_label="All routes here")
         if fig_s is None:
             st.caption("Not enough measured arrivals with a prediction here yet for this period.")
         else:

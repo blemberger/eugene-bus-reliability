@@ -70,7 +70,9 @@ the first stretch of the route ahead of the last, so a route that uses a street 
 maximum over time removes GPS jitter, and when that fraction steps past a stop between two reports the crossing time is
 interpolated (±15 s at a 30 s poll while moving). Independently, the feed keeps reporting a departure time for stops
 already passed that no longer changes; that "settled" time is recorded too, and the two are compared in the cross-check
-below. Stops passed before a trip's first report can't be timed and are excluded.
+below. Stops passed before a trip's first report can't be timed and are excluded. At a trip's first stop the bus
+usually arrives early and waits, so what counts there is when it leaves: LTD's recorded departure is used for first
+stops, and our GPS arrival everywhere else.
 
 **Headways.** On routes scheduled every 20 minutes or better, the gap between consecutive buses at a stop is compared to
 the scheduled gap. Bunched = under half the scheduled gap; big gap = over 1.5×.
@@ -414,7 +416,11 @@ with card():
         select date_trunc('hour', fetched_at) as hour, feed, count(*) as n,
                count(*) filter (where entity_count = 0) as empty
         from rt.fetch
-        where fetched_at > now() - interval '7 days' and feed in ('vehicle_positions', 'trip_updates')
+        -- whole hours only: the hour in progress (and a part-hour 7 days back) would show as
+        -- a false dip
+        where fetched_at >= date_trunc('hour', now()) - interval '7 days'
+          and fetched_at < date_trunc('hour', now())
+          and feed in ('vehicle_positions', 'trip_updates')
         group by 1, 2 order by 1
         """
     )
@@ -422,7 +428,12 @@ with card():
         hourly["hour"] = pd.to_datetime(hourly["hour"], utc=True).dt.tz_convert(
             "America/Los_Angeles"
         )
-        st.markdown("##### Messages received from LTD per hour, last 7 days")
+        st.markdown(
+            "##### Messages received from LTD per hour, last 7 days",
+            help="Two a minute (120 an hour, the dotted line) when everything runs. A dip is a "
+            "gap in collection or in LTD's feed; overnight, when no buses run, LTD's messages "
+            "are empty but still arrive.",
+        )
         fig_h = go.Figure()
         for feed, name, colour in (
             ("vehicle_positions", "Bus positions", "#1f5f9e"),
@@ -443,14 +454,10 @@ with card():
             )
         fig_h.add_hline(y=120, line_dash="dot", line_color="#9aa0a6", line_width=1.5)
         fig_h.update_layout(
-            yaxis={"title": "Messages per hour", "rangemode": "tozero"},
+            # fitted to the data (plus the 120 line), so a dip of a few messages shows
+            yaxis={"title": "Messages per hour"},
             xaxis={"title": "", "tickformat": "%a %b %-d", "dtick": 86400000},
             legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0},
             height=300,
         )
         show_chart(fig_h)
-        st.caption(
-            "Two a minute (120 an hour, the dotted line) when everything runs. A dip is a gap "
-            "in collection or in LTD's feed; overnight, when no buses run, LTD's messages are "
-            "empty but still arrive."
-        )

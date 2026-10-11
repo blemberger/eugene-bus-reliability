@@ -49,6 +49,18 @@ st.html(
     "[data-testid^='stBaseButton'] { min-height: 2.75rem; font-size: 1.05rem;"
     " padding: 0.45rem 1.1rem; }"
     "[data-testid='stPageLink'] p { font-size: 1.05rem; font-weight: 600; }"
+    # buttons that pick a stop on the page (common.stop_buttons): drawn like the stop cards
+    "[class*='st-key-stopbtn_'] button { justify-content: flex-start; text-align: left;"
+    " border-left: 4px solid #0b6e4f; border-radius: 6px; padding: 0.45rem 0.65rem;"
+    " min-height: 0; }"
+    "[class*='st-key-stopbtn_'] button > div { justify-content: flex-start; }"
+    "[class*='st-key-stopbtn_'] button p { text-align: left; }"
+    "[class*='st-key-stopbtn_'] button * { white-space: normal !important;"
+    " overflow: visible !important; text-overflow: clip !important; }"
+    # the label above every control (Stop, Period, Days, Direction, ...): bold, so it reads as
+    # the control's name rather than as text
+    "[data-testid='stWidgetLabel'] p { font-size: 1rem !important; font-weight: 650;"
+    " color: #262730; }"
     # the way back from a report card to every route or stop (common.back_button): an outlined
     # green button, the first thing on the page
     "[class*='st-key-backlink'] a, [class*='st-key-backlink'] button {"
@@ -59,10 +71,12 @@ st.html(
     " background: #eef6f2; }"
     "[class*='st-key-backlink'] p { font-size: 1.12rem !important; font-weight: 700;"
     " color: #0b6e4f; }"
-    # route buttons (common.route_picker): "All routes" first, set apart from the route numbers
-    "[class*='st-key-rp_'] [role='radiogroup'] > button:first-child {"
+    # route and line buttons (common.route_picker, line_choice, route_toggles): "All routes"
+    # first, set apart from the rest; the same whether one or several can be on at once
+    "[class*='st-key-rp_'] [data-testid='stButtonGroup'] [data-orientation] > button:first-child {"
     " border: 1.5px solid #0b6e4f; margin-right: 0.75rem; }"
-    "[class*='st-key-rp_'] [role='radiogroup'] > button:first-child p { font-weight: 700; }"
+    "[class*='st-key-rp_'] [data-testid='stButtonGroup'] [data-orientation] > button:first-child p"
+    " { font-weight: 700; }"
     "@media (max-width: 640px) {"
     " .stLogo { height: 1.7rem; margin: 0 0.4rem 0 0.2rem; }"
     " header[data-testid='stHeader'], header [data-testid='stToolbar'] { height: 3.8rem; }"

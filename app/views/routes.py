@@ -6,6 +6,7 @@ from __future__ import annotations
 import streamlit as st
 from common import (
     LATENESS_CHART_NOTE,
+    NOT_ENOUGH_HOURLY,
     card,
     data_note,
     day_label,
@@ -25,14 +26,13 @@ from common import (
 )
 
 require_db()
-st.title("Route report cards")
+st.title("How reliable is my route?")
 require_marts()
 # Find your route (a card per route, as Stops has Find your stop), the table and the chart,
 # then the period and days filters that the table and chart follow (drawn in that order on the
 # page, though the filters are read first)
 with card():
     st.subheader("Find your route")
-    st.caption("Each route's report card:")
     every = routes_by_service()
     route_tiles(
         every.assign(
@@ -63,12 +63,12 @@ with table_slot, card():
 # ---- by hour: all routes together ---------------------------------------------------------
 with chart_slot, card():
     st.subheader(
-        f"How close to the timetable, hour by hour? All routes, {day_label(wt)}",
+        "How close to the timetable, hour by hour?",
         help=LATENESS_CHART_NOTE,
     )
     fig = lateness_chart(lateness(start, wt, "hour"), "all routes")
     if fig is None:
-        st.caption("Not enough arrivals yet for an hour-by-hour view.")
+        st.caption(NOT_ENOUGH_HOURLY.format(n=10))
     else:
         show_chart(fig)
 

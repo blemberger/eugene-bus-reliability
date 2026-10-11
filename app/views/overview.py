@@ -6,6 +6,8 @@ from __future__ import annotations
 import streamlit as st
 from common import (
     LATENESS_CHART_NOTE,
+    NETWORK,
+    NOT_ENOUGH_HOURLY,
     RANGE_HELP,
     TYPICAL_HELP,
     card,
@@ -97,10 +99,12 @@ with card():
                 )
     else:
         ref = lateness(start, wt, "hour") if (route_id or stop_id) else None
-        fig = lateness_chart(hourly, what, reference=ref, min_n=5 if stop_id else 10)
+        fig = lateness_chart(
+            hourly, what, reference=ref, reference_label=NETWORK, min_n=5 if stop_id else 10
+        )
         with chart_slot:
             if fig is None:
-                st.caption("Not enough arrivals yet for an hour-by-hour view (needs 5 in an hour).")
+                st.caption(NOT_ENOUGH_HOURLY.format(n=5 if stop_id else 10))
             else:
                 show_chart(fig)
         today = today_lateness(route_id=route_id, stop_id=stop_id)
@@ -132,7 +136,6 @@ if marts_ready():
                 "filters above). Click a column heading to sort, again to reverse.",
             )
             route_table(per, start, key="ov_routes")
-            st.caption("Click a route for its report card.")
     st.page_link("views/stops.py", label="Every stop, and each stop's report card →")
 
 n_now = q("""

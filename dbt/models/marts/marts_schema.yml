@@ -28,14 +28,25 @@ models:
               config:
                 where: "status is not null and service_date >= current_date - 3"
       - name: uncertainty_s
-        # Scored events are precise by construction; imprecise ones are counted in mart_daily_coverage.
+        # Events scored by our GPS method are precise by construction; imprecise ones are
+        # counted in mart_daily_coverage.
         tests:
           - dbt_utils.accepted_range:
               arguments:
                 min_value: 0
                 max_value: "{{ var('max_uncertainty_seconds') }}"
               config:
-                where: "status is not null and service_date >= current_date - 3"
+                where: "status is not null and time_source = 'gps' and service_date >= current_date - 3"
+      - name: time_source
+        description: >
+          Which time was scored: 'ltd_departure' (LTD's recorded departure, used at a trip's
+          first stop) or 'gps' (our arrival time from the bus positions).
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['gps', 'ltd_departure']
+              config:
+                where: "service_date >= current_date - 3"
 
   - name: fct_prediction_errors
     description: Every prediction scored against the observed arrival.

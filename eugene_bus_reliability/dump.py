@@ -816,13 +816,32 @@ def main(settings: Settings, raw: bool = False) -> None:
             """
             select case when is_first_stop then 'first stop' when is_last_stop then 'last stop'
                         when is_timepoint then 'timepoint' else 'other stop' end kind,
-                   count(*) n,
+                   time_source, count(*) n,
+                   round(100.0 * count(*) filter (where delay_s = 0) / count(*), 1) pct_exactly_0s,
                    round(100.0 * count(*) filter (where delay_s < -180) / count(*), 1) pct_over_3min_early,
                    round(100.0 * count(*) filter (where delay_s < -300) / count(*), 1) pct_over_5min_early,
                    round(100.0 * count(*) filter (where delay_s > 300) / count(*), 1) pct_over_5min_late
             from marts.fct_stop_events
             where status is not null and service_date >= current_date - 30
-            group by 1 order by 1
+            group by 1, 2 order by 1, 2
+        """,
+        )
+        print(
+            "First stops: of the trips we saw running, how many have an LTD departure we score\n"
+            "(time_source), and how long before LTD's departure our GPS saw the bus arrive:"
+        )
+        show(
+            cur,
+            """
+            select count(*) n_first_stops_seen,
+                   round(100.0 * avg((time_source = 'ltd_departure')::int), 1) pct_ltd_departure,
+                   round(100.0 * avg((status is not null)::int), 1) pct_scored,
+                   round(percentile_cont(0.5) within group
+                         (order by extract(epoch from feed_settled_time - observed_arrival))) arrived_before_departure_median_s,
+                   round(percentile_cont(0.9) within group
+                         (order by extract(epoch from feed_settled_time - observed_arrival))) arrived_before_departure_p90_s
+            from marts.fct_stop_events
+            where is_first_stop and trip_had_realtime and service_date >= current_date - 30
         """,
         )
 
