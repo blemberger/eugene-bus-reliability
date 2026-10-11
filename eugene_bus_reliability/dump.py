@@ -777,6 +777,30 @@ def main(settings: Settings, raw: bool = False) -> None:
             group by 1 order by length(r.route_short_name), 1
         """,
         )
+        print(
+            "Report cards' predictions (mart_prediction_stop_daily, by stop) against the\n"
+            "Predictions page's (mart_prediction_daily), last 30 days: the same arrivals, so the\n"
+            "same counts and averages:"
+        )
+        show(
+            cur,
+            """
+            with a as (
+                select basis, coalesce(ahead_min, 0) m, sum(n) n, sum(sum_abs_s) s
+                from marts.mart_prediction_daily where service_date >= current_date - 30
+                group by 1, 2
+            ), b as (
+                select basis, coalesce(ahead_min, 0) m, sum(n) n, sum(sum_abs_s) s
+                from marts.mart_prediction_stop_daily where service_date >= current_date - 30
+                group by 1, 2
+            )
+            select a.basis, nullif(a.m, 0) ahead_min, a.n page_n, b.n report_card_n,
+                   round(a.s::numeric / a.n) page_avg_s, round(b.s::numeric / b.n) report_card_avg_s,
+                   case when a.n = b.n and a.s = b.s then 'PASS' else 'DIFFERENT' end result
+            from a left join b using (basis, m)
+            where a.m in (0, 1, 5, 10, 15) order by 1, 2
+        """,
+        )
 
         section("OUTLIER STOPS: typically over 5 min late, or 8 in 10 starting over 5 min early")
         print(
@@ -842,6 +866,29 @@ def main(settings: Settings, raw: bool = False) -> None:
                          (order by extract(epoch from feed_settled_time - observed_arrival))) arrived_before_departure_p90_s
             from marts.fct_stop_events
             where is_first_stop and trip_had_realtime and service_date >= current_date - 30
+        """,
+        )
+        print(
+            "Which condition keeps a first stop off LTD's departure (each column: first stops of\n"
+            "trips we saw that pass it; was_skipped as the feed table stores it):"
+        )
+        show(
+            cur,
+            """
+            select count(*) n,
+                   count(*) filter (where f.settled_time is not null) has_ltd_time,
+                   count(*) filter (where f.is_settled) settled,
+                   count(*) filter (where f.was_skipped) skipped_true,
+                   count(*) filter (where f.was_skipped = false) skipped_false,
+                   count(*) filter (where f.settled_time is not null and f.was_skipped is null)
+                       skipped_null,
+                   count(*) filter (where abs(extract(epoch from f.settled_time - e.scheduled_arrival))
+                                    <= 1800) within_30min_of_schedule
+            from marts.fct_stop_events e
+            left join intermediate.int_feed_settled_times f
+              on f.service_date = e.service_date and f.trip_id = e.trip_id
+             and f.stop_sequence = e.stop_sequence
+            where e.is_first_stop and e.trip_had_realtime and e.service_date >= current_date - 7
         """,
         )
 

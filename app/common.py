@@ -809,11 +809,38 @@ BOT_AGENTS = re.compile(
 )
 
 
+# A browser that has opened the site once with ?dont_count_me (the site's owner, on each of
+# his browsers) carries this cookie and is left out of the visitor counts, as WordPress stats
+# leave out a logged-in owner. Set only on request; nothing else uses cookies.
+NOT_COUNTED_COOKIE = "ebw_not_counted"
+
+
+def not_counted() -> bool:
+    """Is this browser left out of the visitor counts? Opening any page with ?dont_count_me
+    sets that (for 10 years) and says so."""
+    if "dont_count_me" in st.query_params:
+        st.html(
+            f"<script>document.cookie = '{NOT_COUNTED_COOKIE}=1; max-age=315360000; path=/; "
+            "SameSite=Lax';</script>",
+            unsafe_allow_javascript=True,
+        )
+        st.toast("This browser won't be counted in the visitor numbers.")
+        del st.query_params["dont_count_me"]
+        return True
+    try:
+        return st.context.cookies.get(NOT_COUNTED_COOKIE) == "1"
+    except Exception:  # noqa: BLE001 — no browser (tests, scripts)
+        return False
+
+
 def log_page_view(page: str) -> None:
     """Count a page view in site.page_view: the time, the page (with the stop or route
     chosen on it), phone or computer, and a random id for this browser tab's session, so
     visits can be counted. No IP address, cookie or anything identifying is stored. Logged
-    once per page and choice, not on every rerun; never interrupts the page."""
+    once per page and choice, not on every rerun; never interrupts the page. Not at all for a
+    browser that asked not to be counted (not_counted())."""
+    if not_counted():
+        return
     try:
         ua = st.context.headers.get("User-Agent", "") or ""
     except Exception:  # noqa: BLE001 — no browser (tests, scripts)
@@ -1630,70 +1657,46 @@ def prediction_off(start: date, wt: str | None) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def _prediction_stop_rows(
+    where: str, params: tuple, key: str, keys: list[str] | None, start: date, wt: str | None
+) -> pd.DataFrame:
+    """prediction_off()'s rows from marts.mart_prediction_stop_daily for the rows matching
+    `where`: everything together (route_id null) and each value of `key` (in the route_id
+    column, so countdown_off_chart draws it), only those in `keys` when given. Empty while the
+    analysis is being rebuilt."""
+    clause, wt_params = day_sql(wt)
+    only = "" if keys is None else f"having grouping({key}) = 1 or {key} = any(%s)"
+    try:
+        return q(
+            f"""
+            select basis, ahead_min, case when grouping({key}) = 0 then {key} end as route_id,
+                   sum(n) as n, sum(sum_abs_s)::float8 / nullif(sum(n), 0) as mean_abs_s
+            from marts.mart_prediction_stop_daily
+            where {where} and service_date >= %s {clause}
+            group by grouping sets ((basis, ahead_min), (basis, ahead_min, {key}))
+            {only}
+            """,
+            (*params, start, *wt_params, *(() if keys is None else (list(keys) or ["-"],))),
+        )
+    except Exception:  # noqa: BLE001 — the mart is being rebuilt (or not built yet)
+        return pd.DataFrame()
+
+
 def countdown_off_at_stop(stop_id: str, start: date, wt: str | None) -> pd.DataFrame:
-    """prediction_off() for one stop, all its routes together and each route, computed on the
-    spot (fct_countdown_samples) so it follows the page's period and days."""
-    wt_e, wt_params = day_sql(wt)
-    cut = "where stop_id = %s and in_comparison and service_date >= %s " + wt_e
-    return q(
-        f"""
-        select 'timetable' as basis, null::int as ahead_min,
-               case when grouping(route_id) = 0 then route_id end as route_id,
-               count(*) as n, avg(abs(schedule_error_s)) as mean_abs_s
-        from marts.fct_countdown_samples {cut} and ahead_min = 15
-        group by grouping sets ((), (route_id))
-        union all
-        select 'sign', ahead_min, case when grouping(route_id) = 0 then route_id end,
-               count(*), avg(abs(error_s))
-        from marts.fct_countdown_samples {cut}
-        group by grouping sets ((ahead_min), (route_id, ahead_min))
-        """,
-        (stop_id, start, *wt_params, stop_id, start, *wt_params),
-    )
+    """prediction_off() for one stop: all its routes together and each route, for the page's
+    period and days."""
+    return _prediction_stop_rows("stop_id = %s", (stop_id,), "route_id", None, start, wt)
 
 
 def countdown_off_on_route(
     route_id: str, direction: int | None, start: date, wt: str | None, stop_ids: list[str]
 ) -> pd.DataFrame:
-    """prediction_off() along one route (in one direction): every stop together (route_id
-    null) and each stop asked for (its stop_id in the route_id column, so the same chart draws
-    it), computed on the spot (fct_countdown_samples) for the page's period and days."""
-    wt_e, wt_params = day_sql(wt)
-    dir_sql = (
-        "and trip_id in (select trip_id from gtfs.trips where route_id = %s and direction_id = %s)"
-        if direction is not None
-        else ""
-    )
-    dir_params = (route_id, direction) if direction is not None else ()
-    cut = f"where route_id = %s and in_comparison and service_date >= %s {wt_e} {dir_sql}"
-    stops = list(stop_ids) or ["-"]
-    return q(
-        f"""
-        select 'timetable' as basis, null::int as ahead_min,
-               case when grouping(stop_id) = 0 then stop_id end as route_id,
-               count(*) as n, avg(abs(schedule_error_s)) as mean_abs_s
-        from marts.fct_countdown_samples {cut} and ahead_min = 15
-        group by grouping sets ((), (stop_id))
-        having grouping(stop_id) = 1 or stop_id = any(%s)
-        union all
-        select 'sign', ahead_min, case when grouping(stop_id) = 0 then stop_id end,
-               count(*), avg(abs(error_s))
-        from marts.fct_countdown_samples {cut}
-        group by grouping sets ((ahead_min), (stop_id, ahead_min))
-        having grouping(stop_id) = 1 or stop_id = any(%s)
-        """,
-        (
-            route_id,
-            start,
-            *wt_params,
-            *dir_params,
-            stops,
-            route_id,
-            start,
-            *wt_params,
-            *dir_params,
-            stops,
-        ),
+    """prediction_off() along one route (in one direction): every stop together and each stop
+    asked for (its stop_id in the route_id column), for the page's period and days."""
+    if direction is None:
+        return _prediction_stop_rows("route_id = %s", (route_id,), "stop_id", stop_ids, start, wt)
+    return _prediction_stop_rows(
+        "route_id = %s and direction_id = %s", (route_id, direction), "stop_id", stop_ids, start, wt
     )
 
 
@@ -1716,7 +1719,7 @@ def route_toggles(
     options = [ALL_ROUTES, *ids]
     if key not in st.session_state:
         st.session_state[key] = [k for k in default if k in options] or [ALL_ROUTES]
-    with st.container(key=f"rp_{key}"):  # styled like the other route buttons
+    with st.container(key=f"rp_{key}"):
         picked = st.pills(
             "Routes",
             options,
@@ -1766,7 +1769,7 @@ def countdown_off_chart(
                 x=g["ahead_min"],
                 y=g["off"],
                 mode="lines+markers",
-                name=f"{label}: predictions",
+                name=f"Predictions ({in_parens(label)})",
                 legendgroup=key or "all",
                 legendrank=2 * rank,
                 line={"color": colour, "width": LINE_MAIN},
@@ -1786,11 +1789,11 @@ def countdown_off_chart(
                     x=[1, 15],
                     y=[t, t],
                     mode="lines",
-                    name=f"{label}: timetable",
+                    name=f"Timetable ({in_parens(label)})",
                     legendgroup=key or "all",
                     legendrank=2 * rank + 1,
                     line={"color": colour, "width": 1.6},
-                    hovertemplate=f"<b>{label}: printed timetable</b><br>{t:.1f} min off on "
+                    hovertemplate=f"<b>Printed timetable ({in_parens(label)})</b><br>{t:.1f} min off on "
                     "average, for the same bus arrivals<extra></extra>",
                 )
             )
@@ -1919,6 +1922,20 @@ LATENESS_CHART_NOTE = (
 )
 
 
+def in_parens(label: str) -> str:
+    """A line's name as it reads inside a legend entry's brackets: "Route 11" -> "route 11",
+    "All routes here" -> "all routes here"; names that start with a proper noun or a number
+    ("EmX", "3. Olive & 11th") are kept as they are."""
+    if label[:1].isupper() and label[1:2].islower() and label.split(" ")[0] in ("Route", "All"):
+        return label[0].lower() + label[1:]
+    return label
+
+
+def as_name(label: str) -> str:
+    """A line's name standing on its own in a legend: capitalised."""
+    return label[:1].upper() + label[1:]
+
+
 def lateness_chart(
     hourly: pd.DataFrame,
     label: str,
@@ -1978,14 +1995,16 @@ def hourly_lines_chart(
                     mode="lines",
                     line_width=0,
                     hoverinfo="skip",
-                    name="8 in 10 buses",
+                    # named for what it is the spread of; listed after the line it belongs to
+                    name=f"8 in 10 buses ({in_parens(ln['label'])})",
+                    legendrank=2,
                 )
             )
             values += list(d["p10_delay_s"] / 60) + list(d["p90_delay_s"] / 60)
         days = d["n_days"] if "n_days" in d else pd.Series([None] * len(d), index=d.index)
         hover = [
             (
-                f"<b>{ln['label']}</b>, {xx}<br>typical bus {fmt_delay(m)}"
+                f"<b>{as_name(ln['label'])}</b>, {xx}<br>typical bus {fmt_delay(m)}"
                 f"<br>8 in 10 buses: {fmt_range(lo, hi)}"
                 f"<br>{int(n):,} arrivals" + (f" over {int(nd)} days" if pd.notna(nd) else "")
             )
@@ -2003,7 +2022,8 @@ def hourly_lines_chart(
             go.Scatter(
                 x=x,
                 y=d["median_delay_s"] / 60,
-                name=f"Typical bus, {ln['label']}" if one else ln["label"],
+                name=f"Typical bus ({in_parens(ln['label'])})" if one else as_name(ln["label"]),
+                legendrank=1,
                 mode="lines+markers",
                 line={
                     "color": ln["color"],
@@ -2026,12 +2046,13 @@ def hourly_lines_chart(
                 go.Scatter(
                     x=[x_of[int(h)] for h in ref["hour_local"]],
                     y=ref["median_delay_s"] / 60,
-                    name=f"Typical bus, {reference_label}",
+                    name=f"Typical bus ({in_parens(reference_label)})",
+                    legendrank=3,
                     mode="lines+markers",
                     line={"color": REF_GREY, "width": LINE_REF},
                     marker={"size": MARKER_REF},
                     hovertext=[
-                        f"<b>{reference_label.capitalize()}</b>, {x_of[int(h)]}<br>typical bus "
+                        f"<b>{as_name(reference_label)}</b>, {x_of[int(h)]}<br>typical bus "
                         f"{fmt_delay(v)}"
                         for h, v in zip(ref["hour_local"], ref["median_delay_s"], strict=False)
                     ],
@@ -2054,14 +2075,14 @@ def hourly_lines_chart(
 LINES_HELP = (
     "Against the printed timetable, by the hour the bus was scheduled. Each line is the typical "
     "bus (the median); below the green line = early. With one line showing, the shaded band is "
-    "where 8 in 10 of its buses fell. Switch {all} and any {one} on or off to compare them; the "
-    "grey line is the whole network for the same hours. An hour needs 5 arrivals to show. Hover "
-    "a point for the numbers."
+    "where 8 in 10 of its buses fell. {choose} An hour needs 5 arrivals to show. Hover a point "
+    "for the numbers."
 )
 # the most a report card's table (every route at a stop, every stop on a route) takes up before
 # it scrolls within itself, so a long one doesn't push the rest of the page down
 REPORT_TABLE_HEIGHT = 360
-NETWORK = "whole network"
+# every bus at every stop: the name of that line wherever a chart shows it
+NETWORK = "all routes and stops"
 
 HOURLY_LINES_SQL = """
     select {key} as key, hour_local, count(*) as n,
@@ -2102,7 +2123,7 @@ def line_choice(
     number at once. A row of buttons for a handful of options (routes at a stop); a searchable
     list to add from when there are many (stops along a route). Returns the keys switched
     on, in the order given."""
-    opts = [ALL_ROUTES, *options]
+    opts = [ALL_ROUTES, *dict.fromkeys(options)]  # once each (a loop route passes a stop twice)
     if key not in st.session_state:
         st.session_state[key] = [k for k in default if k in opts] or [ALL_ROUTES]
     else:
@@ -2121,7 +2142,7 @@ def line_choice(
             label_visibility="collapsed",
         )
     else:
-        with st.container(key=f"rp_{key}"):  # styled like the other route buttons
+        with st.container(key=f"rp_{key}"):
             picked = st.pills(
                 "Lines to show",
                 opts,
@@ -2131,6 +2152,23 @@ def line_choice(
                 label_visibility="collapsed",
             )
     return [k for k in opts if k in (picked or [])]
+
+
+def one_choice(
+    options: list[str], labels: dict[str, str], key: str, all_label: str, label: str
+) -> str:
+    """Pick one line to show, from a list you can type into to search: everything together
+    (ALL_ROUTES, the default) first, then each option. Choosing another replaces the one shown.
+    Returns the key chosen."""
+    opts = [ALL_ROUTES, *dict.fromkeys(options)]
+    if st.session_state.get(key) not in opts:
+        st.session_state[key] = ALL_ROUTES
+    return st.selectbox(
+        label,
+        opts,
+        format_func=lambda k: all_label if k == ALL_ROUTES else labels.get(k, k),
+        key=key,
+    )
 
 
 def trend_chart(where: str, params: tuple, what: str) -> None:
@@ -2191,6 +2229,53 @@ def trend_chart(where: str, params: tuple, what: str) -> None:
         height=320,
     )
     show_chart(fig)
+
+
+def network_trend_card() -> None:
+    """'Is it getting better?' for every route at every stop (the Routes and Stops pages)."""
+    with card():
+        st.subheader("Is it getting better?", help=TREND_HELP + " Every route at every stop.")
+        trend_chart("", (), "")
+
+
+PREDICTIONS_LINK = "More about the predictions →"
+
+
+def network_predictions_card(start: date, wt: str | None, period: str, by_route: bool) -> None:
+    """'How far off are the predictions?' for every route at every stop, as each report card has
+    for its own route or stop: on the Routes page with a button per route to compare (as on the
+    Predictions page), on the Stops page every stop together."""
+    with card():
+        st.subheader(
+            "How far off are the predictions?",
+            help=PREDICTION_OFF_NOTE + f" {period[0].upper() + period[1:]}.",
+        )
+        off = prediction_off(start, wt)
+        if off.empty or off["n"].sum() == 0:
+            st.caption("No measured predictions for this period yet.")
+            return
+        names = {}
+        lines = [ALL_ROUTES]
+        if by_route:
+            r = routes_by_service()
+            names = dict(
+                zip(r["route_id"].astype(str), r["route_short_name"].astype(str), strict=False)
+            )
+            ids = sorted({str(x) for x in off["route_id"].dropna()} & set(names))
+            lines = route_toggles(ids, names, [ALL_ROUTES], key="landing_pred_lines")
+        fig = countdown_off_chart(
+            off,
+            {k: f"Route {v}" for k, v in names.items()},
+            lines,
+            # named as its button says on the Routes page; every route at every stop elsewhere
+            all_label="All routes" if by_route else as_name(NETWORK),
+            min_n=30,
+        )
+        if fig is None:
+            st.caption("Not enough measured arrivals with a prediction yet for this choice.")
+        else:
+            show_chart(fig)
+        st.page_link("views/accuracy.py", label=PREDICTIONS_LINK)
 
 
 # One point per day in "Is it getting better?"; per week once there's more than this many days
@@ -2608,8 +2693,8 @@ def routes_by_service() -> pd.DataFrame:
 def route_picker(
     routes: pd.DataFrame, key: str, all_label: str | None = "All routes", query_param: str = "route"
 ) -> str | None:
-    """A row of route buttons ('All routes' first, set apart by the site's CSS, then every route
-    by number); returns the chosen route_id, or None for all routes.
+    """A row of route buttons ('All routes' first, then every route by number, all alike);
+    returns the chosen route_id, or None for all routes.
 
     `routes` needs route_id and route_short_name. The choice is kept in the page's address
     (?route=...) so it can be bookmarked and shared. No label: the buttons say what they are."""
@@ -2625,7 +2710,6 @@ def route_picker(
         st.session_state[key] = wanted if wanted in ids else (all_key if all_label else ids[0])
     elif st.session_state[key] not in options:  # e.g. a route with no data in this period
         st.session_state[key] = all_key if all_label else ids[0]
-    # the container's key gives it the CSS class st-key-rp_..., which streamlit_app.py styles
     with st.container(key=f"rp_{key}"):
         choice = st.pills(
             "Route",

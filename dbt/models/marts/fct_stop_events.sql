@@ -84,7 +84,9 @@ joined as (
         coalesce(f.was_skipped, false) as was_skipped,
         case when o.is_bounded then extract(epoch from f.settled_time - o.observed_arrival)::int end as methods_diff_s,
         coalesce(
-            s.is_first_stop and not f.was_skipped and st.trip_id is not null
+            -- was_skipped is null (not false) for a stop the feed made no remark about
+            s.is_first_stop and f.settled_time is not null
+            and not coalesce(f.was_skipped, false) and st.trip_id is not null
             and extract(epoch from f.settled_time - s.scheduled_arrival)
                 between -{{ var('plausible_early_seconds') }} and {{ var('plausible_late_seconds') }},
             false

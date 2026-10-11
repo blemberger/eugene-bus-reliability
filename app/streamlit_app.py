@@ -71,12 +71,6 @@ st.html(
     " background: #eef6f2; }"
     "[class*='st-key-backlink'] p { font-size: 1.12rem !important; font-weight: 700;"
     " color: #0b6e4f; }"
-    # route and line buttons (common.route_picker, line_choice, route_toggles): "All routes"
-    # first, set apart from the rest; the same whether one or several can be on at once
-    "[class*='st-key-rp_'] [data-testid='stButtonGroup'] [data-orientation] > button:first-child {"
-    " border: 1.5px solid #0b6e4f; margin-right: 0.75rem; }"
-    "[class*='st-key-rp_'] [data-testid='stButtonGroup'] [data-orientation] > button:first-child p"
-    " { font-weight: 700; }"
     "@media (max-width: 640px) {"
     " .stLogo { height: 1.7rem; margin: 0 0.4rem 0 0.2rem; }"
     " header[data-testid='stHeader'], header [data-testid='stToolbar'] { height: 3.8rem; }"

@@ -35,7 +35,11 @@ from common import (
 )
 
 require_db()
-st.title("How reliable are Eugene's buses?", help=LATENESS_CHART_NOTE)
+st.title(
+    "How reliable are Eugene's buses?",
+    help=LATENESS_CHART_NOTE
+    + " With a route or stop chosen, the grey line is every route at every stop, for comparison.",
+)
 require_marts()
 FV = str(current_fv())
 
@@ -85,9 +89,11 @@ with card():
     chart_slot = st.container()
     start, wt = page_filters()
 
-    what = (f"route {names[route_id]}" if route_id else "all routes") + (
-        f" at {stop_label[stop_id].split('  ·  ')[0]}" if stop_id else ""
-    )
+    where = f" at {stop_label[stop_id].split('  ·  ')[0]}" if stop_id else ""
+    if route_id:
+        what = f"route {names[route_id]}{where}"
+    else:
+        what = f"all routes{where}" if stop_id else NETWORK
     tot, hourly = selection_lateness(start, wt, route_id, stop_id)
     if tot is None:
         with chart_slot:

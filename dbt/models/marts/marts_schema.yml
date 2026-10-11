@@ -137,6 +137,15 @@ models:
       - name: n
         tests: [not_null]
 
+  - name: mart_prediction_stop_daily
+    description: mart_prediction_daily per stop and direction too, for the stop and route report cards.
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [service_date, route_id, direction_id, stop_id, basis, ahead_min]
+          config:
+            where: "service_date >= current_date - 3"
+
   - name: mart_prediction_daily
     description: How far off predictions and the timetable were, per day, route, minutes away and hour.
     tests:

@@ -1,4 +1,5 @@
-"""One route's report card: lateness by hour, delay along the line, headways, comparison.
+"""One route's report card: its stops, lateness by hour, delay along the line, headways,
+trend and predictions.
 
 Reached from the Routes table or directly at /route?route=<route_id> (bookmarkable).
 """
@@ -14,12 +15,11 @@ from common import (
     LINE_MAIN,
     LINES_HELP,
     MARKER_MAIN,
-    NETWORK,
     NOT_ENOUGH_HOURLY,
     PREDICTION_OFF_NOTE,
+    PREDICTIONS_LINK,
     RANGE_HELP,
     REPORT_TABLE_HEIGHT,
-    ROUTE_PALETTE,
     TREND_HELP,
     TYPICAL_HELP,
     back_button,
@@ -39,10 +39,10 @@ from common import (
     hourly_lines_chart,
     is_mobile,
     lateness,
-    line_choice,
     link_table,
     minutes_axis,
     on_time_line,
+    one_choice,
     page_filters,
     q,
     range_columns,
@@ -241,29 +241,38 @@ with table_slot, card():
             default_sort="seq:asc",
         )
 
-# stops in the order the bus reaches them, labelled for the charts' stop choices
-stop_ids = [str(x) for x in along["stop_id"]] if not along.empty else []
-stop_label = (
-    {str(r.stop_id): f"{int(r.stop_sequence)}. {r.stop_name}" for r in along.itertuples()}
-    if not along.empty
-    else {}
-)
-stop_colors = {k: ROUTE_PALETTE[i % len(ROUTE_PALETTE)] for i, k in enumerate(stop_ids)}
+# stops in the order the bus reaches them (once each: a loop route can pass a stop twice),
+# labelled for the charts' stop choices ("3. Olive & 11th") and their legends ("route 11 at
+# Olive & 11th": the stop on this route, not the stop's every route)
+stop_ids = list(dict.fromkeys(str(x) for x in along["stop_id"])) if not along.empty else []
+stop_label: dict[str, str] = {}
+stop_name: dict[str, str] = {}
+for r in along.itertuples() if not along.empty else []:
+    stop_label.setdefault(str(r.stop_id), f"{int(r.stop_sequence)}. {r.stop_name}")
+    stop_name.setdefault(str(r.stop_id), str(r.stop_name))
+ALL_STOPS_HERE = "All stops on this route"
+
+
+def line_name(k: str) -> str:
+    """What a chart line is: the route at every stop, or the route at one stop."""
+    return f"route {route_name}" + ("" if k == ALL_ROUTES else f" at {stop_name[k]}")
+
 
 # ---- by hour: every stop together, and any stop on its own -----------------------------------
 with hour_slot, card():
     st.subheader(
         "How close to the timetable, hour by hour?",
-        help=LINES_HELP.format(all="every stop on the route together", one="stop")
+        help=LINES_HELP.format(
+            choose="Pick a stop to see this route at that stop alone, or every stop together."
+        )
         + f" {period[0].upper() + period[1:]}, in the direction chosen above.",
     )
-    shown = line_choice(
+    hour_stop = one_choice(
         stop_ids,
         stop_label,
-        [ALL_ROUTES],
-        key=f"route_hour_lines_{route_id}_{direction}",
-        all_label="All stops on this route",
-        many=True,
+        key=f"route_hour_stop_{route_id}_{direction}",
+        all_label=ALL_STOPS_HERE,
+        label="Stop (type to search)",
     )
     hourly = hourly_by(
         "stop_id", f"and route_id = %s {dir_clause}", (route_id, *dir_params), start, wt
@@ -271,19 +280,14 @@ with hour_slot, card():
     fig = hourly_lines_chart(
         [
             {
-                "label": f"route {route_name}" if k == ALL_ROUTES else stop_label[k],
-                "df": hourly[hourly["key"] == k],
-                "color": "#1f5f9e" if k == ALL_ROUTES else stop_colors[k],
+                "label": line_name(hour_stop),
+                "df": hourly[hourly["key"] == hour_stop],
+                "color": "#1f5f9e",
             }
-            for k in shown
         ],
-        reference=lateness(start, wt, "hour"),
-        reference_label=NETWORK,
         min_n=5,
     )
-    if not shown:
-        st.caption("Pick a line above.")
-    elif fig is None:
+    if fig is None:
         st.caption(NOT_ENOUGH_HOURLY.format(n=5))
     else:
         show_chart(fig)
@@ -475,31 +479,30 @@ with card():
     st.subheader(
         "How far off are the predictions on this route?",
         help=PREDICTION_OFF_NOTE
-        + f" {period[0].upper() + period[1:]}, in the direction chosen above. More on the "
-        "Predictions page.",
+        + f" {period[0].upper() + period[1:]}, in the direction chosen above.",
     )
-    pred_shown = line_choice(
+    pred_stop = one_choice(
         stop_ids,
         stop_label,
-        [ALL_ROUTES],
-        key=f"route_pred_lines_{route_id}_{direction}",
-        all_label="All stops on this route",
-        many=True,
+        key=f"route_pred_stop_{route_id}_{direction}",
+        all_label=ALL_STOPS_HERE,
+        label="Stop (type to search)",
     )
     on_route = countdown_off_on_route(
-        route_id, direction, start, wt, [k for k in pred_shown if k != ALL_ROUTES]
+        route_id, direction, start, wt, [] if pred_stop == ALL_ROUTES else [pred_stop]
     )
     fig = countdown_off_chart(
         on_route,
-        stop_label,
-        pred_shown,
-        all_label="All stops on this route",
-        colors={ALL_ROUTES: AVERAGE_COLOUR, **stop_colors},
+        {k: line_name(k) for k in stop_ids},
+        [pred_stop],
+        all_label=line_name(ALL_ROUTES),
+        colors={ALL_ROUTES: AVERAGE_COLOUR, **dict.fromkeys(stop_ids, AVERAGE_COLOUR)},
     )
     if fig is None:
         st.caption("Not enough measured arrivals with a prediction yet for this choice.")
     else:
         show_chart(fig)
+    st.page_link("views/accuracy.py", label=PREDICTIONS_LINK)
 
 # ---- the other routes --------------------------------------------------------------------
 with card():

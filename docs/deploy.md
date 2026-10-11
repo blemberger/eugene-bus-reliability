@@ -84,7 +84,10 @@ the laptop does the same wait at any time. Ctrl+C stops only the waiting, never 
 - **Laptop:** `make visitors` reports the site's visitors: visits and page views per day,
   share on phones, the pages and stops people looked at, and the other sites that sent
   them (from Caddy's access log). The site records only the time, the page, phone or
-  computer, and a random id per browser tab; no IP addresses or cookies.
+  computer, and a random id per browser tab; no IP addresses or cookies. The report ends
+  with an "AT A GLANCE" summary to quote. To leave your own browsing out of the counts, open
+  the site once with `?dont_count_me` at the end of the address on each browser and phone
+  you use; that browser then keeps a cookie saying so (the only cookie the site sets).
 - **Site:** the Status page shows what came in during the last few minutes and when the
   analysis last ran.
 - **Server:** `make server-db-busy` lists anything the database has been running for more

@@ -41,3 +41,44 @@ group by 1 order by 1;
 select count(*) as page_views, count(distinct session_id) as sessions
 from site.page_view
 where device = 'bot' and viewed_at > now() - interval '7 days';
+-- The bottom line: one sentence to quote, and the numbers behind it. A visit is one browser
+-- tab's session (people aren't tracked from one visit to the next, so this counts visits, not
+-- distinct people). Browsers that opened the site with ?dont_count_me (yours) aren't counted.
+\echo ''
+\echo '== AT A GLANCE'
+\x on
+with v as (
+    select session_id, viewed_at, device from site.page_view where device <> 'bot'
+),
+n as (
+    select
+        count(distinct session_id) filter (where viewed_at > now() - interval '7 days') as v7,
+        count(*) filter (where viewed_at > now() - interval '7 days') as p7,
+        count(distinct session_id) filter (where viewed_at <= now() - interval '7 days'
+                                             and viewed_at > now() - interval '14 days') as v7_before,
+        count(distinct session_id) filter (where viewed_at > now() - interval '30 days') as v30,
+        count(*) filter (where viewed_at > now() - interval '30 days') as p30,
+        count(distinct session_id) filter (where viewed_at > now() - interval '7 days'
+                                             and device = 'phone') as phone7,
+        count(distinct session_id) as v_all,
+        min(viewed_at) as since
+    from v
+)
+select format(
+    'About %s visits a day over the last 7 days (%s page views a day)%s; %s visits in the last 30 days, %s%% of last week''s on phones.',
+    round(v7 / 7.0, 1),
+    round(p7 / 7.0, 1),
+    case when v7_before > 0
+         then format(', %s%s%% on the week before',
+                     case when v7 >= v7_before then 'up ' else 'down ' end,
+                     abs(round(100.0 * (v7 - v7_before) / v7_before)))
+         else '' end,
+    v30,
+    coalesce(round(100.0 * phone7 / nullif(v7, 0)), 0)
+) as summary,
+       round(v7 / 7.0, 1) as visits_per_day_7d, round(p7 / 7.0, 1) as page_views_per_day_7d,
+       v7 as visits_7d, v7_before as visits_week_before, v30 as visits_30d,
+       p30 as page_views_30d, v_all as visits_ever,
+       (since at time zone 'America/Los_Angeles')::date as counting_since
+from n;
+\x off

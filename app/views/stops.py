@@ -17,6 +17,7 @@ from common import (
     NETWORK,
     NOT_ENOUGH_HOURLY,
     PREDICTION_OFF_NOTE,
+    PREDICTIONS_LINK,
     RANGE_HELP,
     REPORT_TABLE_HEIGHT,
     STOP_ROWS_PER_ROUTE,
@@ -47,6 +48,8 @@ from common import (
     link_table,
     live_status_line,
     marts_ready,
+    network_predictions_card,
+    network_trend_card,
     page_filters,
     q,
     range_columns,
@@ -98,7 +101,7 @@ def all_stops_chart(start, wt) -> None:
     together (the same chart as on the Routes page)."""
     with card():
         st.subheader("How close to the timetable, hour by hour?", help=LATENESS_CHART_NOTE)
-        fig = lateness_chart(lateness(start, wt, "hour"), "all stops")
+        fig = lateness_chart(lateness(start, wt, "hour"), NETWORK)
         if fig is None:
             st.caption(NOT_ENOUGH_HOURLY.format(n=10))
         else:
@@ -277,6 +280,9 @@ if not stop_id:
     every_stop(start, wt, every_slot, map_slot)
     with chart_slot:
         all_stops_chart(start, wt)
+    # below the filters, as on a stop's report card: the trend, then the predictions
+    network_trend_card()
+    network_predictions_card(start, wt, f"{day_label(wt)} since {fmt_date(start)}", by_route=False)
     st.divider()
     data_note(start)
     st.stop()
@@ -457,7 +463,9 @@ with routes_slot, card():
 with hour_slot, card():
     st.subheader(
         "How close to the timetable, hour by hour?",
-        help=LINES_HELP.format(all="every route here together", one="route")
+        help=LINES_HELP.format(
+            choose="Switch every route here together, and any route, on or off to compare them."
+        )
         + f" {period[0].upper() + period[1:]}.",
     )
     # one line per route and direction (a route passing here both ways gets one per direction)
@@ -486,9 +494,7 @@ with hour_slot, card():
         }
         for k in shown
     ]
-    fig = hourly_lines_chart(
-        lines, reference=lateness(start, wt, "hour"), reference_label=NETWORK, min_n=5
-    )
+    fig = hourly_lines_chart(lines, min_n=5)
     if not shown:
         st.caption("Pick a line above.")
     elif fig is None:
@@ -730,8 +736,7 @@ with card():
 with card():
     st.subheader(
         "How far off are the predictions at this stop?",
-        help=PREDICTION_OFF_NOTE
-        + f" {period[0].upper() + period[1:]}. More on the Predictions page.",
+        help=PREDICTION_OFF_NOTE + f" {period[0].upper() + period[1:]}.",
     )
     here_routes = tbl[["route_id", "route"]].drop_duplicates("route_id")
     here_names = dict(
@@ -758,6 +763,7 @@ with card():
         st.caption("Not enough measured arrivals with a prediction here yet for this period.")
     else:
         show_chart(fig)
+    st.page_link("views/accuracy.py", label=PREDICTIONS_LINK)
 
 # ---- nearby stops: across the street, the next one along ------------------------------------
 near = q(

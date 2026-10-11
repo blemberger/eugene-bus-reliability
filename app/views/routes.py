@@ -6,6 +6,7 @@ from __future__ import annotations
 import streamlit as st
 from common import (
     LATENESS_CHART_NOTE,
+    NETWORK,
     NOT_ENOUGH_HOURLY,
     card,
     data_note,
@@ -14,6 +15,8 @@ from common import (
     lateness,
     lateness_chart,
     marts_ready,
+    network_predictions_card,
+    network_trend_card,
     page_filters,
     recomputing_note,
     require_db,
@@ -66,11 +69,15 @@ with chart_slot, card():
         "How close to the timetable, hour by hour?",
         help=LATENESS_CHART_NOTE,
     )
-    fig = lateness_chart(lateness(start, wt, "hour"), "all routes")
+    fig = lateness_chart(lateness(start, wt, "hour"), NETWORK)
     if fig is None:
         st.caption(NOT_ENOUGH_HOURLY.format(n=10))
     else:
         show_chart(fig)
+
+# ---- below the filters, as on a route's report card: the trend, then the predictions ------------
+network_trend_card()
+network_predictions_card(start, wt, f"{day_label(wt)} since {fmt_date(start)}", by_route=True)
 
 st.divider()
 data_note(start)
