@@ -892,6 +892,148 @@ def main(settings: Settings, raw: bool = False) -> None:
         """,
         )
 
+        section("ARRIVAL OR DEPARTURE? which moment our GPS time catches, at timepoints")
+        print(
+            "At timepoints LTD records when the bus left. If our time caught the bus arriving\n"
+            "(and it then waited, as buses do at timepoints when early), LTD's time would be later\n"
+            "than ours: ltd_later_1min_pct would be large. Last 7 days; diff = LTD's − ours."
+        )
+        show(
+            cur,
+            """
+            select count(*) n,
+                   round(percentile_cont(0.5) within group (order by methods_diff_s)) median_diff_s,
+                   round(100.0 * avg((methods_diff_s > 60)::int), 1) ltd_later_1min_pct,
+                   round(100.0 * avg((methods_diff_s < -60)::int), 1) ltd_earlier_1min_pct,
+                   round(100.0 * avg((methods_diff_s > 60)::int) filter (where delay_s < -60), 1)
+                       ltd_later_1min_pct_when_we_say_early
+            from marts.fct_stop_events
+            where is_timepoint and methods_diff_s is not null and is_bounded
+              and service_date >= current_date - 7
+        """,
+        )
+
+        section("EARLY BUSES BETWEEN TIMEPOINTS: real, or the timetable's guessed times?")
+        print(
+            "LTD's timetable fixes times only at timepoints; times at the stops between are\n"
+            "estimates spread evenly by distance (as trip planners do). Minor stops split by where\n"
+            "they fall between the timepoints before and after (by scheduled time). If early buses\n"
+            "pile up in the last third and are on time at the next timepoint, they ran ahead of the\n"
+            "estimate and then waited at the timepoint: early against a guessed time, not a\n"
+            "promised one. Last 7 days, scored arrivals."
+        )
+        show(
+            cur,
+            """
+            with e as (
+                select service_date, trip_id, stop_sequence, is_timepoint, is_first_stop,
+                       scheduled_arrival, delay_s
+                from marts.fct_stop_events
+                where status is not null and service_date >= current_date - 7
+            ),
+            w as (
+                select e.*,
+                       max(case when is_timepoint then stop_sequence end) over (
+                           partition by service_date, trip_id order by stop_sequence
+                           rows between unbounded preceding and 1 preceding) as prev_tp,
+                       min(case when is_timepoint then stop_sequence end) over (
+                           partition by service_date, trip_id order by stop_sequence
+                           rows between 1 following and unbounded following) as next_tp
+                from e
+            ),
+            j as (
+                select w.*, p.scheduled_arrival as prev_sched, n.scheduled_arrival as next_sched,
+                       n.delay_s as next_delay_s
+                from w
+                join e p on p.service_date = w.service_date and p.trip_id = w.trip_id
+                        and p.stop_sequence = w.prev_tp
+                join e n on n.service_date = w.service_date and n.trip_id = w.trip_id
+                        and n.stop_sequence = w.next_tp
+                where not w.is_timepoint and not w.is_first_stop
+                  and n.scheduled_arrival > p.scheduled_arrival
+            ),
+            b as (
+                select *, case
+                    when extract(epoch from scheduled_arrival - prev_sched)
+                         / extract(epoch from next_sched - prev_sched) < 1.0 / 3 then '1 first third'
+                    when extract(epoch from scheduled_arrival - prev_sched)
+                         / extract(epoch from next_sched - prev_sched) < 2.0 / 3 then '2 middle third'
+                    else '3 last third' end as place
+                from j
+            )
+            select place, count(*) n,
+                   round(percentile_cont(0.5) within group (order by delay_s)) median_s,
+                   round(100.0 * avg((delay_s < -120)::int), 1) over_2min_early_pct,
+                   round(100.0 * avg((delay_s < -120 and next_delay_s >= -60)::int), 1)
+                       early_here_on_time_at_next_tp_pct,
+                   round(percentile_cont(0.5) within group (order by next_delay_s)) next_tp_median_s
+            from b group by 1
+            union all
+            select '0 timepoints', count(*),
+                   round(percentile_cont(0.5) within group (order by delay_s)),
+                   round(100.0 * avg((delay_s < -120)::int), 1), null, null
+            from e where is_timepoint and not is_first_stop
+            order by 1
+        """,
+        )
+
+        section("WHERE PREDICTIONS LOOK WORSE THAN THE TIMETABLE (5 minutes away, last 30 days)")
+        print(
+            "Per route, average minutes off (seconds) for the prediction when it said 5 minutes,\n"
+            "and the printed timetable on the same arrivals: all stops; timepoints only (where\n"
+            "LTD's own times confirm ours); and arrivals where our time and LTD's agree within a\n"
+            "minute. If the prediction only loses at minor stops, or only where the two times\n"
+            "disagree, the loss is about how arrivals are timed, not the predictions. Routes where\n"
+            "predictions lose overall, then the total."
+        )
+        show(
+            cur,
+            """
+            with c as (
+                select e.route_short_name route, e.is_timepoint, e.methods_diff_s,
+                       abs(c.error_s) pred, abs(c.schedule_error_s) tt
+                from marts.fct_countdown_samples c
+                join marts.fct_stop_events e
+                  on e.service_date = c.service_date and e.trip_id = c.trip_id
+                 and e.stop_sequence = c.stop_sequence
+                where c.in_comparison and c.ahead_min = 5 and c.service_date >= current_date - 30
+            ),
+            r as (
+                select coalesce(route, 'ALL') route, count(*) n,
+                       round(avg(pred)) pred_s, round(avg(tt)) timetable_s,
+                       round(avg(pred) filter (where is_timepoint)) pred_tp_s,
+                       round(avg(tt) filter (where is_timepoint)) timetable_tp_s,
+                       round(avg(pred) filter (where abs(methods_diff_s) <= 60)) pred_agree_s,
+                       round(avg(tt) filter (where abs(methods_diff_s) <= 60)) timetable_agree_s
+                from c group by rollup (route)
+            )
+            select * from r where pred_s > timetable_s or route = 'ALL'
+            order by route = 'ALL', pred_s - timetable_s desc
+        """,
+        )
+        print(
+            "The same at the stop level: stops (with their route) where the prediction 5 minutes\n"
+            "out is furthest off compared with the timetable, 30+ arrivals:"
+        )
+        show(
+            cur,
+            """
+            select e.route_short_name route, max(s.stop_name) stop_name, bool_or(e.is_timepoint) tp,
+                   count(*) n, round(avg(abs(c.error_s))) pred_s,
+                   round(avg(abs(c.schedule_error_s))) timetable_s,
+                   round(percentile_cont(0.5) within group (order by e.methods_diff_s)) methods_median_s
+            from marts.fct_countdown_samples c
+            join marts.fct_stop_events e
+              on e.service_date = c.service_date and e.trip_id = c.trip_id
+             and e.stop_sequence = c.stop_sequence
+            left join gtfs.stops s on s.stop_id = e.stop_id
+             and s.feed_version_id = (select max(feed_version_id) from gtfs.feed_version)
+            where c.in_comparison and c.ahead_min = 5 and c.service_date >= current_date - 30
+            group by e.route_short_name, e.stop_id having count(*) >= 30
+            order by avg(abs(c.error_s)) - avg(abs(c.schedule_error_s)) desc limit 20
+        """,
+        )
+
         section("WHERE OUR GPS METHOD AND LTD DISAGREE MOST: stops on the worst routes")
         show(
             cur,

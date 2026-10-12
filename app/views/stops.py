@@ -36,6 +36,7 @@ from common import (
     data_note,
     day_label,
     day_sql,
+    every_stop_card,
     fmt_date,
     fmt_delay,
     fmt_range,
@@ -45,6 +46,7 @@ from common import (
     lateness,
     lateness_chart,
     line_choice,
+    line_colours,
     link_table,
     live_status_line,
     marts_ready,
@@ -58,7 +60,6 @@ from common import (
     recomputing_note,
     require_db,
     require_marts,
-    route_colors,
     route_link,
     route_toggles,
     search_stops,
@@ -66,8 +67,8 @@ from common import (
     show_coming,
     show_left,
     stop_buses,
-    stop_link,
     stop_tiles,
+    stops_with_numbers,
     table,
     today_lateness,
     trend_chart,
@@ -100,7 +101,7 @@ def all_stops_chart(start, wt) -> None:
     """Before a stop is chosen: how close to the timetable buses run, hour by hour, at every stop
     together (the same chart as on the Routes page)."""
     with card():
-        st.subheader("How close to the timetable, hour by hour?", help=LATENESS_CHART_NOTE)
+        st.subheader("Which times of day run late?", help=LATENESS_CHART_NOTE)
         fig = lateness_chart(lateness(start, wt, "hour"), NETWORK)
         if fig is None:
             st.caption(NOT_ENOUGH_HOURLY.format(n=10))
@@ -120,57 +121,9 @@ def every_stop(start, wt, table_slot, map_slot) -> None:
                 st.info("No scored arrivals in the selected period yet.")
         return
     period = f"{day_label(wt).capitalize()} since {fmt_date(start)}"
-    names = q(f"""
-        select stop_id, stop_name, stop_code, stop_lat as lat, stop_lon as lon
-        from gtfs.stops where feed_version_id = {FV}
-    """)
-    per = per.merge(names, on="stop_id", how="inner").rename(columns={"routes_here": "routes"})
-    per["typical"] = per["median_delay_s"] / 60
-
-    enough = per[per["n"] >= 20].sort_values("stop_name")
-    lo, hi = range_scale(enough)
-    with table_slot, card():
-        st.subheader(
-            "Every stop",
-            help=f"{period}, stops with at least 20 measured arrivals (the filters below). Click "
-            "a column heading to "
-            "sort, again to reverse: Typical bus sorts latest first, then earliest first.",
-        )
-        link_table(
-            [
-                {
-                    "href": stop_link(r.stop_id, "").split("#")[0],
-                    "hover": f"{r.stop_name}: {int(r.n):,} arrivals measured",
-                    "stop": f"{r.stop_name}" + (f" · #{r.stop_code}" if r.stop_code else ""),
-                    "routes": r.routes,
-                    "typical": fmt_delay(r.median_delay_s),
-                    "typical_s": float(r.median_delay_s),
-                    **range_fields(r.p10_delay_s, r.median_delay_s, r.p90_delay_s, lo, hi),
-                }
-                for r in enough.itertuples()
-            ],
-            [
-                {"key": "stop", "label": "Stop", "width": "minmax(10em, 2fr)", "bold": True},
-                {
-                    "key": "routes",
-                    "label": "Routes",
-                    "width": "minmax(4em, 0.6fr)",
-                    "hide_on_phone": True,
-                },
-                {
-                    "key": "typical",
-                    "label": "Typical bus",
-                    "width": "7.6em",
-                    "help": TYPICAL_HELP,
-                    "sort": "typical_s",
-                    "first": "desc",
-                },
-                *range_columns(lo, hi),
-            ],
-            max_height=520,
-            key="every_stop",
-            default_sort="stop:asc",
-        )
+    enough = stops_with_numbers(per)
+    with table_slot:
+        every_stop_card(enough, period)
 
     with map_slot, card():
         st.subheader(
@@ -462,7 +415,7 @@ with routes_slot, card():
 # ---- by hour: every route here together, and any route on its own ---------------------------
 with hour_slot, card():
     st.subheader(
-        "How close to the timetable, hour by hour?",
+        "Which times of day run late?",
         help=LINES_HELP.format(
             choose="Switch every route here together, and any route, on or off to compare them."
         )
@@ -484,12 +437,12 @@ with hour_slot, card():
     shown = line_choice(
         keys, key_label, [ALL_ROUTES], key=f"stop_hour_lines_{stop_id}", all_label="All routes here"
     )
-    colors = route_colors()
+    colors = line_colours(f"stop_hour_lines_{stop_id}", shown)
     lines = [
         {
             "label": "all routes here" if k == ALL_ROUTES else f"route {key_label[k]}",
             "df": hourly[hourly["key"] == k],
-            "color": "#1f5f9e" if k == ALL_ROUTES else colors.get(k.split(":")[0], "#555555"),
+            "color": colors[k],
             "dash": "dot" if k.endswith(":1") and k.split(":")[0] in both_way_ids else "solid",
         }
         for k in shown
@@ -758,6 +711,7 @@ with card():
         {k: f"Route {v}" for k, v in here_names.items()},
         lines,
         all_label="All routes here",
+        colors=line_colours(f"stop_pred_lines_{stop_id}", lines),
     )
     if fig is None:
         st.caption("Not enough measured arrivals with a prediction here yet for this period.")

@@ -14,12 +14,15 @@ from common import (
     current_fv,
     data_note,
     day_label,
+    every_stop_card,
     fmt_date,
     fmt_delay,
     fmt_range,
     lateness,
     lateness_chart,
     marts_ready,
+    network_predictions_card,
+    network_trend_card,
     page_filters,
     q,
     recomputing_note,
@@ -31,6 +34,7 @@ from common import (
     routes_by_service,
     selection_lateness,
     show_chart,
+    stops_with_numbers,
     today_lateness,
 )
 
@@ -131,18 +135,25 @@ with card():
             + (f", from {n_today:,} arrivals." if n_today else "; none measured yet."),
         )
 
-# ---- every route --------------------------------------------------------------------------
+# ---- below: a look at each other page, each opening onto more ----------------------------
+# every route and every stop (as on the Routes and Stops pages, whose rows open report cards),
+# the trend, how far off the predictions are, and the buses on the road now
+period = f"{day_label(wt)} since {fmt_date(start)}"
 if marts_ready():
     per = route_rank(start, wt)
     if not per.empty:
         with card():
             st.subheader(
                 "Every route",
-                help=f"{day_label(wt).capitalize()} since {fmt_date(start)}, every stop (the "
-                "filters above). Click a column heading to sort, again to reverse.",
+                help=f"{period[0].upper() + period[1:]}, every stop (the filters above). Click a "
+                "column heading to sort, again to reverse.",
             )
             route_table(per, start, key="ov_routes")
-    st.page_link("views/stops.py", label="Every stop, and each stop's report card →")
+    by_stop = lateness(start, wt, "stop")
+    if not by_stop.empty:
+        every_stop_card(stops_with_numbers(by_stop), period[0].upper() + period[1:], "ov_stops")
+    network_trend_card()
+    network_predictions_card(start, wt, period, by_route=False)
 
 n_now = q("""
     select count(distinct vehicle_id) as n from rt.vehicle_position
@@ -151,10 +162,6 @@ n_now = q("""
 st.page_link(
     "views/map.py",
     label=f"{int(n_now or 0)} buses on the road right now: see them on the live map →",
-)
-st.page_link(
-    "views/accuracy.py",
-    label="How far off are LTD's real-time arrival predictions? →",
 )
 st.divider()
 data_note(start)

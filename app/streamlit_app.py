@@ -25,22 +25,22 @@ st.html(
     "[data-stale='true'] { opacity: 1 !important; transition: none !important; }"
     # header: the site's name (a link to the home page, see st.logo below) on the left, the
     # page links beside it at body-text size, a line underneath
-    "header[data-testid='stHeader'] { height: 4.2rem; border-bottom: 1px solid #d5dbd8;"
+    "header[data-testid='stHeader'] { height: 4.2rem; border-bottom: 1px solid #d6dbe1;"
     " background: #ffffff; }"
     "header [data-testid='stToolbar'] { height: 4.2rem; align-items: center; }"
     ".stLogo { height: 2.1rem; max-width: none; margin: 0 1.4rem 0 0.6rem; }"
     "[data-testid='stTopNavLink'] { padding: 0.3rem 0.75rem; }"
     "[data-testid='stTopNavLink'] p { font-size: 1.06rem; font-weight: 500; }"
-    "[data-testid='stTopNavLink'][aria-current='page'] p { color: #0b6e4f; font-weight: 650; }"
+    "[data-testid='stTopNavLink'][aria-current='page'] p { color: #1f5f9e; font-weight: 650; }"
     # Streamlit's own menu (print, record a screencast, settings): not something visitors use,
     "[data-testid='stMainMenu'] { display: none; }"
     # nor the "running / Stop" indicator, which on the live pages flickered every few seconds
     "[data-testid='stStatusWidget'] { display: none; }"
     "[data-testid='stMainBlockContainer'] { padding-top: 6.2rem; }"
     # pages read as a stack of cards on a pale background
-    "[data-testid='stMain'] { background: #f3f5f4; }"
+    "[data-testid='stMain'] { background: #f3f5f7; }"
     "[class*='st-key-card_'] {"
-    " background: #ffffff; box-shadow: 0 1px 3px rgba(20, 40, 30, 0.08);"
+    " background: #ffffff; box-shadow: 0 1px 3px rgba(20, 30, 45, 0.08);"
     " padding: 1.1rem 1.3rem 1.2rem 1.3rem; }"
     "[data-testid='stCaptionContainer'] { font-size: 0.95rem; }"
     # bigger buttons and button rows
@@ -51,7 +51,7 @@ st.html(
     "[data-testid='stPageLink'] p { font-size: 1.05rem; font-weight: 600; }"
     # buttons that pick a stop on the page (common.stop_buttons): drawn like the stop cards
     "[class*='st-key-stopbtn_'] button { justify-content: flex-start; text-align: left;"
-    " border-left: 4px solid #0b6e4f; border-radius: 6px; padding: 0.45rem 0.65rem;"
+    " border-left: 4px solid #4a5a6e; border-radius: 6px; padding: 0.45rem 0.65rem;"
     " min-height: 0; }"
     "[class*='st-key-stopbtn_'] button > div { justify-content: flex-start; }"
     "[class*='st-key-stopbtn_'] button p { text-align: left; }"
@@ -62,15 +62,15 @@ st.html(
     "[data-testid='stWidgetLabel'] p { font-size: 1rem !important; font-weight: 650;"
     " color: #262730; }"
     # the way back from a report card to every route or stop (common.back_button): an outlined
-    # green button, the first thing on the page
+    # button in the site's blue, the first thing on the page
     "[class*='st-key-backlink'] a, [class*='st-key-backlink'] button {"
-    " display: inline-flex; width: auto; border: 2px solid #0b6e4f !important;"
+    " display: inline-flex; width: auto; border: 2px solid #1f5f9e !important;"
     " border-radius: 8px; background: #ffffff; padding: 0.4rem 1.1rem !important;"
     " min-height: 2.8rem; }"
     "[class*='st-key-backlink'] a:hover, [class*='st-key-backlink'] button:hover {"
-    " background: #eef6f2; }"
+    " background: #eaf1f9; }"
     "[class*='st-key-backlink'] p { font-size: 1.12rem !important; font-weight: 700;"
-    " color: #0b6e4f; }"
+    " color: #1f5f9e; }"
     "@media (max-width: 640px) {"
     " .stLogo { height: 1.7rem; margin: 0 0.4rem 0 0.2rem; }"
     " header[data-testid='stHeader'], header [data-testid='stToolbar'] { height: 3.8rem; }"
@@ -123,11 +123,18 @@ pages = [
     st.Page("views/status.py", title="Status", url_path="status", visibility="hidden"),
 ]
 page = st.navigation(pages, position="top")
-# the browser tab's (and a search result's) title; a stop's or a route's report card sets its own
+# the browser tab's (and a search result's) title: the question each page answers, in the
+# words people search with; a stop's or a route's report card sets its own
+TAB_TITLES = {
+    "": "Eugene Bus Watch: how reliable are Eugene's buses?",
+    "map": "Where are Eugene's buses right now? Live LTD bus map · Eugene Bus Watch",
+    "stops": "How reliable is my bus stop? Every LTD stop · Eugene Bus Watch",
+    "routes": "How reliable is my bus route? Every LTD route · Eugene Bus Watch",
+    "accuracy": "Can you trust LTD's arrival predictions? · Eugene Bus Watch",
+    "methods": "How we measure LTD's buses: data & methods · Eugene Bus Watch",
+}
 st.set_page_config(
-    page_title="Eugene Bus Watch: how reliable are Eugene's buses?"
-    if page.url_path in ("", None)
-    else f"{page.title} · Eugene Bus Watch"
+    page_title=TAB_TITLES.get(page.url_path or "", f"{page.title} · Eugene Bus Watch")
 )
 # the site's name in the header goes to the home page. On the other pages Streamlit does that
 # itself for a logo without a link of its own; on the home page it would be a dead picture, so

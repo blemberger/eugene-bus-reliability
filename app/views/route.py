@@ -11,7 +11,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from common import (
     ALL_ROUTES,
-    AVERAGE_COLOUR,
+    BRAND,
     LINE_MAIN,
     LINES_HELP,
     MARKER_MAIN,
@@ -261,7 +261,7 @@ def line_name(k: str) -> str:
 # ---- by hour: every stop together, and any stop on its own -----------------------------------
 with hour_slot, card():
     st.subheader(
-        "How close to the timetable, hour by hour?",
+        "Which times of day run late?",
         help=LINES_HELP.format(
             choose="Pick a stop to see this route at that stop alone, or every stop together."
         )
@@ -282,7 +282,7 @@ with hour_slot, card():
             {
                 "label": line_name(hour_stop),
                 "df": hourly[hourly["key"] == hour_stop],
-                "color": "#1f5f9e",
+                "color": BRAND,
             }
         ],
         min_n=5,
@@ -332,7 +332,7 @@ with card():
                 y=along["median_delay"],
                 mode="lines+markers",
                 name="Typical bus",
-                line={"color": "#1f5f9e", "width": LINE_MAIN},
+                line={"color": BRAND, "width": LINE_MAIN},
                 marker={"size": MARKER_MAIN},
                 hovertext=[
                     f"{name}<br>typical bus {fmt_delay(m)}<br>8 in 10 buses: "
@@ -399,7 +399,7 @@ if not head.empty:
     with card():
         head = head.assign(_k=head["hour_local"].map(service_hour_key)).sort_values("_k")
         st.subheader(
-            "Frequent-service check: do the buses come evenly?",
+            "Do the buses come evenly, or bunch up?",
             help="On routes scheduled every 20 minutes or better, riders don't check a timetable; "
             "what matters is the gap between buses. Bunched = arrived less than half the "
             "scheduled gap after the previous bus. Big gap = more than 1.5 times the scheduled "
@@ -496,7 +496,7 @@ with card():
         {k: line_name(k) for k in stop_ids},
         [pred_stop],
         all_label=line_name(ALL_ROUTES),
-        colors={ALL_ROUTES: AVERAGE_COLOUR, **dict.fromkeys(stop_ids, AVERAGE_COLOUR)},
+        colors={ALL_ROUTES: BRAND, **dict.fromkeys(stop_ids, BRAND)},
     )
     if fig is None:
         st.caption("Not enough measured arrivals with a prediction yet for this choice.")

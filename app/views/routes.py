@@ -66,7 +66,7 @@ with table_slot, card():
 # ---- by hour: all routes together ---------------------------------------------------------
 with chart_slot, card():
     st.subheader(
-        "How close to the timetable, hour by hour?",
+        "Which times of day run late?",
         help=LATENESS_CHART_NOTE,
     )
     fig = lateness_chart(lateness(start, wt, "hour"), NETWORK)

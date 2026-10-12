@@ -37,36 +37,20 @@ STATUS_COLOR = {
     "very_late": "#8b0000",
     "unknown": "#9e9e9e",
 }
-ROUTE_PALETTE = [
-    "#1f77b4",
-    "#ff7f0e",
-    "#2ca02c",
-    "#d62728",
-    "#9467bd",
-    "#8c564b",
-    "#e377c2",
-    "#7f7f7f",
-    "#bcbd22",
-    "#17becf",
-    "#393b79",
-    "#637939",
-    "#8c6d31",
-    "#843c39",
-    "#7b4173",
-    "#3182bd",
-    "#e6550d",
-    "#31a354",
-    "#756bb1",
-    "#636363",
-    "#6baed6",
-    "#fd8d3c",
-    "#74c476",
-    "#9e9ac8",
-    "#969696",
-    "#9ecae1",
-    "#fdae6b",
-    "#a1d99b",
-]
+# The site's colours, by the job each does:
+# - BRAND: the site itself (its name, links, chosen buttons, the way back, route cards) and the
+#   main line of a chart. Blue: it says nothing about good or bad, so it never competes with...
+# - the status colours (STATUS_COLOR, ON_TIME_GREEN): green = on time, amber = early, red =
+#   late. Kept for meaning only, never for decoration.
+# - STOP_COLOUR: stop cards, a quiet slate beside the routes' blue (a stop is a place, a route
+#   a line on the map).
+# - LINE_COLOURS: other lines on one chart, in this fixed order (a categorical palette checked
+#   for colour-blind separation): each line keeps its colour while it is shown.
+BRAND = "#1f5f9e"
+BRAND_TINT = "#eaf1f9"  # hover and selected backgrounds
+STOP_COLOUR = "#4a5a6e"
+INK = "#1b2533"
+LINE_COLOURS = ["#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948"]
 
 
 # ---------------------------------------------------------------- database ----
@@ -434,9 +418,9 @@ def _countdown_html() -> str:
         )
 
     if left > 0:
-        headline, colour = f"Next update in {left} s", "#0b6e4f"
+        headline, colour = f"Next update in {left} s", BRAND
     elif left > -60:
-        headline, colour = "Updating…", "#0b6e4f"
+        headline, colour = "Updating…", BRAND
     else:  # well past due: say so plainly instead of sitting at 'Updating…'
         headline, colour = (
             f"No new data from LTD for {int((now - at).total_seconds() // 60)} min",
@@ -446,7 +430,7 @@ def _countdown_html() -> str:
     # (CSS, not SVG: st.html's sanitiser removes inline SVG)
     ring = (
         "<span style='flex:none;display:inline-block;width:22px;height:22px;border-radius:50%;"
-        f"background:conic-gradient({colour} {done:.1f}%, #dfece5 0);"
+        f"background:conic-gradient({colour} {done:.1f}%, #dce7f3 0);"
         "-webkit-mask:radial-gradient(farthest-side,transparent calc(100% - 5px),#000 calc(100% - 4px));"
         "mask:radial-gradient(farthest-side,transparent calc(100% - 5px),#000 calc(100% - 4px))'></span>"
     )
@@ -480,8 +464,8 @@ def route_link(route_id, name) -> str | None:
 # arrow, never like the rounded buttons that change what the current page shows. Route cards are
 # edged in blue, stop cards in green, the same on every page. The cards fill whole rows: 7 routes
 # a row on a computer (LTD's 28 routes make 4 full rows), 4 stops (12 busy stops, 3 rows).
-ROUTE_TILE_COLOUR = "#1f5f9e"
-STOP_TILE_COLOUR = "#0b6e4f"
+ROUTE_TILE_COLOUR = BRAND
+STOP_TILE_COLOUR = STOP_COLOUR
 _TILE_CSS = (
     "<style>.ebw-tiles { display: grid; gap: 0.5rem; }"
     ".ebw-tiles.route { grid-template-columns: repeat(7, minmax(0, 1fr)); }"
@@ -492,7 +476,7 @@ _TILE_CSS = (
     "@media (max-width: 640px) { .ebw-tiles.route { grid-template-columns: repeat(2, minmax(0, 1fr)); }"
     " .ebw-tiles.stop { grid-template-columns: minmax(0, 1fr); } }"
     ".ebw-tile { display: flex; align-items: center; gap: 0.5rem; padding: 0.45rem 0.65rem;"
-    " border: 1px solid #c9d2cd; border-left: 4px solid var(--edge); border-radius: 6px;"
+    " border: 1px solid #cfd6de; border-left: 4px solid var(--edge); border-radius: 6px;"
     " background: #fff; color: #262730; text-decoration: none; line-height: 1.25; min-width: 0; }"
     ".ebw-tile:hover { background: #f1f5f8; border-color: var(--edge); }"
     ".ebw-tile b { font-size: 1rem; }"
@@ -1132,9 +1116,19 @@ def col_count(label: str, help: str | None = None):
     return st.column_config.NumberColumn(label, format="localized", help=help)
 
 
-def route_colors() -> dict[str, str]:
-    routes = q("select distinct route_id from gtfs.routes order by route_id")
-    return {r: ROUTE_PALETTE[i % len(ROUTE_PALETTE)] for i, r in enumerate(routes["route_id"])}
+def line_colours(key: str, shown: list[str]) -> dict[str, str]:
+    """A colour for each line shown on one chart (ALL_ROUTES is always BRAND): a line keeps the
+    colour it got when switched on for as long as it stays on, and two lines on the chart never
+    share one (up to len(LINE_COLOURS) lines). `key`: the chart's line buttons."""
+    held: dict[str, int] = st.session_state.setdefault(f"_colours_{key}", {})
+    for k in list(held):
+        if k not in shown:
+            del held[k]
+    for k in shown:
+        if k != ALL_ROUTES and k not in held:
+            free = [i for i in range(len(LINE_COLOURS)) if i not in held.values()]
+            held[k] = free[0] if free else len(held) % len(LINE_COLOURS)
+    return {ALL_ROUTES: BRAND} | {k: LINE_COLOURS[i] for k, i in held.items()}
 
 
 def collection_start() -> date | None:
@@ -1614,11 +1608,9 @@ def route_table(rank: pd.DataFrame, start: date, key: str) -> None:
 
 # ----------------------------------------------- how far off LTD's predictions are ----
 
-TIMETABLE_COLOUR = "#b35900"
-AVERAGE_COLOUR = "#1c1c1c"
 
 # shown in place of an hour-by-hour chart without enough data; .format(n=the chart's min_n)
-NOT_ENOUGH_HOURLY = "Not enough arrivals yet for an hour-by-hour view (needs {n} in an hour)."
+NOT_ENOUGH_HOURLY = "Not enough arrivals yet for this chart (needs {n} in an hour)."
 
 PREDICTION_OFF_NOTE = (
     "How many minutes, on average, the bus came from the time it was given, early or late "
@@ -1753,7 +1745,9 @@ def countdown_off_chart(
     sign = sign.sort_values("ahead_min")
     tt_rows = df[(df["basis"] == "timetable") & (df["n"] >= min_n)]
     tt = dict(zip(tt_rows["_r"], tt_rows["off"], strict=False))
-    colors = route_colors() if colors is None else colors
+    colors = (
+        line_colours("countdown", selected) if colors is None else colors
+    )  # callers pass theirs
     fig = go.Figure()
     drawn = 0
     for rank, key in enumerate(selected):
@@ -1762,7 +1756,7 @@ def countdown_off_chart(
             continue
         drawn += 1
         label = all_label if key == ALL_ROUTES else names.get(key, key)
-        colour = AVERAGE_COLOUR if key == ALL_ROUTES else colors.get(key, "#777777")
+        colour = colors.get(key, BRAND if key == ALL_ROUTES else "#777777")
         t = tt.get(key)
         fig.add_trace(
             go.Scatter(
@@ -1939,7 +1933,7 @@ def as_name(label: str) -> str:
 def lateness_chart(
     hourly: pd.DataFrame,
     label: str,
-    color: str = "#1f5f9e",
+    color: str = BRAND,
     reference: pd.DataFrame | None = None,
     reference_label: str = "all routes",
     min_n: int = 10,
@@ -2212,7 +2206,7 @@ def trend_chart(where: str, params: tuple, what: str) -> None:
             y=trend["median_delay"] / 60,
             mode="lines+markers",
             name="Typical bus",
-            line={"color": "#1f5f9e", "width": LINE_MAIN},
+            line={"color": BRAND, "width": LINE_MAIN},
             marker={"size": MARKER_MAIN},
             hovertext=[
                 f"{when(d)}: typical bus {fmt_delay(m)} · {int(n):,} arrivals"
@@ -2229,6 +2223,65 @@ def trend_chart(where: str, params: tuple, what: str) -> None:
         height=320,
     )
     show_chart(fig)
+
+
+def stops_with_numbers(per: pd.DataFrame) -> pd.DataFrame:
+    """lateness(..., "stop") with each stop's name, sign number and place, for the stops with at
+    least 20 measured arrivals, by name."""
+    names = q(f"""
+        select stop_id, stop_name, stop_code, stop_lat as lat, stop_lon as lon
+        from gtfs.stops where feed_version_id = {current_fv()}
+    """)
+    per = per.merge(names, on="stop_id", how="inner").rename(columns={"routes_here": "routes"})
+    per["typical"] = per["median_delay_s"] / 60
+    return per[per["n"] >= 20].sort_values("stop_name")
+
+
+def every_stop_card(enough: pd.DataFrame, period: str, key: str = "every_stop") -> None:
+    """'Every stop': a sortable table of every stop (stops_with_numbers()), each row opening the
+    stop's report card. On the Stops page and the Overview."""
+    lo, hi = range_scale(enough)
+    with card():
+        st.subheader(
+            "Every stop",
+            help=f"{period}, stops with at least 20 measured arrivals. Click a column heading "
+            "to sort, again to reverse: Typical bus sorts latest first, then earliest first.",
+        )
+        link_table(
+            [
+                {
+                    "href": stop_link(r.stop_id, "").split("#")[0],
+                    "hover": f"{r.stop_name}: {int(r.n):,} arrivals measured",
+                    "stop": f"{r.stop_name}" + (f" · #{r.stop_code}" if r.stop_code else ""),
+                    "routes": r.routes,
+                    "typical": fmt_delay(r.median_delay_s),
+                    "typical_s": float(r.median_delay_s),
+                    **range_fields(r.p10_delay_s, r.median_delay_s, r.p90_delay_s, lo, hi),
+                }
+                for r in enough.itertuples()
+            ],
+            [
+                {"key": "stop", "label": "Stop", "width": "minmax(10em, 2fr)", "bold": True},
+                {
+                    "key": "routes",
+                    "label": "Routes",
+                    "width": "minmax(4em, 0.6fr)",
+                    "hide_on_phone": True,
+                },
+                {
+                    "key": "typical",
+                    "label": "Typical bus",
+                    "width": "7.6em",
+                    "help": TYPICAL_HELP,
+                    "sort": "typical_s",
+                    "first": "desc",
+                },
+                *range_columns(lo, hi),
+            ],
+            max_height=520,
+            key=key,
+            default_sort="stop:asc",
+        )
 
 
 def network_trend_card() -> None:
@@ -2267,6 +2320,7 @@ def network_predictions_card(start: date, wt: str | None, period: str, by_route:
             off,
             {k: f"Route {v}" for k, v in names.items()},
             lines,
+            colors=line_colours("landing_pred_lines", lines),
             # named as its button says on the Routes page; every route at every stop elsewhere
             all_label="All routes" if by_route else as_name(NETWORK),
             min_n=30,
@@ -2323,16 +2377,16 @@ _TABLE_CSS = """
 .ebw-r { display: grid; grid-template-columns: var(--cols); align-items: center;
          column-gap: 12px; padding: 7px 12px; border-bottom: 1px solid #eef0f2; color: #262730;
          text-decoration: none; flex: none; }
-a.ebw-r:hover { background: #eef6f2; }
+a.ebw-r:hover { background: #eaf1f9; }
 .ebw-h { position: sticky; top: 0; order: -1; background: #f6f8f9; font-weight: 600;
          align-items: end;
          font-size: 13px; color: #555; z-index: 1; }
 .ebw-h label { cursor: pointer; user-select: none; }
-.ebw-h label:hover { color: #0b6e4f; }
+.ebw-h label:hover { color: #1f5f9e; }
 .ebw-so::after { content: ' ↕'; color: #b5b5b5; }
 .ebw-sr { display: none; }
 .ebw-n { text-align: right; font-variant-numeric: tabular-nums; }
-.ebw-go { color: #0b6e4f; font-weight: 700; text-align: right; white-space: nowrap; }
+.ebw-go { color: #1f5f9e; font-weight: 700; text-align: right; white-space: nowrap; }
 .ebw-go-t { font-weight: 600; font-size: 13px; }
 .ebw-k { font-weight: 700; }
 .ebw-s { color: #666; font-size: 14px; }
@@ -2478,7 +2532,7 @@ def link_table(
             css.append(
                 f"#{rid}-{d}:checked ~ .ebw-t .ebw-r:not(.ebw-h) {{ order: var({var}); }}"
                 f"#{rid}-{d}:checked ~ .ebw-t .{rid}-h::after "
-                f"{{ content: ' {arrow}'; color: #0b6e4f; }}"
+                f"{{ content: ' {arrow}'; color: {BRAND}; }}"
             )
         css.append(
             f".{rid}-2 {{ display: none; }}"

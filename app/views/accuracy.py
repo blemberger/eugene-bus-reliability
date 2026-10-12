@@ -22,6 +22,7 @@ from common import (
     fmt_date,
     fmt_minutes,
     hour_label,
+    line_colours,
     link_table,
     local_times,
     page_filters,
@@ -40,7 +41,7 @@ from common import (
 )
 
 require_db()
-st.title("Can you trust the predictions?")
+st.title("Can you trust LTD's arrival predictions?")
 st.caption(
     "LTD's real-time arrival predictions (what apps like Transit show), against when the bus "
     "actually came."
@@ -88,7 +89,9 @@ with chart_slot, card():
     lines = route_toggles(
         with_data, short, [ALL_ROUTES, *([compare] if compare else [])], key="pred_lines"
     )
-    fig0 = countdown_off_chart(off, chart_names, lines, min_n=30)
+    fig0 = countdown_off_chart(
+        off, chart_names, lines, min_n=30, colors=line_colours("pred_lines", lines)
+    )
     if fig0 is None:
         st.caption("Pick a route above (or All routes); this one needs more measured arrivals.")
     else:
@@ -286,7 +289,7 @@ with card():
 # ---- one stop, right now: how each coming bus's prediction has been revised --------------
 with card():
     st.subheader(
-        "One stop",
+        "Predictions at one stop",
         help="How far off the predictions are at one stop, by route (for the period and days "
         "above), and how each bus coming there now has had its predicted arrival changed.",
     )
@@ -339,7 +342,13 @@ with card():
             key=f"pred_stop_lines_{pstop}",
             all_label="All routes here",
         )
-        fig_s = countdown_off_chart(at_stop, chart_names, here_lines, all_label="All routes here")
+        fig_s = countdown_off_chart(
+            at_stop,
+            chart_names,
+            here_lines,
+            all_label="All routes here",
+            colors=line_colours(f"pred_stop_lines_{pstop}", here_lines),
+        )
         if fig_s is None:
             st.caption("Not enough measured arrivals with a prediction here yet for this period.")
         else:

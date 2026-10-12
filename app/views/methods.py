@@ -9,8 +9,10 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from common import (
+    BRAND,
+    LINE_COLOURS,
     LINE_MAIN,
-    LINE_ROUTE,
+    LOCAL_TZ,
     MARKER_MAIN,
     card,
     col_count,
@@ -89,7 +91,7 @@ cancellation flag, realtime trip ids that don't match the schedule. See the sect
 
 # ---- coverage & quality ----------------------------------------------------------------------
 with card():
-    st.subheader("Coverage: how much of the service we measured")
+    st.subheader("How much of the service did we measure?")
     if not marts_ready():
         st.info("Coverage tables appear once the analysis has run; it refreshes every 15 minutes.")
     else:
@@ -255,7 +257,7 @@ with card():
 
 # ---- cross-check ------------------------------------------------------------------------------
 with card():
-    st.subheader("Cross-check: do two ways of timing arrivals agree?")
+    st.subheader("Do two ways of timing arrivals agree?")
     st.caption(
         "Every arrival time on this site is worked out from the bus's GPS reports: when its "
         "position along the route passes the stop. LTD's feed also keeps a time for stops a bus "
@@ -374,9 +376,11 @@ with card():
                     "long rural routes where the bus covers a lot of road between reports."
                 )
 
+GAP_DAYS = 14
+
 # ---- right now --------------------------------------------------------------------------------
 with card():
-    st.subheader("Feed health")
+    st.subheader("Is the live data coming in?")
     qual = q("""
         select
           (select count(distinct p.trip_id) from rt.prediction_current p
@@ -411,53 +415,83 @@ with card():
         help="About 6,000 when everything runs: bus positions and predictions twice a minute "
         "each, plus alerts every 5 minutes.",
     )
-    hourly = q(
-        """
-        select date_trunc('hour', fetched_at) as hour, feed, count(*) as n,
-               count(*) filter (where entity_count = 0) as empty
-        from rt.fetch
-        -- whole hours only: the hour in progress (and a part-hour 7 days back) would show as
-        -- a false dip
-        where fetched_at >= date_trunc('hour', now()) - interval '7 days'
-          and fetched_at < date_trunc('hour', now())
-          and feed in ('vehicle_positions', 'trip_updates')
-        group by 1, 2 order by 1
+    # Minutes without live data, per day: a steady feed is two messages a minute, so a flat
+    # message count says nothing; what matters is when there was none, and whose doing that was.
+    TODAY = f"(now() at time zone '{LOCAL_TZ}')::date"  # Eugene's date, not the server's
+    gaps = q(
+        f"""
+        with days as (
+            select d::date as day
+            from generate_series({TODAY} - {GAP_DAYS}, {TODAY} - 1, interval '1 day') d
+        ),
+        got as (
+            select (fetched_at at time zone '{LOCAL_TZ}')::date as day, count(*) as n
+            from rt.fetch
+            where feed = 'vehicle_positions'
+              and fetched_at >= ({TODAY} - {GAP_DAYS})::timestamp at time zone '{LOCAL_TZ}'
+              and fetched_at < {TODAY}::timestamp at time zone '{LOCAL_TZ}'
+            group by 1
+        ),
+        service as (
+            select service_date as day, min(scheduled_arrival) as s0, max(scheduled_arrival) as s1
+            from marts.fct_stop_events
+            where service_date >= {TODAY} - {GAP_DAYS} and service_date < {TODAY}
+            group by 1
+        ),
+        empty as (
+            select s.day, count(*) as n
+            from service s
+            join rt.fetch f on f.feed = 'vehicle_positions' and f.entity_count = 0
+             and f.fetched_at between s.s0 and s.s1
+            group by 1
+        )
+        select d.day,
+               -- two a minute through the day (a clock-change day is 23 or 25 hours long)
+               greatest(0, extract(epoch from ((d.day + 1)::timestamp at time zone '{LOCAL_TZ}')
+                                   - (d.day::timestamp at time zone '{LOCAL_TZ}')) / 30
+                           - coalesce(g.n, 0)) / 2.0 as missed_min,
+               coalesce(e.n, 0) / 2.0 as empty_min
+        from days d left join got g using (day) left join empty e using (day)
+        -- whole days since collection began
+        where d.day > (select min(fetched_at at time zone '{LOCAL_TZ}')::date from rt.fetch)
+        order by 1
         """
     )
-    if not hourly.empty:
-        hourly["hour"] = pd.to_datetime(hourly["hour"], utc=True).dt.tz_convert(
-            "America/Los_Angeles"
-        )
-        st.markdown(
-            "##### Messages received from LTD per hour, last 7 days",
-            help="Two a minute (120 an hour, the dotted line) when everything runs. A dip is a "
-            "gap in collection or in LTD's feed; overnight, when no buses run, LTD's messages "
-            "are empty but still arrive.",
-        )
-        fig_h = go.Figure()
-        for feed, name, colour in (
-            ("vehicle_positions", "Bus positions", "#1f5f9e"),
-            ("trip_updates", "Predictions", "#e07b00"),
+    st.markdown(
+        f"##### Minutes without live data, last {GAP_DAYS} days",
+        help="LTD's feed is read every 30 seconds, day and night. Not collected: minutes when "
+        "this site's collector got nothing (a server restart, or LTD's servers not answering). "
+        "LTD's feed empty: minutes while buses were scheduled when LTD's feed answered but had "
+        "no buses in it. Arrivals in those minutes can't be timed, so they're left out.",
+    )
+    if gaps.empty or (gaps["missed_min"].sum() + gaps["empty_min"].sum()) < 1:
+        st.caption(f"None in the last {GAP_DAYS} days.")
+    else:
+        fig_g = go.Figure()
+        for col, name, colour in (
+            ("missed_min", "Not collected", BRAND),
+            ("empty_min", "LTD's feed empty", LINE_COLOURS[0]),
         ):
-            d = hourly[hourly["feed"] == feed]
-            fig_h.add_trace(
-                go.Scatter(
-                    x=d["hour"],
-                    y=d["n"],
-                    mode="lines",
+            fig_g.add_trace(
+                go.Bar(
+                    x=pd.to_datetime(gaps["day"]),
+                    y=gaps[col],
                     name=name,
-                    line={"color": colour, "width": LINE_ROUTE},
-                    customdata=d["empty"],
-                    hovertemplate=name + ", %{x|%a %b %-d, %-I %p}: %{y} messages "
-                    "(%{customdata} with no buses in them)<extra></extra>",
+                    marker_color=colour,
+                    hovertemplate=name + ", %{x|%a %b %-d}: %{y:.0f} min<extra></extra>",
                 )
             )
-        fig_h.add_hline(y=120, line_dash="dot", line_color="#9aa0a6", line_width=1.5)
-        fig_h.update_layout(
-            # fitted to the data (plus the 120 line), so a dip of a few messages shows
-            yaxis={"title": "Messages per hour"},
+        fig_g.update_layout(
+            barmode="stack",
+            yaxis={"title": "Minutes", "rangemode": "tozero"},
             xaxis={"title": "", "tickformat": "%a %b %-d", "dtick": 86400000},
-            legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0},
+            legend={
+                "orientation": "h",
+                "yanchor": "bottom",
+                "y": 1.02,
+                "x": 0,
+                "traceorder": "normal",
+            },
             height=300,
         )
-        show_chart(fig_h)
+        show_chart(fig_g)

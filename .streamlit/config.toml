@@ -9,7 +9,8 @@ toolbarMode = "viewer"
 
 [theme]
 base = "light"
-primaryColor = "#0b6e4f"
+primaryColor = "#1f5f9e"
+textColor = "#1b2533"
 baseFontSize = 17
 baseRadius = "medium"
 showWidgetBorder = true
