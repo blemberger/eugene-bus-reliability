@@ -1192,6 +1192,33 @@ def main(settings: Settings, raw: bool = False) -> None:
         """,
         )
 
+        section("PAGE LOAD TIMES: how long visitors' pages took to draw on the server, last 7 days")
+        print(
+            "Per page, and whether an analysis build was running then (the database is busiest\n"
+            "during builds). From site.page_view.load_ms; visits before it was recorded are empty."
+        )
+        try:
+            show(
+                cur,
+                """
+                select v.page, coalesce(b.during, false) during_build, count(*) n,
+                       round((percentile_cont(0.5) within group (order by v.load_ms))::numeric / 1000, 1) median_s,
+                       round((percentile_cont(0.9) within group (order by v.load_ms))::numeric / 1000, 1) p90_s,
+                       round(max(v.load_ms)::numeric / 1000, 1) slowest_s
+                from site.page_view v
+                left join lateral (
+                    select true as during from analytics.build_log l
+                    where v.viewed_at between l.started_at and coalesce(l.finished_at, now()) limit 1
+                ) b on true
+                where v.device <> 'bot' and v.load_ms is not null
+                  and v.viewed_at > now() - interval '7 days'
+                group by 1, 2 order by 1, 2
+            """,
+            )
+        except psycopg.Error as e:
+            cur.connection.rollback()
+            print(f"(not available: {e})")
+
         section("BUSY STOP BUTTONS (Stops, Live map, Accuracy): most scored arrivals, last 30 days")
         show(
             cur,

@@ -2,14 +2,16 @@
 -- which page, phone or computer, and a random id per browser tab, so visits can be counted.
 -- No IP address, cookie or anything else that identifies a person is stored.
 -- The site's read-only login may add rows but not read them; the visitor report
--- (`make visitors`) runs as the owner. Kept in step with sql/migrations/002_site_page_views.sql.
+-- (`make visitors`) runs as the owner. Kept in step with sql/migrations/002_site_page_views.sql and 005_page_view_load_time.sql.
 CREATE SCHEMA IF NOT EXISTS site;
 CREATE TABLE IF NOT EXISTS site.page_view (
     viewed_at  timestamptz NOT NULL DEFAULT now(),
     session_id text        NOT NULL,
     page       text        NOT NULL,
     detail     text,
-    device     text        NOT NULL CHECK (device IN ('phone', 'computer', 'bot'))
+    device     text        NOT NULL CHECK (device IN ('phone', 'computer', 'bot')),
+    -- how long the page took to draw on the server, in milliseconds
+    load_ms    integer
 );
 CREATE INDEX IF NOT EXISTS page_view_viewed_at_idx ON site.page_view USING brin (viewed_at);
 GRANT USAGE ON SCHEMA site TO ltd_reader;

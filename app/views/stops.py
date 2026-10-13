@@ -9,29 +9,18 @@ import pandas as pd
 import pydeck as pdk
 import streamlit as st
 from common import (
-    ALL_ROUTES,
     JUST_LEFT_MINUTES,
-    LATENESS_CHART_NOTE,
-    LINES_HELP,
     LIVE_CHECK_SECONDS,
-    NETWORK,
-    NOT_ENOUGH_HOURLY,
-    PREDICTION_OFF_NOTE,
-    PREDICTIONS_LINK,
-    RANGE_HELP,
     REPORT_TABLE_HEIGHT,
     STOP_ROWS_PER_ROUTE,
-    TREND_HELP,
     TYPICAL_HELP,
+    arrivals_column,
     back_button,
-    busiest_route,
     busy_stops,
     card,
     clean_headsigns,
     col_hour,
     col_minutes,
-    countdown_off_at_stop,
-    countdown_off_chart,
     current_fv,
     data_note,
     day_label,
@@ -39,20 +28,14 @@ from common import (
     every_stop_card,
     fmt_date,
     fmt_delay,
-    fmt_range,
+    headline_metrics,
     hour_time,
-    hourly_by,
-    hourly_lines_chart,
     lateness,
-    lateness_chart,
-    line_choice,
-    line_colours,
     link_table,
     live_status_line,
     marts_ready,
-    network_predictions_card,
-    network_trend_card,
     page_filters,
+    predictions_card,
     q,
     range_columns,
     range_fields,
@@ -61,17 +44,16 @@ from common import (
     require_db,
     require_marts,
     route_link,
-    route_toggles,
     search_stops,
-    show_chart,
     show_coming,
     show_left,
     stop_buses,
     stop_tiles,
     stops_with_numbers,
     table,
+    times_of_day_card,
     today_lateness,
-    trend_chart,
+    trend_card,
 )
 
 require_db()
@@ -97,18 +79,6 @@ def lateness_color(minutes: float) -> list[int]:
     return [150, 150, 150, 200]
 
 
-def all_stops_chart(start, wt) -> None:
-    """Before a stop is chosen: how close to the timetable buses run, hour by hour, at every stop
-    together (the same chart as on the Routes page)."""
-    with card():
-        st.subheader("Which times of day run late?", help=LATENESS_CHART_NOTE)
-        fig = lateness_chart(lateness(start, wt, "hour"), NETWORK)
-        if fig is None:
-            st.caption(NOT_ENOUGH_HOURLY.format(n=10))
-        else:
-            show_chart(fig)
-
-
 def every_stop(start, wt, table_slot, map_slot) -> None:
     """Before a stop is chosen: every stop in one sortable table (click a row to open its report
     card), and on a map coloured by its typical lateness (click a dot to open it)."""
@@ -127,7 +97,7 @@ def every_stop(start, wt, table_slot, map_slot) -> None:
 
     with map_slot, card():
         st.subheader(
-            "Every stop on a map",
+            "Where do buses run late?",
             help="Each dot is a stop, coloured by how late its typical bus is against the "
             "timetable. " + f"{period}; stops with at least 20 arrivals.",
         )
@@ -231,11 +201,12 @@ if not stop_id:
     every_slot, map_slot, chart_slot = st.container(), st.container(), st.container()
     start, wt = page_filters()
     every_stop(start, wt, every_slot, map_slot)
+    period = f"{day_label(wt)} since {fmt_date(start)}"
     with chart_slot:
-        all_stops_chart(start, wt)
+        times_of_day_card("stops_tod", start, wt, period)
     # below the filters, as on a stop's report card: the trend, then the predictions
-    network_trend_card()
-    network_predictions_card(start, wt, f"{day_label(wt)} since {fmt_date(start)}", by_route=False)
+    trend_card("stops_trend")
+    predictions_card("stops_pred", start, wt, period)
     st.divider()
     data_note(start)
     st.stop()
@@ -312,7 +283,7 @@ by_route = q(
 if by_route.empty:
     with routes_slot:
         st.info("No scored arrivals at this stop in the selected period yet.")
-        st.markdown("#### Right now at this stop")
+        st.markdown(f"#### Right now at {stop['stop_name']}")
         stop_right_now()
     st.stop()
 
@@ -347,38 +318,24 @@ tbl["label"] = [
 tbl = tbl.assign(rkey=tbl["route"].map(route_key)).sort_values(["rkey", "direction_id"])
 labels = dict(zip(zip(tbl["route"], tbl["direction_id"], strict=False), tbl["label"], strict=False))
 
+SNAME = str(stop["stop_name"])  # the stop as titles name it
 here = q(
     f"""
-    select percentile_cont(0.5) within group (order by delay_s) as median_delay,
-           percentile_cont(0.1) within group (order by delay_s) as p10,
-           percentile_cont(0.9) within group (order by delay_s) as p90, count(*) as n
+    select percentile_cont(0.5) within group (order by delay_s) as median_delay_s,
+           percentile_cont(0.1) within group (order by delay_s) as p10_delay_s,
+           percentile_cont(0.9) within group (order by delay_s) as p90_delay_s, count(*) as n,
+           count(*) filter (where status = 'on_time') as n_on_time
     from marts.fct_stop_events
     where stop_id = %s and status is not null and service_date >= %s {wt_clause}
     """,
     (stop_id, start, *wt_params),
 ).iloc[0]
-today = today_lateness(stop_id=stop_id)
-n_today = int(today["n"].iloc[0]) if len(today) else 0
 with routes_slot, card():
     st.subheader(
-        "Every route at this stop",
+        f"How reliable is each route at {SNAME}?",
         help=f"{period[0].upper() + period[1:]}. Click a column heading to sort.",
     )
-    c1, c2, c3 = st.columns(3)
-    c1.metric(
-        "Typical bus here vs timetable",
-        fmt_delay(here["median_delay"]),
-        help=TYPICAL_HELP
-        + f" {int(here['n']):,} arrivals measured, {fmt_date(by_route['first_day'].min())} to "
-        f"{fmt_date(by_route['last_day'].max())}.",
-    )
-    c2.metric("8 in 10 buses", fmt_range(here["p10"], here["p90"]), help=RANGE_HELP)
-    c3.metric(
-        "Today so far",
-        fmt_delay(today["median_delay_s"].iloc[0]) if n_today >= 10 else "—",
-        help="The typical bus here today, as of the latest update (every 15 minutes)"
-        + (f", from {n_today:,} arrivals." if n_today else "; none measured yet."),
-    )
+    headline_metrics(here, today_lateness(stop_id=stop_id), start, " here vs timetable")
     for c in ("median_delay", "p10", "p90"):
         tbl[c] = tbl[c].astype(float)
     lo, hi = range_scale(tbl, "p10", "p90")
@@ -389,76 +346,29 @@ with routes_slot, card():
                 "hover": f"Route {r.route} here: {int(r.n):,} arrivals measured",
                 "route": r.route,
                 "toward": r.headsign if isinstance(r.headsign, str) else "",
-                "typical": fmt_delay(r.median_delay),
-                "typical_s": float(r.median_delay),
-                **range_fields(r.p10, r.median_delay, r.p90, lo, hi),
+                **range_fields(r.p10, r.median_delay, r.p90, lo, hi, r.on_time, r.n),
             }
             for r in tbl.itertuples()
         ],
         [
-            {"key": "route", "label": "Route", "width": "3.4em", "bold": True},
+            {"key": "route", "label": "Route", "width": "3.8em", "bold": True},
             {"key": "toward", "label": "Toward", "width": "minmax(6em, 1.2fr)"},
-            {
-                "key": "typical",
-                "label": "Typical bus",
-                "width": "7.6em",
-                "help": TYPICAL_HELP,
-                "sort": "typical_s",
-            },
             *range_columns(lo, hi),
+            arrivals_column(),
         ],
         key="stop_routes",
         default_sort="route:asc",
         max_height=REPORT_TABLE_HEIGHT,
     )
 
-# ---- by hour: every route here together, and any route on its own ---------------------------
-with hour_slot, card():
-    st.subheader(
-        "Which times of day run late?",
-        help=LINES_HELP.format(
-            choose="Switch every route here together, and any route, on or off to compare them."
-        )
-        + f" {period[0].upper() + period[1:]}.",
-    )
-    # one line per route and direction (a route passing here both ways gets one per direction)
-    hourly = hourly_by(
-        "route_id || ':' || coalesce(direction_id, -1)", "and stop_id = %s", (stop_id,), start, wt
-    )
-    keys = [
-        f"{r}:{-1 if pd.isna(d) else int(d)}"
-        for r, d in zip(tbl["route_id"], tbl["direction_id"], strict=False)
-    ]
-    # buttons say just the route (as on the Predictions page); the chart's key says "route ..."
-    key_label = {
-        f"{r}:{-1 if pd.isna(d) else int(d)}": str(lab)
-        for r, d, lab in zip(tbl["route_id"], tbl["direction_id"], tbl["label"], strict=False)
-    }
-    shown = line_choice(
-        keys, key_label, [ALL_ROUTES], key=f"stop_hour_lines_{stop_id}", all_label="All routes here"
-    )
-    colors = line_colours(f"stop_hour_lines_{stop_id}", shown)
-    lines = [
-        {
-            "label": "all routes here" if k == ALL_ROUTES else f"route {key_label[k]}",
-            "df": hourly[hourly["key"] == k],
-            "color": colors[k],
-            "dash": "dot" if k.endswith(":1") and k.split(":")[0] in both_way_ids else "solid",
-        }
-        for k in shown
-    ]
-    fig = hourly_lines_chart(lines, min_n=5)
-    if not shown:
-        st.caption("Pick a line above.")
-    elif fig is None:
-        st.caption(NOT_ENOUGH_HOURLY.format(n=5))
-    else:
-        show_chart(fig)
+# ---- times of day: every route here, or one ------------------------------------------------
+with hour_slot:
+    times_of_day_card("stop_tod", start, wt, period, fixed_stop=(stop_id, SNAME))
 
 
 # ---- arrive-by guidance ---------------------------------------------------
 with card():
-    st.subheader("How early should I be at the stop?")
+    st.subheader(f"How early should I be at {SNAME}?")
     st.caption(
         "How many minutes before the scheduled time to be at the stop to catch 19 buses in 20. "
         f"{period[0].upper() + period[1:]}; a route needs 20 arrivals here."
@@ -500,7 +410,7 @@ with card():
     link_table(
         rows,
         [
-            {"key": "route", "label": "Route", "width": "3.4em", "bold": True},
+            {"key": "route", "label": "Route", "width": "3.8em", "bold": True},
             {"key": "toward", "label": "Toward", "width": "minmax(6em, 1.5fr)"},
             {
                 "key": "early",
@@ -562,7 +472,7 @@ with card():
 # ---- each scheduled bus ---------------------------------------------------------------------
 with card():
     st.subheader(
-        "Each scheduled departure",
+        f"Each scheduled departure from {SNAME}",
         help="How each scheduled bus of this route usually runs here against the timetable "
         "(negative = early), and the earliest and latest it came. A departure shows once it has "
         f"been measured on 3 days; hover a row for how many. {period[0].upper() + period[1:]}.",
@@ -668,7 +578,7 @@ with card():
 # ---- right now ------------------------------------------------------------------------------
 with card():
     st.subheader(
-        "Right now at this stop",
+        f"Right now at {SNAME}",
         help="The next buses of each route and direction, however far away, and any that left "
         f"in the last {JUST_LEFT_MINUTES} minutes. Arrives and In are LTD's predictions where it "
         "has one; LTD only predicts trips that are about to run, so later buses show the "
@@ -679,45 +589,9 @@ with card():
     stop_right_now()
 
 
-# ---- trend --------------------------------------------------------------------
-with card():
-    st.subheader("Is it getting better?", help=TREND_HELP + " All routes at this stop.")
-    trend_chart("and stop_id = %s", (stop_id,), "here")
-
-
-# ---- how far off LTD's predictions are here ------------------------------------------------
-with card():
-    st.subheader(
-        "How far off are the predictions at this stop?",
-        help=PREDICTION_OFF_NOTE + f" {period[0].upper() + period[1:]}.",
-    )
-    here_routes = tbl[["route_id", "route"]].drop_duplicates("route_id")
-    here_names = dict(
-        zip(here_routes["route_id"].astype(str), here_routes["route"].astype(str), strict=False)
-    )
-    at_stop = countdown_off_at_stop(stop_id, start, wt)
-    here_ids = sorted({str(r) for r in at_stop["route_id"].dropna()})
-    # every route here together, and the route with the most bus arrivals here to compare
-    busiest = busiest_route(at_stop) if len(here_ids) > 1 else None
-    lines = route_toggles(
-        here_ids,
-        here_names,
-        [ALL_ROUTES, *([busiest] if busiest else [])],
-        key=f"stop_pred_lines_{stop_id}",
-        all_label="All routes here",
-    )
-    fig = countdown_off_chart(
-        at_stop,
-        {k: f"Route {v}" for k, v in here_names.items()},
-        lines,
-        all_label="All routes here",
-        colors=line_colours(f"stop_pred_lines_{stop_id}", lines),
-    )
-    if fig is None:
-        st.caption("Not enough measured arrivals with a prediction here yet for this period.")
-    else:
-        show_chart(fig)
-    st.page_link("views/accuracy.py", label=PREDICTIONS_LINK)
+# ---- the trend and the predictions: every route here, or one -------------------------------
+trend_card("stop_trend", fixed_stop=(stop_id, SNAME))
+predictions_card("stop_pred", start, wt, period, fixed_stop=(stop_id, SNAME))
 
 # ---- nearby stops: across the street, the next one along ------------------------------------
 near = q(
@@ -735,7 +609,7 @@ near = q(
 )
 if not near.empty:
     with card():
-        st.subheader("Nearby stops")
+        st.subheader(f"Stops near {SNAME}")
         stop_tiles(near)
 
 st.divider()

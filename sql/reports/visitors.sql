@@ -41,6 +41,28 @@ group by 1 order by 1;
 select count(*) as page_views, count(distinct session_id) as sessions
 from site.page_view
 where device = 'bot' and viewed_at > now() - interval '7 days';
+\echo '== How long pages took to draw, last 7 days (on the server: mostly waiting on the database)'
+\echo '   during_build: whether an analysis build was running at the time'
+select coalesce(b.during, false) as during_build, count(*) as page_views,
+       round((percentile_cont(0.5) within group (order by v.load_ms))::numeric / 1000, 1) as median_s,
+       round((percentile_cont(0.9) within group (order by v.load_ms))::numeric / 1000, 1) as p90_s,
+       round(100.0 * avg((v.load_ms > 3000)::int)) as pct_over_3s
+from site.page_view v
+left join lateral (
+    select true as during from analytics.build_log l
+    where v.viewed_at between l.started_at and coalesce(l.finished_at, now()) limit 1
+) b on true
+where v.device <> 'bot' and v.load_ms is not null and v.viewed_at > now() - interval '7 days'
+group by 1 order by 1;
+
+\echo '== The slowest pages to draw, last 7 days'
+select page, count(*) as page_views,
+       round((percentile_cont(0.5) within group (order by load_ms))::numeric / 1000, 1) as median_s,
+       round(max(load_ms) / 1000.0, 1) as slowest_s
+from site.page_view
+where device <> 'bot' and load_ms is not null and viewed_at > now() - interval '7 days'
+group by 1 order by 3 desc;
+
 -- The bottom line: one sentence to quote, and the numbers behind it. A visit is one browser
 -- tab's session (people aren't tracked from one visit to the next, so this counts visits, not
 -- distinct people). Browsers that opened the site with ?dont_count_me (yours) aren't counted.

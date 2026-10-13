@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import math
 import os
+import pickle
 import queue
 import re
 import threading
@@ -40,8 +41,10 @@ STATUS_COLOR = {
 # The site's colours, by the job each does:
 # - BRAND: the site itself (its name, links, chosen buttons, the way back, route cards) and the
 #   main line of a chart. Blue: it says nothing about good or bad, so it never competes with...
-# - the status colours (STATUS_COLOR, ON_TIME_GREEN): green = on time, amber = early, red =
-#   late. Kept for meaning only, never for decoration.
+# - the status colours (STATUS_COLOR): green = on time, amber = early, red = late, on the stop
+#   map. Kept for meaning only, never for decoration.
+# - ON_TIME_LINE: the timetable itself (0 minutes) in charts and tables, a dashed dark grey
+#   line: a reference to read against, not a result, so it carries no status colour.
 # - STOP_COLOUR: stop cards, a quiet slate beside the routes' blue (a stop is a place, a route
 #   a line on the map).
 # - LINE_COLOURS: other lines on one chart, in this fixed order (a categorical palette checked
@@ -298,6 +301,7 @@ def warm_caches() -> None:
     visitors used in the last day (most recent first) so their results are cached before anyone
     asks. Started once per server by streamlit_app.py."""
     warmed = None
+    load_warm_list()
     while True:
         time.sleep(20)
         try:
@@ -320,6 +324,7 @@ def warm_caches() -> None:
                 time.sleep(0.05)  # leave the database room for visitors
             else:
                 warmed = marker
+                save_warm_list()
                 if recent:
                     print(
                         f"cache warmer: {len(recent)} queries ready for the build of {marker} "
@@ -330,11 +335,49 @@ def warm_caches() -> None:
             pass
 
 
-@st.cache_resource
+# The queries to keep warm, saved to disk (WARM_FILE, on a volume the site keeps across
+# updates), so a restarted site (after an update) warms them at once instead of waiting for
+# visitors to ask again, each paying for an empty cache.
+WARM_FILE = os.environ.get("WARM_FILE", "")
+
+
+def save_warm_list() -> None:
+    if not WARM_FILE:
+        return
+    try:
+        tmp = WARM_FILE + ".tmp"
+        with open(tmp, "wb") as f:
+            pickle.dump(dict(_RECENT_QUERIES), f)
+        os.replace(tmp, WARM_FILE)
+    except Exception:  # noqa: BLE001 — a nicety: the site works without it
+        pass
+
+
+def load_warm_list() -> None:
+    if not WARM_FILE or not os.path.exists(WARM_FILE):
+        return
+    try:
+        with open(WARM_FILE, "rb") as f:
+            saved = pickle.load(f)  # noqa: S301 — written by this app, on its own volume
+        for k, used in saved.items():
+            _RECENT_QUERIES.setdefault(k, used)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+_WARMER: list[threading.Thread] = []
+_WARMER_LOCK = threading.Lock()
+
+
 def start_cache_warmer() -> threading.Thread:
-    t = threading.Thread(target=warm_caches, name="cache-warmer", daemon=True)
-    t.start()
-    return t
+    """Start warm_caches() once per server process (the pages it renders at start call this
+    too; they get the same thread)."""
+    with _WARMER_LOCK:
+        if not _WARMER:
+            t = threading.Thread(target=warm_caches, name="cache-warmer", daemon=True)
+            t.start()
+            _WARMER.append(t)
+        return _WARMER[0]
 
 
 @st.cache_data(ttl=10, show_spinner=False)
@@ -817,7 +860,7 @@ def not_counted() -> bool:
         return False
 
 
-def log_page_view(page: str) -> None:
+def log_page_view(page: str, load_ms: int | None = None) -> None:
     """Count a page view in site.page_view: the time, the page (with the stop or route
     chosen on it), phone or computer, and a random id for this browser tab's session, so
     visits can be counted. No IP address, cookie or anything identifying is stored. Logged
@@ -848,9 +891,9 @@ def log_page_view(page: str) -> None:
                 # the site's login is read-only by default; this table takes inserts
                 conn.read_only = False
                 conn.execute(
-                    "insert into site.page_view (session_id, page, detail, device) "
-                    "values (%s, %s, %s, %s)",
-                    (session_id, page, detail, device),
+                    "insert into site.page_view (session_id, page, detail, device, load_ms) "
+                    "values (%s, %s, %s, %s, %s)",
+                    (session_id, page, detail, device, load_ms),
                 )
         except Exception:  # noqa: BLE001 — a missing table or a busy database is ignored
             pass
@@ -1528,9 +1571,9 @@ def worst_hour_label(hour, delay_s) -> str:
 
 
 def route_table(rank: pd.DataFrame, start: date, key: str) -> None:
-    """Every route in one sortable, clickable table (rows from route_rank()): typical bus,
-    the 8-in-10 range, the latest hour of the day, and today so far; the number of arrivals
-    behind each row shows on hover."""
+    """Every route in one sortable, clickable table (rows from route_rank()), by route number:
+    on time, typical bus, the 8-in-10 range, the latest hour of the day, today so far, and the
+    arrivals behind each row."""
     routes = routes_by_service()
     long_names = dict(
         zip(routes["route_id"].astype(str), routes["route_long_name"].fillna(""), strict=False)
@@ -1551,9 +1594,9 @@ def route_table(rank: pd.DataFrame, start: date, key: str) -> None:
                 f"{fmt_date(start)}",
                 "route": r.route_short_name,
                 "name": long_names.get(rid, ""),
-                "typical": fmt_delay(r.median_delay),
-                "typical_s": float(r.median_delay),
-                **range_fields(r.p10_delay_s, r.median_delay, r.p90_delay_s, lo, hi),
+                **range_fields(
+                    r.p10_delay_s, r.median_delay, r.p90_delay_s, lo, hi, r.n_on_time, r.n
+                ),
                 "worst": worst_hour_label(r.worst_hour, r.worst_delay_s),
                 # in the order of the service day: 5 am first, after midnight last
                 "worst_s": None if pd.isna(r.worst_hour) else service_hour_key(r.worst_hour),
@@ -1564,26 +1607,19 @@ def route_table(rank: pd.DataFrame, start: date, key: str) -> None:
     link_table(
         rows,
         [
-            {"key": "route", "label": "Route", "width": "3.4em", "bold": True},
+            {"key": "route", "label": "Route", "width": "3.8em", "bold": True},
             {
                 "key": "name",
                 "label": "Name",
-                "width": "minmax(6em, 1.2fr)",
+                "width": "minmax(5em, 1fr)",
                 "hide_on_phone": True,
-            },
-            {
-                "key": "typical",
-                "label": "Typical bus",
-                "width": "7.6em",
-                "help": TYPICAL_HELP,
-                "sort": "typical_s",
-                "first": "desc",
             },
             *range_columns(lo, hi),
             {
                 "key": "worst",
                 "label": "Latest hour",
-                "width": "10.5em",
+                "width": "9.6em",
+                "num": True,
                 "hide_on_phone": True,
                 "help": "The hour of day when the typical bus on this route runs latest, and how "
                 "late it is then (hours with at least 10 arrivals). Sorts by time of day.",
@@ -1593,15 +1629,18 @@ def route_table(rank: pd.DataFrame, start: date, key: str) -> None:
             {
                 "key": "today",
                 "label": "Today so far",
-                "width": "7.6em",
+                "width": "6.8em",
+                "num": True,
                 "hide_on_phone": True,
                 "help": "The typical bus today, as of the latest update (every 15 minutes).",
                 "sort": "today_s",
                 "first": "desc",
             },
+            arrivals_column(),
         ],
         max_height=640,
         key=key,
+        # by route number: the order riders know them in
         default_sort="route:asc",
     )
 
@@ -1615,12 +1654,11 @@ NOT_ENOUGH_HOURLY = "Not enough arrivals yet for this chart (needs {n} in an hou
 PREDICTION_OFF_NOTE = (
     "How many minutes, on average, the bus came from the time it was given, early or late "
     "alike; lower is better. Thick line with dots: LTD's real-time predictions (what apps like "
-    "Transit show), by how many minutes away the prediction said the bus was. Thin straight line "
-    "in the same colour: the printed timetable for the same bus arrivals (flat, because the "
-    "timetable doesn't change as the bus gets nearer). Minutes away is what the prediction said "
-    "at the time, not when the bus actually came. Switch lines on and off above the chart; "
-    "each adds its two. Measured on bus arrivals that had a prediction 15 minutes out, each counted "
-    "once at each distance; points with fewer than 20 are left out."
+    "Transit show), by how many minutes away the prediction said the bus was. Thin straight line: "
+    "the printed timetable for the same bus arrivals (flat, because the timetable doesn't change "
+    "as the bus gets nearer). Minutes away is what the prediction said at the time, not when the "
+    "bus actually came. Measured on bus arrivals that had a prediction 15 minutes out, each "
+    "counted once at each distance; points with fewer than 20 are left out."
 )
 
 # the key for "every route together" in prediction_off() and countdown_off_chart()
@@ -1763,7 +1801,9 @@ def countdown_off_chart(
                 x=g["ahead_min"],
                 y=g["off"],
                 mode="lines+markers",
-                name=f"Predictions ({in_parens(label)})",
+                # one choice per chart, named in the chart's title: the legend says which line is
+                # which
+                name="Predictions",
                 legendgroup=key or "all",
                 legendrank=2 * rank,
                 line={"color": colour, "width": LINE_MAIN},
@@ -1783,7 +1823,7 @@ def countdown_off_chart(
                     x=[1, 15],
                     y=[t, t],
                     mode="lines",
-                    name=f"Timetable ({in_parens(label)})",
+                    name="Printed timetable",
                     legendgroup=key or "all",
                     legendrank=2 * rank + 1,
                     line={"color": colour, "width": 1.6},
@@ -1813,7 +1853,7 @@ def countdown_off_chart(
     return fig
 
 
-ON_TIME_GREEN = "#0b6e4f"
+ON_TIME_LINE = "#4b5563"
 
 # One look for every chart on the site: line weights, the grey of comparison lines, and (in
 # show_chart) the text sizes and behaviour.
@@ -1873,15 +1913,14 @@ def show_chart(fig: go.Figure) -> None:
 
 
 def on_time_line(fig: go.Figure) -> None:
-    """The 'on time' reference (0 minutes against the timetable) on a minutes axis: a solid
-    green line drawn over the bands, the same green as the on-time line in tables. The axis
-    labels it (minutes_axis)."""
-    fig.add_hline(y=0, line_width=2, line_color=ON_TIME_GREEN, layer="above")
+    """The 'on time' reference (0 minutes against the timetable) on a minutes axis: a dashed dark
+    grey line drawn over the bands, as in the tables. The axis labels it (minutes_axis)."""
+    fig.add_hline(y=0, line_width=1.6, line_dash="dash", line_color=ON_TIME_LINE, layer="above")
 
 
 def minutes_axis(values, pad: float = 0.5) -> dict:
     """A minutes-against-the-timetable axis fitted to the values (and 0), labelled in words:
-    'on time' in green at 0, then '2 min late', '1 min early' (no signs to decode)."""
+    'on time' at 0, then '2 min late', '1 min early' (no signs to decode)."""
     vals = [float(v) for v in values if v is not None and not pd.isna(v)] + [0.0]
     lo, hi = min(vals) - pad, max(vals) + pad
     span = hi - lo
@@ -1890,7 +1929,7 @@ def minutes_axis(values, pad: float = 0.5) -> dict:
 
     def word(t: int) -> str:
         if t == 0:
-            return f"<span style='color:{ON_TIME_GREEN}'><b>on time</b></span>"
+            return "<b>on time</b>"
         return f"{abs(t)} min {'late' if t > 0 else 'early'}"
 
     return {
@@ -1990,7 +2029,7 @@ def hourly_lines_chart(
                     line_width=0,
                     hoverinfo="skip",
                     # named for what it is the spread of; listed after the line it belongs to
-                    name=f"8 in 10 buses ({in_parens(ln['label'])})",
+                    name="8 in 10 buses",
                     legendrank=2,
                 )
             )
@@ -2016,7 +2055,7 @@ def hourly_lines_chart(
             go.Scatter(
                 x=x,
                 y=d["median_delay_s"] / 60,
-                name=f"Typical bus ({in_parens(ln['label'])})" if one else as_name(ln["label"]),
+                name="Typical bus" if one else as_name(ln["label"]),
                 legendrank=1,
                 mode="lines+markers",
                 line={
@@ -2238,14 +2277,15 @@ def stops_with_numbers(per: pd.DataFrame) -> pd.DataFrame:
 
 
 def every_stop_card(enough: pd.DataFrame, period: str, key: str = "every_stop") -> None:
-    """'Every stop': a sortable table of every stop (stops_with_numbers()), each row opening the
-    stop's report card. On the Stops page and the Overview."""
+    """'How reliable is each stop?': every stop (stops_with_numbers()) in a sortable table, each
+    row opening the stop's report card; busiest first, the stops most riders use. On the Stops
+    page and the Overview."""
     lo, hi = range_scale(enough)
     with card():
         st.subheader(
-            "Every stop",
-            help=f"{period}, stops with at least 20 measured arrivals. Click a column heading "
-            "to sort, again to reverse: Typical bus sorts latest first, then earliest first.",
+            "How reliable is each stop?",
+            help=f"{period}, stops with at least 20 measured arrivals, busiest first. Click a "
+            "column heading to sort, again to reverse.",
         )
         link_table(
             [
@@ -2254,9 +2294,9 @@ def every_stop_card(enough: pd.DataFrame, period: str, key: str = "every_stop") 
                     "hover": f"{r.stop_name}: {int(r.n):,} arrivals measured",
                     "stop": f"{r.stop_name}" + (f" · #{r.stop_code}" if r.stop_code else ""),
                     "routes": r.routes,
-                    "typical": fmt_delay(r.median_delay_s),
-                    "typical_s": float(r.median_delay_s),
-                    **range_fields(r.p10_delay_s, r.median_delay_s, r.p90_delay_s, lo, hi),
+                    **range_fields(
+                        r.p10_delay_s, r.median_delay_s, r.p90_delay_s, lo, hi, r.n_on_time, r.n
+                    ),
                 }
                 for r in enough.itertuples()
             ],
@@ -2268,68 +2308,311 @@ def every_stop_card(enough: pd.DataFrame, period: str, key: str = "every_stop") 
                     "width": "minmax(4em, 0.6fr)",
                     "hide_on_phone": True,
                 },
-                {
-                    "key": "typical",
-                    "label": "Typical bus",
-                    "width": "7.6em",
-                    "help": TYPICAL_HELP,
-                    "sort": "typical_s",
-                    "first": "desc",
-                },
                 *range_columns(lo, hi),
+                arrivals_column(),
             ],
             max_height=520,
             key=key,
-            default_sort="stop:asc",
+            default_sort="n:desc",
         )
 
 
-def network_trend_card() -> None:
-    """'Is it getting better?' for every route at every stop (the Routes and Stops pages)."""
-    with card():
-        st.subheader("Is it getting better?", help=TREND_HELP + " Every route at every stop.")
-        trend_chart("", (), "")
+# ------------------------------------------------- one route and/or one stop per chart ----
 
 
+class Scope:
+    """What a chart is about: every route or one, at every stop or one (and on a route's report
+    card, one direction). Names it for the chart's title."""
+
+    def __init__(self, route_id=None, route_name=None, stop_id=None, stop_name=None, long_name=""):
+        self.route_id, self.route_name = route_id, route_name
+        self.stop_id, self.stop_name = stop_id, stop_name
+        self.long_name = long_name
+
+    def suffix(self, long: bool = False) -> str:
+        """' for route 11 at Olive & 11th', ' for route 11', ' at Olive & 11th', or ''."""
+        out = ""
+        if self.route_id:
+            out += f" for route {self.route_name}"
+            if long and self.long_name and self.long_name != self.route_name:
+                out += f" ({self.long_name})"
+        if self.stop_id:
+            out += f" at {self.stop_name}"
+        return out
+
+    def label(self) -> str:
+        """'route 11 at Olive & 11th', 'all routes at Olive & 11th', 'route 11', or
+        NETWORK: for the hover text of a chart's line."""
+        if self.route_id:
+            return f"route {self.route_name}" + (f" at {self.stop_name}" if self.stop_id else "")
+        return f"all routes at {self.stop_name}" if self.stop_id else NETWORK
+
+    def where(self, direction: int | None = None, prefix: str = "") -> tuple[str, tuple]:
+        """A SQL condition (starting with ' and') on fct_stop_events-like columns, and its
+        parameters."""
+        sql, params = "", ()
+        if self.route_id:
+            sql += f" and {prefix}route_id = %s"
+            params += (self.route_id,)
+        if self.stop_id:
+            sql += f" and {prefix}stop_id = %s"
+            params += (self.stop_id,)
+        if direction is not None:
+            sql += f" and {prefix}direction_id = %s"
+            params += (direction,)
+        return sql, params
+
+
+ALL_CHOICE = "__all__"
 PREDICTIONS_LINK = "More about the predictions →"
 
 
-def network_predictions_card(start: date, wt: str | None, period: str, by_route: bool) -> None:
-    """'How far off are the predictions?' for every route at every stop, as each report card has
-    for its own route or stop: on the Routes page with a button per route to compare (as on the
-    Predictions page), on the Stops page every stop together."""
-    with card():
-        st.subheader(
-            "How far off are the predictions?",
-            help=PREDICTION_OFF_NOTE + f" {period[0].upper() + period[1:]}.",
+def stop_choices(route_id: str | None, direction: int | None) -> pd.DataFrame:
+    """The stops a stop list offers: on one route (in one direction) in the order the bus reaches
+    them, labelled '3. Olive & 11th'; else every stop by name, labelled 'Olive & 11th · #1234'."""
+    fv = current_fv()
+    if route_id:
+        df = q(
+            f"""
+            select s.stop_id, s.stop_name, s.stop_code, min(st.stop_sequence) as seq
+            from gtfs.stop_times st
+            join gtfs.trips t on t.trip_id = st.trip_id and t.feed_version_id = st.feed_version_id
+            join gtfs.stops s on s.stop_id = st.stop_id and s.feed_version_id = st.feed_version_id
+            where st.feed_version_id = {fv} and t.route_id = %s
+              {"and t.direction_id = %s" if direction is not None else ""}
+            group by 1, 2, 3 order by 4, 2
+            """,
+            (route_id, *(() if direction is None else (direction,))),
         )
-        off = prediction_off(start, wt)
-        if off.empty or off["n"].sum() == 0:
-            st.caption("No measured predictions for this period yet.")
-            return
-        names = {}
-        lines = [ALL_ROUTES]
-        if by_route:
-            r = routes_by_service()
-            names = dict(
-                zip(r["route_id"].astype(str), r["route_short_name"].astype(str), strict=False)
+        df = readable_stop_names(df)
+        if direction is not None:
+            df["label"] = [f"{i + 1}. {n}" for i, n in enumerate(df["stop_name"])]
+            return df
+    else:
+        df = readable_stop_names(
+            q(
+                f"select stop_id, stop_name, stop_code from gtfs.stops "
+                f"where feed_version_id = {fv} and location_type = 0"
             )
-            ids = sorted({str(x) for x in off["route_id"].dropna()} & set(names))
-            lines = route_toggles(ids, names, [ALL_ROUTES], key="landing_pred_lines")
-        fig = countdown_off_chart(
-            off,
-            {k: f"Route {v}" for k, v in names.items()},
-            lines,
-            colors=line_colours("landing_pred_lines", lines),
-            # named as its button says on the Routes page; every route at every stop elsewhere
-            all_label="All routes" if by_route else as_name(NETWORK),
-            min_n=30,
+        )
+    df = df.sort_values("stop_name")
+    df["label"] = [
+        n + (f" · #{c}" if c else "")
+        for n, c in zip(df["stop_name"], df["stop_code"], strict=False)
+    ]
+    return df
+
+
+def scope_picker(
+    key: str,
+    fixed_route: tuple[str, str] | None = None,
+    fixed_stop: tuple[str, str] | None = None,
+    direction: int | None = None,
+    in_address: bool = False,
+) -> Scope:
+    """The one choice every chart of a route and/or stop offers, the same everywhere: the route
+    buttons (All routes first), then a stop list you can type into (All stops first), each
+    showing one thing at a time. On a route's report card (fixed_route: (route_id, name)) only
+    the stop list, along the route in `direction`; on a stop's (fixed_stop: (stop_id, name))
+    only the routes that serve it. in_address: the choice is kept in the page's address
+    (?route=, ?stop=), so it can be bookmarked and shared."""
+    fv = current_fv()
+    route_id = route_name = None
+    long_name = ""
+    if fixed_route:
+        route_id, route_name = fixed_route
+    else:
+        if fixed_stop:
+            routes = q(
+                f"""
+                select distinct r.route_id, r.route_short_name, r.route_long_name
+                from gtfs.stop_times st
+                join gtfs.trips t on t.trip_id = st.trip_id and t.feed_version_id = st.feed_version_id
+                join gtfs.routes r on r.route_id = t.route_id and r.feed_version_id = t.feed_version_id
+                where st.feed_version_id = {fv} and st.stop_id = %s
+                """,
+                (fixed_stop[0],),
+            )
+        else:
+            routes = routes_by_service()
+        if len(routes) > 1 or not fixed_stop:
+            route_id = route_picker(
+                routes,
+                key=f"{key}_route",
+                all_label="All routes here" if fixed_stop else "All routes",
+                query_param="route" if in_address else None,
+            )
+        else:
+            route_id = None
+        if route_id:
+            row = routes[routes["route_id"].astype(str) == str(route_id)].iloc[0]
+            route_name = str(row["route_short_name"])
+            long_name = str(row.get("route_long_name") or "")
+    stop_id = stop_name = None
+    if fixed_stop:
+        stop_id, stop_name = fixed_stop
+    else:
+        stops = stop_choices(route_id, direction)
+        label_of = dict(zip(stops["stop_id"].astype(str), stops["label"], strict=False))
+        name_of = dict(zip(stops["stop_id"].astype(str), stops["stop_name"], strict=False))
+        options = [ALL_CHOICE, *label_of]
+        skey = f"{key}_stop"
+        if skey not in st.session_state and in_address:
+            wanted = st.query_params.get("stop")
+            st.session_state[skey] = wanted if wanted in label_of else ALL_CHOICE
+        if st.session_state.get(skey) not in options:  # not on the newly chosen route
+            st.session_state[skey] = ALL_CHOICE
+        everywhere = (
+            "All stops on this route"
+            if fixed_route
+            else (f"All stops on route {route_name}" if route_id else "All stops")
+        )
+        picked = st.selectbox(
+            "Stop (type to search)",
+            options,
+            format_func=lambda s: everywhere if s == ALL_CHOICE else label_of[s],
+            key=skey,
+        )
+        if picked != ALL_CHOICE:
+            stop_id, stop_name = picked, name_of[picked]
+        if in_address:
+            if stop_id:
+                st.query_params["stop"] = stop_id
+            else:
+                st.query_params.pop("stop", None)
+    return Scope(route_id, route_name, stop_id, stop_name, long_name)
+
+
+def scoped_lateness(
+    start: date, wt: str | None, scope: Scope, direction: int | None = None
+) -> tuple[pd.Series | None, pd.DataFrame]:
+    """(overall row, rows by hour) of lateness against the timetable for a page's filters and a
+    scope: everything and single routes from the precomputed table, anything narrower (a stop,
+    a direction) from the arrivals themselves."""
+    if direction is None:
+        return selection_lateness(start, wt, scope.route_id, scope.stop_id)
+    clause, params = day_sql(wt)
+    where, wparams = scope.where(direction)
+    df = q(_HOURLY_SQL.format(where=where + " " + clause), (start, *wparams, *params))
+    for c in ("median_delay_s", "p10_delay_s", "p90_delay_s"):
+        df[c] = df[c].astype(float)
+    tot = df[df["hour_local"].isna()]
+    hourly = df[df["hour_local"].notna()].astype({"hour_local": int})
+    return (tot.iloc[0] if len(tot) and int(tot["n"].iloc[0]) else None), hourly
+
+
+def times_of_day_card(
+    key: str,
+    start: date,
+    wt: str | None,
+    period: str,
+    fixed_route: tuple[str, str] | None = None,
+    fixed_stop: tuple[str, str] | None = None,
+    direction: int | None = None,
+    help_extra: str = "",
+) -> None:
+    """'Which times of day run late …?': the typical bus and the 8-in-10 band by the hour it
+    was scheduled, for one choice of route and stop (scope_picker), named in the title."""
+    with card():
+        title = st.empty()
+        scope = scope_picker(key, fixed_route, fixed_stop, direction)
+        title.subheader(
+            f"Which times of day run late{scope.suffix()}?",
+            help=LATENESS_CHART_NOTE + f" {period[0].upper() + period[1:]}{help_extra}.",
+        )
+        _, hourly = scoped_lateness(start, wt, scope, direction)
+        min_n = 5 if (scope.stop_id or direction is not None) else 10
+        fig = hourly_lines_chart(
+            [{"label": scope.label(), "df": hourly, "color": BRAND}], min_n=min_n
+        )
+        if fig is None:
+            st.caption(NOT_ENOUGH_HOURLY.format(n=min_n))
+        else:
+            show_chart(fig)
+
+
+def trend_card(
+    key: str,
+    fixed_route: tuple[str, str] | None = None,
+    fixed_stop: tuple[str, str] | None = None,
+    direction: int | None = None,
+    help_extra: str = "",
+) -> None:
+    """'Is it getting better …?': the typical bus over time for one choice of route and stop."""
+    with card():
+        title = st.empty()
+        scope = scope_picker(key, fixed_route, fixed_stop, direction)
+        title.subheader(f"Is it getting better{scope.suffix()}?", help=TREND_HELP + help_extra)
+        where, params = scope.where(direction)
+        trend_chart(where, params, "for this choice")
+
+
+def prediction_scope_rows(
+    start: date, wt: str | None, scope: Scope, direction: int | None = None
+) -> pd.DataFrame:
+    """prediction_off()'s rows (route_id null: the scope as a whole) for one choice of route,
+    stop and direction: from the per-route table where that's enough, else the per-stop one."""
+    if not scope.stop_id and direction is None:
+        off = prediction_off(start, wt)
+        if off.empty:
+            return off
+        if scope.route_id:
+            off = off[off["route_id"].astype(str) == str(scope.route_id)]
+        else:
+            off = off[off["route_id"].isna()]
+        return off.assign(route_id=None)
+    clause, wt_params = day_sql(wt)
+    where, params = scope.where(direction)
+    try:
+        return q(
+            f"""
+            select basis, ahead_min, null::text as route_id, sum(n) as n,
+                   sum(sum_abs_s)::float8 / nullif(sum(n), 0) as mean_abs_s
+            from marts.mart_prediction_stop_daily
+            where service_date >= %s {where} {clause}
+            group by 1, 2
+            """,
+            (start, *params, *wt_params),
+        )
+    except Exception:  # noqa: BLE001 — the table is being rebuilt
+        return pd.DataFrame()
+
+
+def predictions_card(
+    key: str,
+    start: date,
+    wt: str | None,
+    period: str,
+    fixed_route: tuple[str, str] | None = None,
+    fixed_stop: tuple[str, str] | None = None,
+    direction: int | None = None,
+    help_extra: str = "",
+    link: bool = True,
+) -> None:
+    """'How far off are the predictions …?' for one choice of route and stop: the prediction by
+    how many minutes away it said, and the printed timetable on the same arrivals."""
+    with card():
+        title = st.empty()
+        scope = scope_picker(key, fixed_route, fixed_stop, direction)
+        title.subheader(
+            f"How far off are the predictions{scope.suffix()}?",
+            help=PREDICTION_OFF_NOTE + f" {period[0].upper() + period[1:]}{help_extra}.",
+        )
+        rows = prediction_scope_rows(start, wt, scope, direction)
+        fig = (
+            None
+            if rows.empty
+            else countdown_off_chart(
+                rows, {}, [ALL_ROUTES], all_label=as_name(scope.label()), colors={ALL_ROUTES: BRAND}
+            )
         )
         if fig is None:
             st.caption("Not enough measured arrivals with a prediction yet for this choice.")
         else:
             show_chart(fig)
-        st.page_link("views/accuracy.py", label=PREDICTIONS_LINK)
+        if link:
+            params = {k: v for k, v in (("route", scope.route_id), ("stop", scope.stop_id)) if v}
+            st.page_link("views/accuracy.py", label=PREDICTIONS_LINK, query_params=params)
 
 
 # One point per day in "Is it getting better?"; per week once there's more than this many days
@@ -2372,45 +2655,44 @@ def col_range(label: str = "Usual range"):
 RANGE_TEXT_PX = 92
 _TABLE_CSS = """
 <style>
-.ebw-t { border: 1px solid #e3e6ea; border-radius: 10px; overflow: auto; font-size: 15px;
-         display: flex; flex-direction: column; }
-.ebw-r { display: grid; grid-template-columns: var(--cols); align-items: center;
-         column-gap: 12px; padding: 7px 12px; border-bottom: 1px solid #eef0f2; color: #262730;
-         text-decoration: none; flex: none; }
+/* One grid for the whole table: every row (the header too) is a subgrid of it, so a column's
+   heading and its values always share one width and line up exactly, however long any value. */
+.ebw-t { display: grid; grid-template-columns: var(--cols); column-gap: 14px;
+         align-content: start; border: 1px solid #e3e6ea; border-radius: 10px; overflow: auto;
+         font-size: 15px; }
+.ebw-r { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; align-items: center;
+         padding: 7px 12px; border-bottom: 1px solid #eef0f2; color: #262730;
+         text-decoration: none; }
 a.ebw-r:hover { background: #eaf1f9; }
 .ebw-h { position: sticky; top: 0; order: -1; background: #f6f8f9; font-weight: 600;
-         align-items: end;
-         font-size: 13px; color: #555; z-index: 1; }
+         align-items: end; font-size: 13px; color: #555; z-index: 1; }
+.ebw-h > div { white-space: nowrap; }  /* a heading on one line, over its column */
 .ebw-h label { cursor: pointer; user-select: none; }
 .ebw-h label:hover { color: #1f5f9e; }
 .ebw-so::after { content: ' ↕'; color: #b5b5b5; }
 .ebw-sr { display: none; }
 .ebw-n { text-align: right; font-variant-numeric: tabular-nums; }
+.ebw-c { text-align: center; }
 .ebw-go { color: #1f5f9e; font-weight: 700; text-align: right; white-space: nowrap; }
 .ebw-go-t { font-weight: 600; font-size: 13px; }
 .ebw-k { font-weight: 700; }
 .ebw-s { color: #666; font-size: 14px; }
 .ebw-g { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
-/* the strip takes the column's width less the numbers beside it, so the
-   heading's "on time" (ebw-ax, the same width) lines up with the green line in every row */
+/* the strip takes the column's width less the numbers beside it */
 .ebw-x { position: relative; display: block; flex: 1 1 auto; min-width: 70px; height: 16px; }
 .ebw-g > .ebw-s { flex: 0 0 RANGE_TEXT_PXpx; }
 .ebw-x > span { position: absolute; display: block; }
-.ebw-x0 { top: -10px; width: 2px; margin-left: -1px; height: calc(100% + 20px);
-          background: #0b6e4f; }
+/* on time: a dashed dark grey line running down through every row (as in the charts) */
+.ebw-x0 { top: -10px; width: 0; margin-left: -1px; height: calc(100% + 20px);
+          border-left: 2px dashed #4b5563; }
 .ebw-x1 { top: 4px; height: 8px; border-radius: 3px; background: #9cc0e0; }
 .ebw-x2 { top: 0; width: 4px; height: 16px; border-radius: 1px; background: #123f6b; }
-.ebw-ax { position: relative; display: block; width: calc(100% - RANGE_GAP_PXpx); height: 15px;
-          margin-top: 3px;
-          font-weight: 500; font-size: 11px; color: #777; }
-.ebw-ax > span { position: absolute; top: 0; transform: translateX(-50%); white-space: nowrap; }
-.ebw-ax > .ebw-ax0 { color: #0b6e4f; font-weight: 700; }
 @media (max-width: 640px) {
-  .ebw-hide { display: none; } .ebw-t { font-size: 14px; } .ebw-go-t { display: none; }
-  .ebw-r { grid-template-columns: var(--cols-phone); padding: 7px 8px; column-gap: 8px; }
+  .ebw-hide { display: none; } .ebw-t { font-size: 14px; column-gap: 8px;
+  grid-template-columns: var(--cols-phone); } .ebw-go-t { display: none; }
+  .ebw-r { padding: 7px 8px; }
   .ebw-g { flex-direction: column; align-items: stretch; gap: 2px; }
   .ebw-g > .ebw-s { flex: none; }
-  .ebw-ax { width: 100%; }
   .ebw-x0 { top: -4px; height: calc(100% + 6px); }  /* clear of the numbers under the strip */
 }
 </style>
@@ -2604,58 +2886,93 @@ def range_scale(df: pd.DataFrame, lo_col: str = "p10_delay_s", hi_col: str = "p9
     return lo, hi
 
 
-def range_axis(lo: float, hi: float) -> str:
-    """The heading over a column of range strips: just 'on time' at 0 (green, as the line
-    running down through the strips); the numbers in each row give the scale."""
-    x = (0 - lo) / (hi - lo) * 100
-    # centred on the line, unless that would push the words past the column's edge
-    shift = 0 if x < 18 else 100 if x > 82 else 50
-    return (
-        "<span class='ebw-ax'>"
-        f"<span class='ebw-ax0' style='left:{x:.1f}%;transform:translateX(-{shift}%)'>"
-        "on time</span></span>"
-    )
+ON_TIME_HELP = (
+    "The share of buses between 1 minute early and 5 minutes late against the timetable: the "
+    "usual definition of on time for buses in the US."
+)
 
 
-def range_fields(p10, med, p90, lo: float, hi: float) -> dict:
-    """A table row's entries for range_columns(): the strip, its sort value (the typical bus,
-    so sorting lines the dark ticks up), and the spread in minutes."""
+def range_fields(p10, med, p90, lo: float, hi: float, on_time=None, n=None) -> dict:
+    """A table row's entries for range_columns(): the on-time share, the typical bus, the strip
+    (which sorts by the on-time share, so a click brings the most reliable to the top), the
+    spread in minutes, and the number of arrivals measured."""
     spread = None if pd.isna(p10) or pd.isna(p90) else float(p90 - p10)
+    share = None if on_time is None or not n else float(on_time) / float(n)
     return {
+        "on_time": "" if share is None else f"{100 * share:.0f}%",
+        "on_time_s": share,
+        "typical": fmt_delay(med),
+        "typical_s": None if pd.isna(med) else float(med),
         "range": range_cell(p10, med, p90, lo, hi),
-        "range_s": None if pd.isna(med) else float(med),
+        "range_s": share,
         "spread": "" if spread is None else f"{spread / 60:.1f} min",
         "spread_s": spread,
+        "n": "" if not n else f"{int(n):,}",
+        "n_s": None if not n else int(n),
     }
 
 
 def range_columns(lo: float, hi: float) -> list[dict]:
-    """The 8-in-10 strip column (with its minutes scale in the heading) and the spread column."""
+    """The columns every reliability table shares, in this order: on time, typical bus, the
+    8-in-10 strip, spread. (arrivals_column() goes at the end.)"""
     return [
         {
+            "key": "on_time",
+            "label": "On time",
+            "width": "4.6em",
+            "num": True,
+            "help": ON_TIME_HELP + " Sorts most on time first.",
+            "sort": "on_time_s",
+            "first": "desc",
+        },
+        {
+            "key": "typical",
+            "label": "Typical bus",
+            "width": "7.2em",
+            "num": True,
+            "hide_on_phone": True,
+            "help": TYPICAL_HELP + " Sorts latest first.",
+            "sort": "typical_s",
+            "first": "desc",
+        },
+        {
             "key": "range",
-            "label": "8 in 10 buses (vs timetable)",
-            "axis": range_axis(lo, hi),
-            "width": "minmax(16em, 3fr)",
+            "label": "8 in 10 buses",
+            "width": "minmax(10em, 2.2fr)",
             "phone_width": "minmax(6.8em, 1fr)",
             "html": True,
-            "help": RANGE_HELP + " The green line is on time; the dark tick is the typical bus. "
-            "Sorts by the typical bus.",
+            "help": RANGE_HELP + " The dashed line is on time; the dark tick is the typical bus; "
+            "the numbers beside it are the range in minutes against the timetable. Sorts most on "
+            "time first.",
             "sort": "range_s",
             "first": "desc",
         },
         {
             "key": "spread",
             "label": "Spread",
-            "width": "5.2em",
+            "width": "4.8em",
             "num": True,
             "hide_on_phone": True,
             "help": "How wide the 8-in-10 range is: the time to allow for the bus being early "
-            "or late. Narrower = more predictable.",
+            "or late. Narrower = more predictable. Sorts narrowest first.",
             "sort": "spread_s",
-            "first": "desc",
+            "first": "asc",
         },
     ]
+
+
+def arrivals_column() -> dict:
+    """The last column of every reliability table: how many arrivals each row rests on."""
+    return {
+        "key": "n",
+        "label": "Arrivals",
+        "width": "5.4em",
+        "num": True,
+        "hide_on_phone": True,
+        "help": "Bus arrivals measured in the period chosen. Sorts most first.",
+        "sort": "n_s",
+        "first": "desc",
+    }
 
 
 # ----------------------------------------------- lateness for any route / stop choice ----
@@ -2665,6 +2982,7 @@ _HOURLY_SQL = """
            percentile_cont(0.5) within group (order by delay_s) as median_delay_s,
            percentile_cont(0.1) within group (order by delay_s) as p10_delay_s,
            percentile_cont(0.9) within group (order by delay_s) as p90_delay_s,
+           count(*) filter (where status = 'on_time') as n_on_time,
            count(distinct service_date) as n_days
     from marts.fct_stop_events
     where status is not null and service_date >= %s {where}
@@ -2698,6 +3016,39 @@ def selection_lateness(
     tot = df[df["hour_local"].isna()]
     hourly = df[df["hour_local"].notna()].astype({"hour_local": int})
     return (tot.iloc[0] if len(tot) and int(tot["n"].iloc[0]) else None), hourly
+
+
+def headline_metrics(
+    tot, today: pd.DataFrame, start: date, what: str = "", today_help: str = ""
+) -> None:
+    """The four numbers at the top of the Overview and of every report card: on time, the
+    typical bus, the 8-in-10 range, and today so far. `tot`: a row with n, n_on_time,
+    median_delay_s (or median_delay), p10_delay_s, p90_delay_s; `today`: today_lateness()."""
+    n = int(tot["n"] or 0) if tot is not None else 0
+    med = tot.get("median_delay_s", tot.get("median_delay")) if tot is not None else None
+    n_today = int(today["n"].iloc[0]) if len(today) else 0
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric(
+        "On time",
+        f"{100 * int(tot['n_on_time'] or 0) / n:.0f}%" if n else "—",
+        help=ON_TIME_HELP + f" {n:,} arrivals measured since {fmt_date(start)}.",
+    )
+    c2.metric(
+        f"Typical bus{what}",
+        fmt_delay(med) if n else "—",
+        help=TYPICAL_HELP,
+    )
+    c3.metric(
+        "8 in 10 buses",
+        fmt_range(tot["p10_delay_s"], tot["p90_delay_s"]) if n else "—",
+        help=RANGE_HELP,
+    )
+    c4.metric(
+        "Today so far",
+        fmt_delay(today["median_delay_s"].iloc[0]) if n_today >= 10 else "—",
+        help=(today_help or "The typical bus today, as of the latest update (every 15 minutes)")
+        + (f", from {n_today:,} arrivals." if n_today else "; none measured yet."),
+    )
 
 
 def service_today() -> date:
@@ -2745,7 +3096,10 @@ def routes_by_service() -> pd.DataFrame:
 
 
 def route_picker(
-    routes: pd.DataFrame, key: str, all_label: str | None = "All routes", query_param: str = "route"
+    routes: pd.DataFrame,
+    key: str,
+    all_label: str | None = "All routes",
+    query_param: str | None = "route",
 ) -> str | None:
     """A row of route buttons ('All routes' first, then every route by number, all alike);
     returns the chosen route_id, or None for all routes.
@@ -2760,7 +3114,7 @@ def route_picker(
     all_key = "__all__"
     options = ([all_key] if all_label else []) + ids
     if key not in st.session_state:
-        wanted = st.query_params.get(query_param)
+        wanted = st.query_params.get(query_param) if query_param else None
         st.session_state[key] = wanted if wanted in ids else (all_key if all_label else ids[0])
     elif st.session_state[key] not in options:  # e.g. a route with no data in this period
         st.session_state[key] = all_key if all_label else ids[0]
@@ -2774,9 +3128,11 @@ def route_picker(
             label_visibility="collapsed",
         )
     if choice in ids:
-        st.query_params[query_param] = choice
+        if query_param:
+            st.query_params[query_param] = choice
         return choice
-    st.query_params.pop(query_param, None)
+    if query_param:
+        st.query_params.pop(query_param, None)
     return None if all_label else ids[0]
 
 

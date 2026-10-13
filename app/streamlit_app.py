@@ -6,6 +6,7 @@ Every view is a script in app/views/; this file only wires them together.
 
 import logging
 import os
+import time
 from pathlib import Path
 
 import streamlit as st
@@ -36,6 +37,12 @@ st.html(
     "[data-testid='stMainMenu'] { display: none; }"
     # nor the "running / Stop" indicator, which on the live pages flickered every few seconds
     "[data-testid='stStatusWidget'] { display: none; }"
+    # instead, a thin moving bar along the top of the window while a page takes more than a
+    # moment to draw (the live pages' quick refreshes finish before it would show)
+    ".stApp[data-test-script-state='running']::before { content: ''; position: fixed; top: 0;"
+    " left: 0; width: 40%; height: 3px; background: #1f5f9e; z-index: 1000002; opacity: 0;"
+    " animation: ebw-loading 1.3s linear 0.7s infinite; }"
+    "@keyframes ebw-loading { 0% { left: -40%; opacity: 1; } 100% { left: 100%; opacity: 1; } }"
     "[data-testid='stMainBlockContainer'] { padding-top: 6.2rem; }"
     # pages read as a stack of cards on a pale background
     "[data-testid='stMain'] { background: #f3f5f7; }"
@@ -130,7 +137,7 @@ TAB_TITLES = {
     "map": "Where are Eugene's buses right now? Live LTD bus map · Eugene Bus Watch",
     "stops": "How reliable is my bus stop? Every LTD stop · Eugene Bus Watch",
     "routes": "How reliable is my bus route? Every LTD route · Eugene Bus Watch",
-    "accuracy": "Can you trust LTD's arrival predictions? · Eugene Bus Watch",
+    "accuracy": "How accurate are LTD's arrival predictions? · Eugene Bus Watch",
     "methods": "How we measure LTD's buses: data & methods · Eugene Bus Watch",
 }
 st.set_page_config(
@@ -153,5 +160,11 @@ if os.environ.get("DATABASE_URL"):
 
     start_cache_warmer()
     feed_banner()
-    log_page_view(page.url_path or "overview")
-page.run()
+    # the page view is counted once the page is drawn, with how long that took
+    t0 = time.monotonic()
+    try:
+        page.run()
+    finally:
+        log_page_view(page.url_path or "overview", int(1000 * (time.monotonic() - t0)))
+else:
+    page.run()

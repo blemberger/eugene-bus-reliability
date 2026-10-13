@@ -1,5 +1,6 @@
-"""Predictions: how far can you trust LTD's real-time arrival predictions, and how do they compare with the
-timetable?"""
+"""Predictions: how far LTD's real-time arrival predictions can be trusted, against the printed
+timetable, for every route and stop or for one route and/or stop (chosen at the top, kept in the
+page's address: /accuracy?route=...&stop=...)."""
 
 from __future__ import annotations
 
@@ -8,13 +9,12 @@ import plotly.graph_objects as go
 import streamlit as st
 from common import (
     ALL_ROUTES,
+    BRAND,
     PREDICTION_OFF_NOTE,
-    busiest_route,
-    busy_stop_buttons,
+    as_name,
     card,
     col_count,
     col_time,
-    countdown_off_at_stop,
     countdown_off_chart,
     current_fv,
     day_label,
@@ -22,26 +22,23 @@ from common import (
     fmt_date,
     fmt_minutes,
     hour_label,
-    line_colours,
     link_table,
     local_times,
     page_filters,
-    prediction_off,
+    prediction_scope_rows,
     q,
     q_live,
+    readable_stop_names,
     require_db,
     require_marts,
-    route_picker,
-    route_toggles,
-    search_stops,
+    scope_picker,
     service_hour_key,
     show_chart,
-    stop_buttons,
     table,
 )
 
 require_db()
-st.title("Can you trust LTD's arrival predictions?")
+title_slot = st.empty()  # names the route and/or stop chosen just below it
 st.caption(
     "LTD's real-time arrival predictions (what apps like Transit show), against when the bus "
     "actually came."
@@ -49,51 +46,55 @@ st.caption(
 require_marts()
 FV = str(current_fv())  # schedule version in force today
 
-routes = q(
-    f"select route_id, route_short_name from gtfs.routes where feed_version_id = {FV} order by length(route_short_name), route_short_name"
-)
+# one choice for the whole page, as a report card is about one route or stop
+scope = scope_picker("pred", in_address=True)
+title_slot.title(f"How accurate are LTD's arrival predictions{scope.suffix(long=True)}?")
+if scope.route_id or scope.stop_id:
+    st.set_page_config(
+        page_title=f"How accurate are LTD's predictions{scope.suffix(long=True)}? · Eugene Bus Watch"
+    )
+if scope.route_id or scope.stop_id:
+    if scope.route_id:
+        st.page_link(
+            "views/route.py",
+            label=f"Report card for route {scope.route_name} →",
+            query_params={"route": scope.route_id},
+        )
+    if scope.stop_id:
+        st.page_link(
+            "views/stops.py",
+            label=f"Report card for {scope.stop_name} →",
+            query_params={"stop": scope.stop_id},
+        )
+SUFFIX = scope.suffix()
+
+routes = q(f"select route_id, route_short_name from gtfs.routes where feed_version_id = {FV}")
 short = dict(
     zip(routes["route_id"].astype(str), routes["route_short_name"].astype(str), strict=False)
 )
-chart_names = {k: f"Route {v}" for k, v in short.items()}  # how charts name each route
 
 # the first chart, then the period and days filters that everything on the page follows (drawn
 # in that order, though the filters are read first)
 chart_slot = st.container()
 start, wt = page_filters()
 period = f"{day_label(wt)} since {fmt_date(start)}"
+PERIOD = period[0].upper() + period[1:]
 
-# Average minutes off for the prediction at each distance and the timetable, on the same bus
-# arrivals, each counted once per distance (marts.mart_prediction_daily): all routes together
-# and each route, for the chosen period and days.
-off = prediction_off(start, wt)
-if off.empty or off["n"].sum() == 0:
-    with chart_slot:
-        st.info(
-            "No measured predictions for this period yet, or the numbers are being "
-            "recalculated (they reappear within about 20 minutes)."
-        )
-    st.stop()
-with_data = sorted({str(r) for r in off["route_id"].dropna()})
-
-# ---- how far off: the prediction at each distance, by route, and the timetable ----------------
+# ---- how far off: the prediction at each distance, and the timetable ----------------------
 with chart_slot, card():
     st.subheader(
-        "How far off are the predictions?",
-        help=PREDICTION_OFF_NOTE + f" {period[0].upper() + period[1:]}.",
+        f"How far off are the predictions{SUFFIX}?", help=PREDICTION_OFF_NOTE + f" {PERIOD}."
     )
-    # every route together, and one route to compare: the one asked for in the address (a row
-    # of the routes table below), else the route with the most bus arrivals
-    wanted = st.query_params.get("route")
-    compare = wanted if wanted in with_data else busiest_route(off)
-    lines = route_toggles(
-        with_data, short, [ALL_ROUTES, *([compare] if compare else [])], key="pred_lines"
-    )
-    fig0 = countdown_off_chart(
-        off, chart_names, lines, min_n=30, colors=line_colours("pred_lines", lines)
+    rows = prediction_scope_rows(start, wt, scope)
+    fig0 = (
+        None
+        if rows.empty
+        else countdown_off_chart(
+            rows, {}, [ALL_ROUTES], all_label=as_name(scope.label()), colors={ALL_ROUTES: BRAND}
+        )
     )
     if fig0 is None:
-        st.caption("Pick a route above (or All routes); this one needs more measured arrivals.")
+        st.caption("Not enough measured arrivals with a prediction yet for this choice.")
     else:
         show_chart(fig0)
 
@@ -101,15 +102,12 @@ with chart_slot, card():
 # ---- by time of day ---------------------------------------------------------------------
 with card():
     st.subheader(
-        "Does accuracy depend on the time of day?",
+        f"Does accuracy depend on the time of day{SUFFIX}?",
         help="Predictions made about this far ahead, by the hour they were on show. Each bar "
         "builds up: the dark part is the share right to within 1 minute; add the middle part "
         "for within 2 minutes; the whole bar is within 3 minutes. The space above is how often "
         "the bus came more than 3 minutes off. Hours with fewer than 20 bus arrivals are left "
-        f"out. {period[0].upper() + period[1:]}.",
-    )
-    tod_route = route_picker(
-        routes[routes["route_id"].astype(str).isin(with_data)], key="tod_route"
+        f"out. {PERIOD}.",
     )
     AHEAD_CHOICES = {"2 min": (1, 2), "5 min": (5, 5), "10 min": (10, 10), "15 min": (15, 15)}
     ahead = (
@@ -123,17 +121,34 @@ with card():
     )
     lo, hi = AHEAD_CHOICES[ahead]
     clause, params = day_sql(wt)
-    tod = q(
-        f"""
-        select hour_local, sum(n)::bigint as n, sum(n_within_1min)::bigint as within1,
-               sum(n_within_2min)::bigint as within2, sum(n_within_3min)::bigint as within3
-        from marts.mart_prediction_daily
-        where basis = 'sign' and ahead_min between %s and %s and service_date >= %s {clause}
-          {"and route_id = %s" if tod_route else ""}
-        group by 1 order by 1
-        """,
-        (lo, hi, start, *params, *([tod_route] if tod_route else [])),
-    )
+    if scope.stop_id:
+        # one stop: from the arrivals themselves (the daily table has no stops)
+        where, wparams = scope.where()
+        tod = q(
+            f"""
+            select hour_local, count(*) as n,
+                   count(*) filter (where abs(error_s) <= 60) as within1,
+                   count(*) filter (where abs(error_s) <= 120) as within2,
+                   count(*) filter (where abs(error_s) <= 180) as within3
+            from marts.fct_countdown_samples
+            where in_comparison and ahead_min between %s and %s and service_date >= %s
+              {where} {clause}
+            group by 1 order by 1
+            """,
+            (lo, hi, start, *wparams, *params),
+        )
+    else:
+        tod = q(
+            f"""
+            select hour_local, sum(n)::bigint as n, sum(n_within_1min)::bigint as within1,
+                   sum(n_within_2min)::bigint as within2, sum(n_within_3min)::bigint as within3
+            from marts.mart_prediction_daily
+            where basis = 'sign' and ahead_min between %s and %s and service_date >= %s {clause}
+              {"and route_id = %s" if scope.route_id else ""}
+            group by 1 order by 1
+            """,
+            (lo, hi, start, *params, *([scope.route_id] if scope.route_id else [])),
+        )
     tod = tod[tod["n"] >= 20].copy()
     if tod.empty:
         st.caption("Not enough measured bus arrivals this far ahead yet (needs 20 in an hour).")
@@ -146,7 +161,7 @@ with card():
         # One bar per hour, built up in layers: the dark part is "right within 1 min", adding the
         # middle part gives "within 2 min", the whole bar "within 3 min". One blue, dark to light.
         layers = [
-            ("p1", None, "within 1 min", "#1f5f9e"),
+            ("p1", None, "within 1 min", BRAND),
             ("p2", "p1", "1–2 min off", "#5b9bd5"),
             ("p3", "p2", "2–3 min off", "#b3d1ee"),
         ]
@@ -185,266 +200,283 @@ with card():
         show_chart(fig3)
 
 
-# ---- by route: average minutes off at 5 and 10 minutes away, and the timetable -------------
-with card():
-    st.subheader(
-        "Which routes have the best predictions?",
-        help="Average minutes the bus came from the time it was given, early or late alike, on "
-        "the same bus arrivals: the prediction when it said 5 and 10 minutes away, and the "
-        "printed timetable. Lower is better. Routes with at least 50 bus arrivals measured. "
-        f"{period[0].upper() + period[1:]}. Click a column heading to sort; click a route to "
-        "show it in the chart at the top.",
-    )
-    per = off[off["route_id"].notna()].copy()
-    per["route_id"] = per["route_id"].astype(str)
+# ---- tables: each route, each stop -------------------------------------------------------
+def off_by(key: str, where: str, params: tuple, daily: bool) -> pd.DataFrame:
+    """Average minutes off per `key` (route_id or stop_id) at 5, 10 and 15 minutes away and for
+    the timetable, for the page's period and days."""
+    clause, wt_params = day_sql(wt)
+    table_name = "mart_prediction_daily" if daily else "mart_prediction_stop_daily"
+    try:
+        return q(
+            f"""
+            select {key} as id, basis, ahead_min, sum(n) as n,
+                   sum(sum_abs_s)::float8 / nullif(sum(n), 0) as mean_abs_s
+            from marts.{table_name}
+            where service_date >= %s {clause} {where}
+              and {key} is not null and (basis = 'timetable' or ahead_min in (5, 10, 15))
+            group by 1, 2, 3
+            """,
+            (start, *wt_params, *params),
+        )
+    except Exception:  # noqa: BLE001 — the table is being rebuilt
+        return pd.DataFrame()
+
+
+def prediction_table(
+    off: pd.DataFrame, first_cols: list[dict], row_of, key: str, sort: str, min_n: int = 50
+) -> None:
+    """A table of how far off the predictions are, 5 and 10 minutes away, against the printed
+    timetable on the same arrivals, one row per id in `off` (off_by()); row_of(id, n) gives
+    the row's href, hover and first columns' values."""
+    if off.empty:
+        st.caption("Not enough measured bus arrivals yet for this period.")
+        return
+    off = off.assign(id=off["id"].astype(str))
     at = {
-        k: per[(per["basis"] == "sign") & (per["ahead_min"] == k)].set_index("route_id")
+        k: off[(off["basis"] == "sign") & (off["ahead_min"] == k)].set_index("id")
         for k in (5, 10, 15)
     }
-    tt = per[per["basis"] == "timetable"].set_index("route_id")
-    ids = [r for r in tt.index if r in at[15].index and at[15].loc[r, "n"] >= 50]
+    tt = off[off["basis"] == "timetable"].set_index("id")
+    ids = [i for i in tt.index if i in at[15].index and at[15].loc[i, "n"] >= min_n]
     if not ids:
-        st.caption("Not enough measured bus arrivals per route yet for this period.")
-    else:
+        st.caption("Not enough measured bus arrivals yet for this period.")
+        return
 
-        def minutes(frame: pd.DataFrame, r: str) -> float | None:
-            if r not in frame.index or pd.isna(frame.loc[r, "mean_abs_s"]):
-                return None
-            return float(frame.loc[r, "mean_abs_s"]) / 60
+    def minutes(frame: pd.DataFrame, i: str) -> float | None:
+        if i not in frame.index or pd.isna(frame.loc[i, "mean_abs_s"]):
+            return None
+        return float(frame.loc[i, "mean_abs_s"]) / 60
 
-        values = {r: (minutes(at[5], r), minutes(at[10], r), minutes(tt, r)) for r in ids}
-        # the two prediction columns share a scale (so 5 and 10 minutes away compare); the
-        # timetable column has its own, so its few very large values don't shrink the rest
-        top_pred = max(v for vs in values.values() for v in vs[:2] if v is not None)
-        top_tt = max((vs[2] for vs in values.values() if vs[2] is not None), default=1.0)
+    values = {i: (minutes(at[5], i), minutes(at[10], i), minutes(tt, i)) for i in ids}
+    # the two prediction columns share a scale (so 5 and 10 minutes away compare); the
+    # timetable column has its own, so its few very large values don't shrink the rest
+    top_pred = max(v for vs in values.values() for v in vs[:2] if v is not None)
+    top_tt = max((vs[2] for vs in values.values() if vs[2] is not None), default=1.0)
 
-        def bar(v: float | None, colour: str, top: float) -> str:
-            if v is None:
-                return ""
-            return (
-                "<span class='ebw-g'><span class='ebw-x'>"
-                f"<span class='ebw-x1' style='left:0;top:4px;width:{v / top * 100:.0f}%;"
-                f"background:{colour}'></span></span>"
-                # a short number, so the bar gets the rest of the column
-                f"<span class='ebw-s' style='flex:0 0 3.6em'>{v:.1f} min</span>"
-                "</span>"
-            )
-
-        rows = []
-        for r in sorted(ids, key=lambda r: (len(short.get(r, r)), short.get(r, r))):
-            c5, c10, t = values[r]
-            rows.append(
-                {
-                    "href": f"/accuracy?route={r}",
-                    "hover": f"Route {short.get(r, r)}: measured on "
-                    f"{int(at[15].loc[r, 'n']):,} bus arrivals",
-                    "route": short.get(r, r),
-                    "c5": bar(c5, "#1f5f9e", top_pred),
-                    "c5_s": c5,
-                    "c10": bar(c10, "#1f5f9e", top_pred),
-                    "c10_s": c10,
-                    "tt": bar(t, "#8a8f94", top_tt),
-                    "tt_s": t,
-                }
-            )
-        cols = [{"key": "route", "label": "Route", "width": "3.4em", "bold": True}]
-        for k, label, tip in (
-            (
-                "c5",
-                "Prediction, 5 min away",
-                "Average minutes off when the prediction said 5 minutes.",
-            ),
-            (
-                "c10",
-                "Prediction, 10 min away",
-                "Average minutes off when the prediction said 10 minutes.",
-            ),
-            (
-                "tt",
-                "Printed timetable",
-                "Average minutes off the printed timetable, same bus arrivals.",
-            ),
-        ):
-            cols.append(
-                {
-                    "key": k,
-                    "label": label,
-                    "width": "minmax(9em, 1fr)",
-                    "html": True,
-                    "help": tip,
-                    "sort": f"{k}_s",
-                    "first": "asc",
-                }
-            )
-        link_table(
-            rows,
-            cols,
-            max_height=640,
-            key="pred_routes",
-            default_sort="c5:asc",
-            go_label="Show",
+    def bar(v: float | None, colour: str, top: float) -> str:
+        if v is None:
+            return ""
+        return (
+            "<span class='ebw-g'><span class='ebw-x'>"
+            f"<span class='ebw-x1' style='left:0;top:4px;width:{v / top * 100:.0f}%;"
+            f"background:{colour}'></span></span>"
+            # a short number, so the bar gets the rest of the column
+            f"<span class='ebw-s' style='flex:0 0 3.6em'>{v:.1f} min</span>"
+            "</span>"
         )
+
+    rows = []
+    for i in ids:
+        c5, c10, t = values[i]
+        n = int(at[15].loc[i, "n"])
+        rows.append(
+            {
+                **row_of(i, n),
+                "c5": bar(c5, BRAND, top_pred),
+                "c5_s": c5,
+                "c10": bar(c10, BRAND, top_pred),
+                "c10_s": c10,
+                "tt": bar(t, "#8a8f94", top_tt),
+                "tt_s": t,
+                "n": f"{n:,}",
+                "n_s": n,
+            }
+        )
+    cols = list(first_cols)
+    for k, label, tip in (
+        ("c5", "Prediction, 5 min away", "Average minutes off when the prediction said 5 minutes."),
+        (
+            "c10",
+            "Prediction, 10 min away",
+            "Average minutes off when the prediction said 10 minutes.",
+        ),
+        (
+            "tt",
+            "Printed timetable",
+            "Average minutes off the printed timetable, same bus arrivals.",
+        ),
+    ):
+        cols.append(
+            {
+                "key": k,
+                "label": label,
+                "width": "minmax(9em, 1fr)",
+                "html": True,
+                "help": tip + " Sorts closest first.",
+                "sort": f"{k}_s",
+                "first": "asc",
+            }
+        )
+    cols.append(
+        {
+            "key": "n",
+            "label": "Arrivals",
+            "width": "5.6em",
+            "num": True,
+            "hide_on_phone": True,
+            "help": "Bus arrivals measured (with a prediction 15 minutes out). Sorts most first.",
+            "sort": "n_s",
+            "first": "desc",
+        }
+    )
+    link_table(rows, cols, max_height=520, key=key, default_sort=sort, go_label="Show")
+
+
+TABLE_HELP = (
+    "Average minutes the bus came from the time it was given, early or late alike, on the same "
+    "bus arrivals: the prediction when it said 5 and 10 minutes away, and the printed timetable. "
+    "Lower is better. Rows with at least 50 bus arrivals measured. "
+    f"{PERIOD}. Click a column heading to sort; click a row to show it on this page."
+)
+
+with card():
+    at_stop = f" at {scope.stop_name}" if scope.stop_id else ""
+    st.subheader(f"Which routes have the best predictions{at_stop}?", help=TABLE_HELP)
+    if scope.stop_id:
+        by_route = off_by("route_id", "and stop_id = %s", (scope.stop_id,), daily=False)
+    else:
+        by_route = off_by("route_id", "", (), daily=True)
+    stop_q = f"&stop={scope.stop_id}" if scope.stop_id else ""
+    prediction_table(
+        by_route,
+        [{"key": "route", "label": "Route", "width": "3.8em", "bold": True}],
+        lambda i, n: {
+            "href": f"/accuracy?route={i}{stop_q}",
+            "hover": f"Route {short.get(i, i)}: measured on {n:,} bus arrivals",
+            "route": short.get(i, i),
+        },
+        key="pred_routes",
+        sort="route:asc",
+        min_n=50 if not scope.stop_id else 20,
+    )
+
+with card():
+    on_route = f" on route {scope.route_name}" if scope.route_id else ""
+    st.subheader(f"Which stops have the best predictions{on_route}?", help=TABLE_HELP)
+    by_stop = off_by(
+        "stop_id",
+        "and route_id = %s" if scope.route_id else "",
+        (scope.route_id,) if scope.route_id else (),
+        daily=False,
+    )
+    names = readable_stop_names(
+        q(f"select stop_id, stop_name, stop_code from gtfs.stops where feed_version_id = {FV}")
+    )
+    name_of = dict(zip(names["stop_id"].astype(str), names["stop_name"], strict=False))
+    code_of = dict(zip(names["stop_id"].astype(str), names["stop_code"], strict=False))
+    route_q = f"&route={scope.route_id}" if scope.route_id else ""
+    prediction_table(
+        by_stop,
+        [{"key": "stop", "label": "Stop", "width": "minmax(10em, 2fr)", "bold": True}],
+        lambda i, n: {
+            "href": f"/accuracy?stop={i}{route_q}",
+            "hover": f"{name_of.get(i, i)}: measured on {n:,} bus arrivals",
+            "stop": name_of.get(i, i) + (f" · #{code_of[i]}" if code_of.get(i) else ""),
+        },
+        key="pred_stops",
+        # busiest first: the stops most riders use
+        sort="n:desc",
+    )
 
 
 # ---- one stop, right now: how each coming bus's prediction has been revised --------------
-with card():
-    st.subheader(
-        "Predictions at one stop",
-        help="How far off the predictions are at one stop, by route (for the period and days "
-        "above), and how each bus coming there now has had its predicted arrival changed.",
+if scope.stop_id:
+    with card():
+        st.subheader(
+            f"Right now at {scope.stop_name}: how has each coming bus's prediction changed?",
+            help="Each line is a bus on its way here: when LTD said it (across) and the arrival it "
+            "predicted then (up). A flat line is a prediction that held; a line that keeps "
+            "stepping later is the prediction being optimistic and correcting itself as the bus "
+            "falls behind.",
+        )
+    hist = q_live(
+        f"""
+        with coming as (
+            select trip_id, start_date, stop_sequence from rt.prediction_current
+            where stop_id = %s and coalesce(arrival_time, departure_time) between now() - interval '2 minutes' and now() + interval '45 minutes'
+              and last_seen_at > now() - interval '3 minutes'
+        )
+        select u.trip_id, r.route_short_name as route, t.trip_headsign as headsign,
+               u.first_seen_at, u.last_seen_at, coalesce(u.arrival_time, u.departure_time) as predicted
+        from (
+            select trip_id, start_date, stop_sequence, arrival_time, departure_time, first_seen_at, last_seen_at from rt.prediction_history
+            union all
+            select trip_id, start_date, stop_sequence, arrival_time, departure_time, first_seen_at, last_seen_at from rt.prediction_current
+        ) u
+        join coming c using (trip_id, start_date, stop_sequence)
+        join gtfs.trips t  on t.trip_id = u.trip_id and t.feed_version_id = {FV}
+        join gtfs.routes r on r.route_id = t.route_id and r.feed_version_id = {FV}
+        where coalesce(u.arrival_time, u.departure_time) is not null
+        order by u.trip_id, u.first_seen_at
+        """,
+        (scope.stop_id,),
     )
-    example = q(f"""
-        select stop_code, stop_name from gtfs.stops
-        where feed_version_id = {FV} and location_type = 0 and stop_code is not null and stop_code <> ''
-        order by stop_name limit 1
-    """)
-    hint = (
-        f"stop name or the number on the sign, e.g. {example['stop_name'][0]} or "
-        f"{example['stop_code'][0]}"
-        if not example.empty
-        else "stop name or number"
-    )
-    query = st.text_input(
-        "Stop name or the number on the sign",
-        placeholder="Search: " + hint,
-        key="pred_stop_query",
-        label_visibility="collapsed",
-    )
-    if not query:
-        picked = busy_stop_buttons("pred_busy")
-        if picked:
-            st.session_state["pred_stop_id"] = picked
-            st.session_state["pred_stop_name"] = st.session_state.get("pred_busy_name", picked)
-    if query:
-        matches = search_stops(query)
-        if matches.empty:
-            st.warning("No stop matches that. Try part of a street name.")
-        else:
-            picked = stop_buttons(matches, "pred_stop")
-            if picked:
-                st.session_state["pred_stop_id"] = picked
-
-    pstop = st.session_state.get("pred_stop_id")
-    if pstop:
-        st.markdown(f"#### {st.session_state.get('pred_stop_name', pstop)}")
-        st.page_link(
-            "views/stops.py", label="This stop's report card →", query_params={"stop": pstop}
+    if hist.empty:
+        st.info("No buses predicted for this stop in the next 45 minutes.")
+    else:
+        hist["Bus"] = (
+            "Route "
+            + hist["route"].astype(str)
+            + " · "
+            + hist["headsign"].fillna("").astype(str)
+            + " · trip "
+            + hist["trip_id"].astype(str)
         )
-        # how far off the predictions are here, by route (the same chart as at the top)
-        at_stop = countdown_off_at_stop(pstop, start, wt)
-        here_ids = sorted({str(r) for r in at_stop["route_id"].dropna()})
-        # every route here together, and (where several stop here) the busiest one to compare
-        busiest = busiest_route(at_stop) if len(here_ids) > 1 else None
-        here_lines = route_toggles(
-            here_ids,
-            short,
-            [ALL_ROUTES, *([busiest] if busiest else [])],
-            key=f"pred_stop_lines_{pstop}",
-            all_label="All routes here",
+        hist["asserted"] = pd.to_datetime(hist["first_seen_at"], utc=True).dt.tz_convert(
+            "America/Los_Angeles"
         )
-        fig_s = countdown_off_chart(
-            at_stop,
-            chart_names,
-            here_lines,
-            all_label="All routes here",
-            colors=line_colours(f"pred_stop_lines_{pstop}", here_lines),
+        hist["predicted_local"] = pd.to_datetime(hist["predicted"], utc=True).dt.tz_convert(
+            "America/Los_Angeles"
         )
-        if fig_s is None:
-            st.caption("Not enough measured arrivals with a prediction here yet for this period.")
-        else:
-            show_chart(fig_s)
-        st.markdown("**Right now: how each coming bus's predicted arrival has changed**")
-        hist = q_live(
-            f"""
-            with coming as (
-                select trip_id, start_date, stop_sequence from rt.prediction_current
-                where stop_id = %s and coalesce(arrival_time, departure_time) between now() - interval '2 minutes' and now() + interval '45 minutes'
-                  and last_seen_at > now() - interval '3 minutes'
-            )
-            select u.trip_id, r.route_short_name as route, t.trip_headsign as headsign,
-                   u.first_seen_at, u.last_seen_at, coalesce(u.arrival_time, u.departure_time) as predicted
-            from (
-                select trip_id, start_date, stop_sequence, arrival_time, departure_time, first_seen_at, last_seen_at from rt.prediction_history
-                union all
-                select trip_id, start_date, stop_sequence, arrival_time, departure_time, first_seen_at, last_seen_at from rt.prediction_current
-            ) u
-            join coming c using (trip_id, start_date, stop_sequence)
-            join gtfs.trips t  on t.trip_id = u.trip_id and t.feed_version_id = {FV}
-            join gtfs.routes r on r.route_id = t.route_id and r.feed_version_id = {FV}
-            where coalesce(u.arrival_time, u.departure_time) is not null
-            order by u.trip_id, u.first_seen_at
-            """,
-            (pstop,),
-        )
-        if hist.empty:
-            st.info("No buses predicted for this stop in the next 45 minutes.")
-        else:
-            hist["Bus"] = (
-                "Route "
-                + hist["route"].astype(str)
-                + " · "
-                + hist["headsign"].fillna("").astype(str)
-                + " · trip "
-                + hist["trip_id"].astype(str)
-            )
-            hist["asserted"] = pd.to_datetime(hist["first_seen_at"], utc=True).dt.tz_convert(
-                "America/Los_Angeles"
-            )
-            hist["predicted_local"] = pd.to_datetime(hist["predicted"], utc=True).dt.tz_convert(
-                "America/Los_Angeles"
-            )
-            fig4 = go.Figure()
-            for bus, g in hist.groupby("Bus"):
-                fig4.add_trace(
-                    go.Scatter(
-                        x=g["asserted"],
-                        y=g["predicted_local"],
-                        mode="lines+markers",
-                        name=bus,
-                        line={"shape": "hv"},
-                    )
+        fig4 = go.Figure()
+        for bus, g in hist.groupby("Bus"):
+            fig4.add_trace(
+                go.Scatter(
+                    x=g["asserted"],
+                    y=g["predicted_local"],
+                    mode="lines+markers",
+                    name=bus,
+                    line={"shape": "hv"},
                 )
-            fig4.update_layout(
-                xaxis_title="When LTD said it",
-                yaxis_title="Predicted arrival at this stop",
-                legend_title="",
-                height=420,
             )
-            show_chart(fig4)
-            latest = hist.sort_values("first_seen_at").groupby("Bus", as_index=False).last()
-            table(
-                pd.DataFrame(
-                    {
-                        "Bus": latest["Bus"].to_numpy(),
-                        "Now predicted": local_times(latest["predicted"]).to_numpy(),
-                        "First predicted": local_times(
-                            hist.sort_values("first_seen_at")
-                            .groupby("Bus")["predicted"]
-                            .first()
-                            .reindex(latest["Bus"])
-                        ).to_numpy(),
-                        "Revisions": hist.groupby("Bus").size().reindex(latest["Bus"]).to_numpy(),
-                    }
-                ),
-                hide_index=True,
-                width="stretch",
-                column_config={
-                    "Now predicted": col_time("Now predicted"),
-                    "First predicted": col_time("First predicted"),
-                    "Revisions": col_count("Revisions"),
-                },
-            )
-            st.caption(
-                "A flat line is a prediction that held; a line that keeps stepping later is the prediction being optimistic and correcting itself as the bus falls behind."
-            )
+        fig4.update_layout(
+            xaxis_title="When LTD said it",
+            yaxis_title="Predicted arrival at this stop",
+            legend_title="",
+            height=420,
+        )
+        show_chart(fig4)
+        latest = hist.sort_values("first_seen_at").groupby("Bus", as_index=False).last()
+        table(
+            pd.DataFrame(
+                {
+                    "Bus": latest["Bus"].to_numpy(),
+                    "Now predicted": local_times(latest["predicted"]).to_numpy(),
+                    "First predicted": local_times(
+                        hist.sort_values("first_seen_at")
+                        .groupby("Bus")["predicted"]
+                        .first()
+                        .reindex(latest["Bus"])
+                    ).to_numpy(),
+                    "Revisions": hist.groupby("Bus").size().reindex(latest["Bus"]).to_numpy(),
+                }
+            ),
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "Now predicted": col_time("Now predicted"),
+                "First predicted": col_time("First predicted"),
+                "Revisions": col_count("Revisions"),
+            },
+        )
 
 
 # ---- revisions --------------------------------------------------------------------------
 with card():
     st.subheader(
-        "How often does the prediction change?",
-        help="Every revision is kept; that's what lets a prediction be scored at the distance it "
-        "was made, not just the last value shown.",
+        "How often does LTD change a prediction?",
+        help="Every route and stop, last 7 days. Every revision is kept; that's what lets a "
+        "prediction be scored at the distance it was made, not just the last value shown.",
     )
     # computed once per analysis build (marts.mart_prediction_revisions): it reads every
     # prediction of the week, far too slow to run on each visit

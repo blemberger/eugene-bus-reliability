@@ -1,23 +1,18 @@
-"""Routes: every route in one table (click a row for its report card), then how late the buses
-run by hour, all routes together."""
+"""Routes: find your route, how reliable each route is (click a row for its report card), and
+the charts for any route: times of day, the trend, the predictions."""
 
 from __future__ import annotations
 
 import streamlit as st
 from common import (
-    LATENESS_CHART_NOTE,
-    NETWORK,
-    NOT_ENOUGH_HOURLY,
     card,
     data_note,
     day_label,
     fmt_date,
     lateness,
-    lateness_chart,
     marts_ready,
-    network_predictions_card,
-    network_trend_card,
     page_filters,
+    predictions_card,
     recomputing_note,
     require_db,
     require_marts,
@@ -25,15 +20,16 @@ from common import (
     route_table,
     route_tiles,
     routes_by_service,
-    show_chart,
+    times_of_day_card,
+    trend_card,
 )
 
 require_db()
 st.title("How reliable is my route?")
 require_marts()
-# Find your route (a card per route, as Stops has Find your stop), the table and the chart,
-# then the period and days filters that the table and chart follow (drawn in that order on the
-# page, though the filters are read first)
+# Find your route, the table and the times-of-day chart, then the period and days filters they
+# follow (drawn in that order on the page, though the filters are read first), then the trend
+# and the predictions, as on a route's report card
 with card():
     st.subheader("Find your route")
     every = routes_by_service()
@@ -44,6 +40,7 @@ with card():
     )
 table_slot, chart_slot = st.container(), st.container()
 start, wt = page_filters()
+period = f"{day_label(wt)} since {fmt_date(start)}"
 rank = route_rank(start, wt)
 if rank.empty:
     with table_slot:
@@ -53,31 +50,19 @@ if rank.empty:
             st.info("No scored arrivals in the selected period yet.")
     st.stop()
 
-
-# ---- every route ----------------------------------------------------------------------
 with table_slot, card():
     st.subheader(
-        "Every route",
-        help=f"{day_label(wt).capitalize()} since {fmt_date(start)}, every stop (the filters "
-        "below). Click a column heading to sort, again to reverse.",
+        "How reliable is each route?",
+        help=f"{period[0].upper() + period[1:]}, every stop (the filters below). Click a column "
+        "heading to sort, again to reverse.",
     )
     route_table(rank, start, key="routes_all")
 
-# ---- by hour: all routes together ---------------------------------------------------------
-with chart_slot, card():
-    st.subheader(
-        "Which times of day run late?",
-        help=LATENESS_CHART_NOTE,
-    )
-    fig = lateness_chart(lateness(start, wt, "hour"), NETWORK)
-    if fig is None:
-        st.caption(NOT_ENOUGH_HOURLY.format(n=10))
-    else:
-        show_chart(fig)
+with chart_slot:
+    times_of_day_card("routes_tod", start, wt, period)
 
-# ---- below the filters, as on a route's report card: the trend, then the predictions ------------
-network_trend_card()
-network_predictions_card(start, wt, f"{day_label(wt)} since {fmt_date(start)}", by_route=True)
+trend_card("routes_trend")
+predictions_card("routes_pred", start, wt, period)
 
 st.divider()
 data_note(start)

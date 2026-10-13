@@ -1,159 +1,97 @@
-"""Overview (the home page): how late do Eugene's buses run, by hour, for any route and stop,
-and how does every route compare?"""
+"""Overview (the home page): how late Eugene's buses run, by hour, for any route and stop; then a
+look at each other page: every route, every stop, the trend, the predictions, the live map."""
 
 from __future__ import annotations
 
 import streamlit as st
 from common import (
+    BRAND,
     LATENESS_CHART_NOTE,
-    NETWORK,
     NOT_ENOUGH_HOURLY,
-    RANGE_HELP,
-    TYPICAL_HELP,
     card,
-    current_fv,
     data_note,
     day_label,
     every_stop_card,
     fmt_date,
-    fmt_delay,
-    fmt_range,
+    headline_metrics,
+    hourly_lines_chart,
     lateness,
-    lateness_chart,
     marts_ready,
-    network_predictions_card,
-    network_trend_card,
     page_filters,
+    predictions_card,
     q,
     recomputing_note,
     require_db,
     require_marts,
-    route_picker,
     route_rank,
     route_table,
-    routes_by_service,
-    selection_lateness,
+    scope_picker,
+    scoped_lateness,
     show_chart,
     stops_with_numbers,
     today_lateness,
+    trend_card,
 )
 
 require_db()
-st.title(
-    "How reliable are Eugene's buses?",
-    help=LATENESS_CHART_NOTE
-    + " With a route or stop chosen, the grey line is every route at every stop, for comparison.",
-)
+st.title("How reliable are Eugene's buses?")
 require_marts()
-FV = str(current_fv())
-
-routes = routes_by_service()
-names = dict(
-    zip(routes["route_id"].astype(str), routes["route_short_name"].astype(str), strict=False)
-)
 
 # ---- when are buses late: any route, any stop -----------------------------------------------
 with card():
-    route_id = route_picker(routes, key="ov_route")
-
-    if route_id:
-        stops = q(
-            f"""
-            select distinct s.stop_id, s.stop_name, s.stop_code
-            from gtfs.stop_times st
-            join gtfs.trips t on t.trip_id = st.trip_id and t.feed_version_id = st.feed_version_id
-            join gtfs.stops s on s.stop_id = st.stop_id and s.feed_version_id = st.feed_version_id
-            where st.feed_version_id = {FV} and t.route_id = %s
-            order by s.stop_name
-            """,
-            (route_id,),
-        )
-    else:
-        stops = q(f"""
-            select stop_id, stop_name, stop_code from gtfs.stops
-            where feed_version_id = {FV} and location_type = 0 order by stop_name
-        """)
-    stop_label = {
-        str(r.stop_id): f"{r.stop_name}" + (f"  ·  #{r.stop_code}" if r.stop_code else "")
-        for r in stops.itertuples()
-    }
-    ALL_STOPS = "All stops"
-    # a stop that isn't on the newly chosen route goes back to all stops
-    if st.session_state.get("ov_stop") not in (ALL_STOPS, *stop_label):
-        st.session_state["ov_stop"] = ALL_STOPS
-    stop_choice = st.selectbox(
-        "Stop" + (f" on route {names[route_id]}" if route_id else "") + " (type to search)",
-        [ALL_STOPS, *stop_label],
-        format_func=lambda s: s if s == ALL_STOPS else stop_label[s],
-        key="ov_stop",
-    )
-    stop_id = None if stop_choice == ALL_STOPS else stop_choice
+    title = st.empty()
+    scope = scope_picker("ov", in_address=True)
     # the chart goes here, right under the route and stop; the period and days filters below it
-    # (it is drawn after them, because it depends on them)
+    # (it is drawn after them, because it depends on them), then the headline numbers
     chart_slot = st.container()
     start, wt = page_filters()
-
-    where = f" at {stop_label[stop_id].split('  ·  ')[0]}" if stop_id else ""
-    if route_id:
-        what = f"route {names[route_id]}{where}"
-    else:
-        what = f"all routes{where}" if stop_id else NETWORK
-    tot, hourly = selection_lateness(start, wt, route_id, stop_id)
+    period = f"{day_label(wt)} since {fmt_date(start)}"
+    title.subheader(
+        f"Which times of day run late{scope.suffix()}?",
+        help=LATENESS_CHART_NOTE + f" {period[0].upper() + period[1:]}.",
+    )
+    tot, hourly = scoped_lateness(start, wt, scope)
     if tot is None:
         with chart_slot:
-            if not route_id and not stop_id and lateness(start, None, "overall").empty:
+            if not scope.route_id and not scope.stop_id and lateness(start, None, "overall").empty:
                 recomputing_note()
             else:
-                st.info(
-                    f"No measured arrivals for {what}, {day_label(wt)} since {fmt_date(start)}."
-                )
+                st.info(f"No measured arrivals for {scope.label()}, {period}.")
     else:
-        ref = lateness(start, wt, "hour") if (route_id or stop_id) else None
-        fig = lateness_chart(
-            hourly, what, reference=ref, reference_label=NETWORK, min_n=5 if stop_id else 10
+        min_n = 5 if scope.stop_id else 10
+        fig = hourly_lines_chart(
+            [{"label": scope.label(), "df": hourly, "color": BRAND}], min_n=min_n
         )
         with chart_slot:
             if fig is None:
-                st.caption(NOT_ENOUGH_HOURLY.format(n=5 if stop_id else 10))
+                st.caption(NOT_ENOUGH_HOURLY.format(n=min_n))
             else:
                 show_chart(fig)
-        today = today_lateness(route_id=route_id, stop_id=stop_id)
-        n_today = int(today["n"].iloc[0]) if len(today) else 0
-        m1, m2, m3 = st.columns(3)
-        m1.metric(
-            "Typical bus vs timetable",
-            fmt_delay(tot["median_delay_s"]),
-            help=TYPICAL_HELP + f" {int(tot['n']):,} arrivals measured since {fmt_date(start)}.",
-        )
-        m2.metric(
-            "8 in 10 buses", fmt_range(tot["p10_delay_s"], tot["p90_delay_s"]), help=RANGE_HELP
-        )
-        m3.metric(
-            "Today so far",
-            fmt_delay(today["median_delay_s"].iloc[0]) if n_today >= 10 else "—",
-            help="The typical bus today, as of the latest update (every 15 minutes)"
-            + (f", from {n_today:,} arrivals." if n_today else "; none measured yet."),
+        headline_metrics(
+            tot,
+            today_lateness(route_id=scope.route_id, stop_id=scope.stop_id),
+            start,
+            " vs timetable",
         )
 
 # ---- below: a look at each other page, each opening onto more ----------------------------
 # every route and every stop (as on the Routes and Stops pages, whose rows open report cards),
 # the trend, how far off the predictions are, and the buses on the road now
-period = f"{day_label(wt)} since {fmt_date(start)}"
 if marts_ready():
     per = route_rank(start, wt)
     if not per.empty:
         with card():
             st.subheader(
-                "Every route",
-                help=f"{period[0].upper() + period[1:]}, every stop (the filters above). Click a "
-                "column heading to sort, again to reverse.",
+                "How reliable is each route?",
+                help=f"{period[0].upper() + period[1:]}, every stop. Click a column heading to "
+                "sort, again to reverse.",
             )
             route_table(per, start, key="ov_routes")
     by_stop = lateness(start, wt, "stop")
     if not by_stop.empty:
         every_stop_card(stops_with_numbers(by_stop), period[0].upper() + period[1:], "ov_stops")
-    network_trend_card()
-    network_predictions_card(start, wt, period, by_route=False)
+    trend_card("ov_trend")
+    predictions_card("ov_pred", start, wt, period)
 
 n_now = q("""
     select count(distinct vehicle_id) as n from rt.vehicle_position
