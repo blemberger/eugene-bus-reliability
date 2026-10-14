@@ -10,8 +10,6 @@ import streamlit as st
 from common import (
     ALL_ROUTES,
     BRAND,
-    LINE_MAIN,
-    MARKER_MAIN,
     PREDICTION_OFF_NOTE,
     as_name,
     card,
@@ -104,11 +102,13 @@ with chart_slot, card():
 # ---- by time of day ---------------------------------------------------------------------
 with card():
     st.subheader(
-        f"When are the predictions furthest off{SUFFIX}?",
-        help="Average minutes the bus came from the time it was given, early or late alike, by "
-        "the hour of day: the prediction when it said this many minutes away (thick line), and "
-        "the printed timetable for the same bus arrivals (thin line). Lower is better. Hours "
-        f"with fewer than 20 bus arrivals are left out. {PERIOD}.",
+        f"Does accuracy depend on the time of day{SUFFIX}?",
+        help="Predictions made about this far ahead, by the hour they were on show. Each bar "
+        "builds up: the dark part is the share right to within 2 minutes; add the middle part "
+        "for within 3 minutes; the whole bar is within 5 minutes. The space above is how often "
+        "the bus came more than 5 minutes off. (Windows under 2 minutes would be finer than an "
+        "arrival can be timed at every stop.) Hours with fewer than 20 bus arrivals are left "
+        f"out. {PERIOD}.",
     )
     AHEAD_CHOICES = {"2 min": (1, 2), "5 min": (5, 5), "10 min": (10, 10), "15 min": (15, 15)}
     ahead = (
@@ -127,65 +127,76 @@ with card():
         where, wparams = scope.where()
         tod = q(
             f"""
-            select 'sign' as basis, hour_local, count(*) as n, avg(abs(error_s)) as off_s
+            select hour_local, count(*) as n,
+                   count(*) filter (where abs(error_s) <= 120) as within1,
+                   count(*) filter (where abs(error_s) <= 180) as within2,
+                   count(*) filter (where abs(error_s) <= 300) as within3
             from marts.fct_countdown_samples
             where in_comparison and ahead_min between %s and %s and service_date >= %s
               {where} {clause}
-            group by 2
-            union all
-            select 'timetable', hour_local, count(*), avg(abs(schedule_error_s))
-            from marts.fct_countdown_samples
-            where in_comparison and ahead_min = 15 and service_date >= %s {where} {clause}
-            group by 2
+            group by 1 order by 1
             """,
-            (lo, hi, start, *wparams, *params, start, *wparams, *params),
+            (lo, hi, start, *wparams, *params),
         )
     else:
-        on_route = "and route_id = %s" if scope.route_id else ""
-        rparams = (scope.route_id,) if scope.route_id else ()
         tod = q(
             f"""
-            select basis, hour_local, sum(n) as n,
-                   sum(sum_abs_s)::float8 / nullif(sum(n), 0) as off_s
+            select hour_local, sum(n)::bigint as n, sum(n_within_2min)::bigint as within1,
+                   sum(n_within_3min)::bigint as within2, sum(n_within_5min)::bigint as within3
             from marts.mart_prediction_daily
-            where service_date >= %s {clause} {on_route}
-              and ((basis = 'sign' and ahead_min between %s and %s) or basis = 'timetable')
-            group by 1, 2
+            where basis = 'sign' and ahead_min between %s and %s and service_date >= %s {clause}
+              {"and route_id = %s" if scope.route_id else ""}
+            group by 1 order by 1
             """,
-            (start, *params, *rparams, lo, hi),
+            (lo, hi, start, *params, *([scope.route_id] if scope.route_id else [])),
         )
     tod = tod[tod["n"] >= 20].copy()
-    sign = tod[tod["basis"] == "sign"]
-    if sign.empty:
+    if tod.empty:
         st.caption("Not enough measured bus arrivals this far ahead yet (needs 20 in an hour).")
     else:
-        hours = sorted({int(h) for h in sign["hour_local"]}, key=service_hour_key)
-        labels = [hour_label(h) for h in hours]
+        # service order: 5 am first, the hours after midnight last
+        tod = tod.assign(_k=tod["hour_local"].map(service_hour_key)).sort_values("_k")
+        tod["Hour"] = tod["hour_local"].map(hour_label)
+        for k in (1, 2, 3):
+            tod[f"p{k}"] = tod[f"within{k}"] / tod["n"]
+        # One bar per hour, built up in layers: the dark part is "right within 2 min", adding the
+        # middle part gives "within 3 min", the whole bar "within 5 min". One blue, dark to light.
+        layers = [
+            ("p1", None, "within 2 min", BRAND),
+            ("p2", "p1", "2–3 min off", "#5b9bd5"),
+            ("p3", "p2", "3–5 min off", "#b3d1ee"),
+        ]
+        custom = list(zip(tod["p1"], tod["p2"], tod["p3"], tod["n"].astype(int), strict=False))
         fig3 = go.Figure()
-        for basis, name, width, dots in (
-            ("sign", f"Predictions, {ahead} away", LINE_MAIN, True),
-            ("timetable", "Printed timetable", 1.8, False),
-        ):
-            d = tod[(tod["basis"] == basis) & tod["hour_local"].isin(hours)].copy()
-            d = d.assign(_k=d["hour_local"].map(service_hour_key)).sort_values("_k")
+        for col, below, name, color in layers:
             fig3.add_trace(
-                go.Scatter(
-                    x=[hour_label(int(h)) for h in d["hour_local"]],
-                    y=d["off_s"] / 60,
+                go.Bar(
+                    x=tod["Hour"],
+                    y=tod[col] - (tod[below] if below else 0),
                     name=name,
-                    mode="lines+markers" if dots else "lines",
-                    line={"color": BRAND, "width": width},
-                    marker={"size": MARKER_MAIN},
-                    customdata=d["n"].astype(int),
-                    hovertemplate=f"<b>{name}</b>, %{{x}}<br>%{{y:.1f}} min off on average"
-                    "<br>%{customdata:,} bus arrivals<extra></extra>",
+                    marker={"color": color, "line": {"color": "white", "width": 1}},
+                    customdata=custom,
+                    hovertemplate=(
+                        "<b>%{x}</b><br>right within 2 min: %{customdata[0]:.0%}<br>"
+                        "within 3 min: %{customdata[1]:.0%}<br>within 5 min: %{customdata[2]:.0%}"
+                        "<br>%{customdata[3]:,} bus arrivals<extra></extra>"
+                    ),
                 )
             )
         fig3.update_layout(
-            xaxis={"type": "category", "categoryorder": "array", "categoryarray": labels},
-            yaxis={"title": "Average minutes off", "rangemode": "tozero"},
-            legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0, "title": ""},
-            height=380,
+            barmode="stack",
+            yaxis_tickformat=".0%",
+            yaxis_range=[0, 1],
+            xaxis_title="",
+            yaxis_title=f"Predictions {ahead} out that were right",
+            legend={
+                "orientation": "h",
+                "yanchor": "bottom",
+                "y": 1.02,
+                "x": 0,
+                "title": "",
+                "traceorder": "normal",
+            },
         )
         show_chart(fig3)
 
@@ -298,18 +309,16 @@ def prediction_table(
                 "first": "asc",
             }
         )
-    # a row shows that route or stop in the charts above, on this page: an up arrow, not the
-    # right arrow of the rows that open another page
-    link_table(
-        rows, cols, max_height=520, key=key, default_sort=sort, go_label="Show above", go_arrow="↑"
-    )
+    # a row opens that route's or stop's report card at its predictions, like every other
+    # table's rows; the choice at the top of this page is how to see one here
+    link_table(rows, cols, max_height=520, key=key, default_sort=sort)
 
 
 TABLE_HELP = (
     "Average minutes the bus came from the time it was given, early or late alike, on the same "
     "bus arrivals: the prediction when it said 5 and 10 minutes away, and the printed timetable. "
     "Lower is better. Rows with at least 50 bus arrivals measured. "
-    f"{PERIOD}. Click a column heading to sort; click a row to show it on this page."
+    f"{PERIOD}. Click a column heading to sort; click a row for that report card's predictions."
 )
 
 with card():
@@ -319,12 +328,11 @@ with card():
         by_route = off_by("route_id", "and stop_id = %s", (scope.stop_id,), daily=False)
     else:
         by_route = off_by("route_id", "", (), daily=True)
-    stop_q = f"&stop={scope.stop_id}" if scope.stop_id else ""
     prediction_table(
         by_route,
         [{"key": "route", "label": "Route", "width": "3.8em", "bold": True}],
         lambda i, n: {
-            "href": f"/accuracy?route={i}{stop_q}",
+            "href": f"/route?route={i}#predictions",
             "hover": f"Route {short.get(i, i)}: measured on {n:,} bus arrivals",
             "route": short.get(i, i),
         },
@@ -347,12 +355,11 @@ with card():
     )
     name_of = dict(zip(names["stop_id"].astype(str), names["stop_name"], strict=False))
     code_of = dict(zip(names["stop_id"].astype(str), names["stop_code"], strict=False))
-    route_q = f"&route={scope.route_id}" if scope.route_id else ""
     prediction_table(
         by_stop,
         [{"key": "stop", "label": "Stop", "width": "minmax(10em, 2fr)", "bold": True}],
         lambda i, n: {
-            "href": f"/accuracy?stop={i}{route_q}",
+            "href": f"/stops?stop={i}#predictions",
             "hover": f"{name_of.get(i, i)}: measured on {n:,} bus arrivals",
             "stop": name_of.get(i, i) + (f" · #{code_of[i]}" if code_of.get(i) else ""),
         },

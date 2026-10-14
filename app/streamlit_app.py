@@ -55,10 +55,13 @@ st.html(
     " padding: 0.4rem 1.05rem; }"
     "[data-testid^='stBaseButton'] { min-height: 2.75rem; font-size: 1.05rem;"
     " padding: 0.45rem 1.1rem; }"
-    "[data-testid='stPageLink'] p { font-size: 1.05rem; font-weight: 600; }"
+    # a link to another page ("All 43 stops →"): the green of every such link (common.GO_COLOUR)
+    "[data-testid='stPageLink'] p { font-size: 1.05rem; font-weight: 600; color: #1d6b48; }"
     # Streamlit's link-to-this-heading icon (a chain link shown on hover): headings change with
     # the choices on a page, so such a link would break; the ? help stays
     "[data-testid='stHeaderActionElements'] a[aria-label='Link to heading'] { display: none; }"
+    # a link that opens a page at a section (#predictions) leaves its heading clear of the top bar
+    "h3[id] { scroll-margin-top: 5.5rem; }"
     # the label above every control (Stop, Period, Days, Direction, ...): bold, so it reads as
     # the control's name rather than as text
     "[data-testid='stWidgetLabel'] p { font-size: 1rem !important; font-weight: 650;"

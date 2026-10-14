@@ -93,8 +93,8 @@ if marts_ready():
         every_stop_card(
             stops_with_numbers(by_stop), period[0].upper() + period[1:], "ov_stops", limit=15
         )
-    trend_card("ov_trend")
     predictions_card("ov_pred", start, wt, period)
+    trend_card("ov_trend")
 
 n_now = q("""
     select count(distinct vehicle_id) as n from rt.vehicle_position

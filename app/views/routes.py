@@ -61,8 +61,8 @@ with table_slot, card():
 with chart_slot:
     times_of_day_card("routes_tod", start, wt, period)
 
-trend_card("routes_trend")
 predictions_card("routes_pred", start, wt, period)
+trend_card("routes_trend")
 
 st.divider()
 data_note(start)

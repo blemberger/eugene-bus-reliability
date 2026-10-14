@@ -282,7 +282,7 @@ with card():
         st.caption("Appears once the analysis has run.")
     else:
         agree = q("""
-            select sum(n_both_timepoints) as n_tp, sum(n_within_1min_timepoints) as w_tp,
+            select sum(n_both_timepoints) as n_tp, sum(n_within_2min_timepoints) as w_tp,
                    percentile_cont(0.5) within group (order by median_abs_diff_timepoints_s) as med_tp,
                    percentile_cont(0.5) within group (order by median_diff_s) as med_all
             from marts.mart_method_agreement
@@ -290,10 +290,11 @@ with card():
         if agree["n_tp"] and int(agree["n_tp"]) > 0:
             c1, c2, c3 = st.columns(3)
             c1.metric(
-                "Agree within 1 min at timepoints",
+                "Agree within 2 min at timepoints",
                 fmt_pct(int(agree["w_tp"]), int(agree["n_tp"])),
                 help="Our GPS-derived time and LTD's recorded time for the same bus at the same "
-                "timepoint, within a minute of each other.",
+                "timepoint, within 2 minutes of each other (the most an arrival time on this site "
+                "may be uncertain by).",
             )
             c2.metric(
                 "Typical gap at timepoints",
@@ -305,7 +306,9 @@ with card():
                 "LTD's time between timepoints",
                 f"{abs(float(agree['med_all'])):.0f} s earlier",
                 help="Typically, at the stops between timepoints, where LTD's time is a "
-                "prediction rather than a measurement.",
+                "prediction rather than a measurement. The gap is LTD's: our times at those "
+                "stops line up with the timepoints either side, where the two agree, so no "
+                "correction is made for it.",
             )
             # how far apart the two are, timepoints against the other stops (last 30 days)
             diffs = q(
@@ -353,7 +356,7 @@ with card():
             per_route = q(
                 """
                 select route_short_name as route, sum(n_both_timepoints) as n,
-                       sum(n_within_1min_timepoints)::float8 / nullif(sum(n_both_timepoints), 0)
+                       sum(n_within_2min_timepoints)::float8 / nullif(sum(n_both_timepoints), 0)
                            as share
                 from marts.mart_method_agreement
                 group by 1 having sum(n_both_timepoints) >= 50
@@ -369,13 +372,13 @@ with card():
                         orientation="h",
                         marker={"color": "#1f5f9e"},
                         customdata=per_route["n"],
-                        hovertemplate="Route %{y}: %{x:.0%} within 1 min, of %{customdata:,} "
+                        hovertemplate="Route %{y}: %{x:.0%} within 2 min, of %{customdata:,} "
                         "comparisons<extra></extra>",
                     )
                 )
                 fig_r.update_layout(
                     xaxis={
-                        "title": "Within 1 minute of LTD's time",
+                        "title": "Within 2 minutes of LTD's time",
                         "tickformat": ".0%",
                         "range": [0, 1],
                     },

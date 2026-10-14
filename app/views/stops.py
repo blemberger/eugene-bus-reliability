@@ -18,8 +18,6 @@ from common import (
     busy_stops,
     card,
     clean_headsigns,
-    col_hour,
-    col_minutes,
     current_fv,
     data_note,
     day_label,
@@ -28,7 +26,6 @@ from common import (
     fmt_date,
     fmt_delay,
     headline_metrics,
-    hour_time,
     lateness,
     link_table,
     live_status_line,
@@ -49,7 +46,6 @@ from common import (
     stop_buses,
     stop_tiles,
     stops_with_numbers,
-    table,
     times_of_day_card,
     today_lateness,
     trend_card,
@@ -204,8 +200,8 @@ if not stop_id:
     with chart_slot:
         times_of_day_card("stops_tod", start, wt, period)
     # below the filters, as on a stop's report card: the trend, then the predictions
-    trend_card("stops_trend")
     predictions_card("stops_pred", start, wt, period)
+    trend_card("stops_trend")
     st.divider()
     data_note(start)
     st.stop()
@@ -228,11 +224,14 @@ with title_slot:
         st.stop()
 stop = found.iloc[0]
 code = f" (#{stop['stop_code']})" if stop["stop_code"] else ""
+# the sign number stays in the browser tab's title (what a search shows), and goes on the line
+# under the heading rather than in it
 st.set_page_config(page_title=f"{stop['stop_name']}{code}: how reliable? · Eugene Bus Watch")
 with title_slot:
-    st.title(f"How reliable is the stop at {stop['stop_name']}{code}?")
+    st.title(f"How reliable is the stop at {stop['stop_name']}?")
     st.markdown(
-        "[Where is it? Open in Google Maps ↗](https://www.google.com/maps/search/?api=1&query="
+        (f"Stop #{stop['stop_code']} · " if stop["stop_code"] else "")
+        + "[Where is it? Open in Google Maps ↗](https://www.google.com/maps/search/?api=1&query="
         f"{float(stop['stop_lat']):.6f},{float(stop['stop_lon']):.6f})"
     )
 
@@ -249,9 +248,9 @@ def stop_right_now() -> None:
     show_left(left, f"No bus has left this stop in the last {JUST_LEFT_MINUTES} minutes.")
 
 
-# ---- reliability: the routes table and the hour-by-hour chart, then the period and days
+# ---- reliability: the chart by time of day, then the routes table, then the period and days
 # filters that they and everything below follow (drawn in that order; the filters are read first)
-routes_slot, hour_slot = st.container(), st.container()
+hour_slot, routes_slot = st.container(), st.container()
 start, wt = page_filters()
 wt_clause, wt_params = day_sql(wt)
 period = f"{day_label(wt)} since {fmt_date(start)}"
@@ -271,6 +270,7 @@ by_route = q(
            percentile_cont(0.5) within group (order by delay_s) as median_delay,
            percentile_cont(0.1) within group (order by delay_s) as p10,
            percentile_cont(0.9) within group (order by delay_s) as p90,
+           percentile_cont(0.05) within group (order by delay_s) as p05,
            min(service_date) as first_day, max(service_date) as last_day,
            count(distinct service_date) as n_days
     from marts.fct_stop_events
@@ -329,6 +329,17 @@ here = q(
     """,
     (stop_id, start, *wt_params),
 ).iloc[0]
+
+
+def early_fields(p05, n) -> dict:
+    """'Be early by': minutes before the scheduled time to be at the stop to catch 19 buses in
+    20 (the 5th percentile of lateness); on time when those are no more than 30 s early."""
+    if n < 20 or p05 is None or pd.isna(p05):
+        return {"early": "—", "early_s": None}
+    m = 0.0 if p05 >= -30 else float(round(-float(p05) / 60))
+    return {"early": "on time" if m == 0 else f"{m:.0f} min", "early_s": m}
+
+
 with routes_slot, card():
     st.subheader(
         f"How reliable is each route at {SNAME}?",
@@ -346,6 +357,7 @@ with routes_slot, card():
                 "route": r.route,
                 "toward": r.headsign if isinstance(r.headsign, str) else "",
                 **range_fields(r.p10, r.median_delay, r.p90, lo, hi, r.mean_abs),
+                **early_fields(r.p05, r.n),
             }
             for r in tbl.itertuples()
         ],
@@ -353,6 +365,18 @@ with routes_slot, card():
             {"key": "route", "label": "Route", "width": "3.8em", "bold": True},
             {"key": "toward", "label": "Toward", "width": "minmax(6em, 1.2fr)"},
             *range_columns(lo, hi),
+            {
+                "key": "early",
+                "label": "Be early by",
+                "width": "6.6em",
+                "num": True,
+                "hide_on_phone": True,  # no room beside the strip on a phone
+                "help": "How many minutes before the scheduled time to be at the stop to catch "
+                "19 buses in 20 (a route needs 20 arrivals here). On time: the earliest buses "
+                "are no more than 30 seconds early. Sorts the most first.",
+                "sort": "early_s",
+                "first": "desc",
+            },
         ],
         key="stop_routes",
         default_sort="route:asc",
@@ -364,107 +388,9 @@ with hour_slot:
     times_of_day_card("stop_tod", start, wt, period, fixed_stop=(stop_id, SNAME))
 
 
-# ---- arrive-by guidance ---------------------------------------------------
-with card():
-    st.subheader(f"How early should I be at {SNAME}?")
-    st.caption(
-        "How many minutes before the scheduled time to be at the stop to catch 19 buses in 20. "
-        f"{period[0].upper() + period[1:]}; a route needs 20 arrivals here."
-    )
-    early_all = q(
-        f"""
-        select route_id, route_short_name as route, direction_id, count(*) as n,
-               percentile_cont(0.05) within group (order by delay_s) as p05
-        from marts.fct_stop_events
-        where stop_id = %s and status is not null and service_date >= %s {wt_clause}
-        group by 1, 2, 3
-        """,
-        (stop_id, start, *wt_params),
-    )
-    early_all = early_all.merge(hs, on=["route", "direction_id"], how="left")
-    early_all["rkey"] = early_all["route"].map(route_key)
-    early_all = early_all.sort_values(["rkey", "direction_id"])
-
-    def early_by(p05, n) -> float | None:
-        if n < 20 or p05 is None or pd.isna(p05):
-            return None
-        return 0.0 if p05 >= -30 else float(round(-float(p05) / 60))
-
-    rows = []
-    for r in early_all.itertuples():
-        e = early_by(r.p05, r.n)
-        rows.append(
-            {
-                "href": route_link(r.route_id, r.route).split("#")[0],
-                "hover": f"Route {r.route} here: {int(r.n):,} arrivals measured",
-                "route": r.route,
-                "toward": r.headsign if isinstance(r.headsign, str) else "",
-                "early": "not enough data yet"
-                if e is None
-                else ("on time is enough" if e == 0 else f"{e:.0f} min"),
-                "early_s": e,
-            }
-        )
-    link_table(
-        rows,
-        [
-            {"key": "route", "label": "Route", "width": "3.8em", "bold": True},
-            {"key": "toward", "label": "Toward", "width": "minmax(6em, 1.5fr)"},
-            {
-                "key": "early",
-                "label": "Be there early by",
-                "width": "minmax(9em, 1fr)",
-                "sort": "early_s",
-                "first": "desc",
-            },
-        ],
-        key="stop_early",
-        default_sort="route:asc",
-    )
-    with st.expander("Hour by hour"):
-        guide = q(
-            f"""
-            select route_short_name as route, direction_id, hour_local, count(*) as n,
-                   percentile_cont(0.05) within group (order by delay_s) as p05
-            from marts.fct_stop_events
-            where stop_id = %s and status is not null and service_date >= %s {wt_clause}
-            group by 1, 2, 3 having count(*) >= 10
-            """,
-            (stop_id, start, *wt_params),
-        )
-        guide["label"] = [
-            labels.get((r, d), r)
-            for r, d in zip(guide["route"], guide["direction_id"], strict=False)
-        ]
-        # minutes before the scheduled time; 0 when the earliest buses are no more than 30 s early
-        guide["early_by"] = guide["p05"].map(
-            lambda s: 0.0 if s is None or pd.isna(s) or s >= -30 else round(-float(s) / 60)
-        )
-        if guide.empty:
-            st.caption("Not enough arrivals per hour yet (needs 10+ in an hour).")
-        else:
-            guide["col"] = "Route " + guide["label"].astype(str)
-            pivot = guide.pivot_table(
-                index="hour_local", columns="col", values="early_by", aggfunc="first"
-            ).sort_index()
-            order = ["Route " + o for o in tbl["label"]]
-            pivot = pivot[[c for c in order if c in pivot.columns]]
-            pivot.insert(0, "Hour", [hour_time(h) for h in pivot.index])
-            table(
-                pivot.reset_index(drop=True),
-                hide_index=True,
-                width="stretch",
-                column_config={"Hour": col_hour("Hour")}
-                | {
-                    c: col_minutes(
-                        c,
-                        help="Be at the stop this many minutes before the scheduled time (0 = no need).",
-                    )
-                    for c in pivot.columns
-                    if c != "Hour"
-                },
-            )
-            st.caption("Blank where an hour has fewer than 10 arrivals.")
+# ---- the predictions, then the trend: every route here, or one ------------------------------
+predictions_card("stop_pred", start, wt, period, fixed_stop=(stop_id, SNAME))
+trend_card("stop_trend", fixed_stop=(stop_id, SNAME))
 
 
 # ---- each scheduled bus ---------------------------------------------------------------------
@@ -586,10 +512,6 @@ with card():
     )
     stop_right_now()
 
-
-# ---- the trend and the predictions: every route here, or one -------------------------------
-trend_card("stop_trend", fixed_stop=(stop_id, SNAME))
-predictions_card("stop_pred", start, wt, period, fixed_stop=(stop_id, SNAME))
 
 # ---- nearby stops: across the street, the next one along ------------------------------------
 near = q(

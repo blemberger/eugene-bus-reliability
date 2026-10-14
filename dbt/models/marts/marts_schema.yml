@@ -142,7 +142,7 @@ models:
         tests: [not_null]
 
   - name: mart_trend_daily
-    description: The typical bus per service day, for everything and each route, direction and stop, for the trend charts.
+    description: The typical bus and the 8-in-10 range per service day, for everything and each route, direction and stop, for the trend charts.
     columns:
       - name: median_delay_s
         tests: [not_null]

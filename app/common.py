@@ -47,12 +47,15 @@ STATUS_COLOR = {
 #   line: a reference to read against, not a result, so it carries no status colour.
 # - ROUTE_COLOUR: route cards, a deep green (a route is a line through town, like a green
 #   transit line on a map; stops, places, keep the site's blue). Darker and bluer than the
-#   on-time green, and only ever an edge and an arrow on a card, so it never reads as "on time".
+#   on-time green, and only ever a card's edge or a link's text, so it never reads as "on time".
+# - GO_COLOUR: every link that opens a report card or another page (a table row's "Report →",
+#   a card's arrow, a "… →" link): the same green everywhere, whatever it opens.
 # - LINE_COLOURS: other lines on one chart, in this fixed order (a categorical palette checked
 #   for colour-blind separation): each line keeps its colour while it is shown.
 BRAND = "#1f5f9e"
 BRAND_TINT = "#eaf1f9"  # hover and selected backgrounds
 ROUTE_COLOUR = "#1d6b48"
+GO_COLOUR = ROUTE_COLOUR
 INK = "#1b2533"
 LINE_COLOURS = ["#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948"]
 
@@ -506,7 +509,7 @@ def route_link(route_id, name) -> str | None:
 
 # Links that open another page (a route's or a stop's report card) look like cards with an
 # arrow, never like the rounded buttons that change what the current page shows. Route cards are
-# edged in green, stop cards in blue, the same on every page. The cards fill whole rows: 7 routes
+# edged in green, stop cards in blue, the same on every page; the arrow is the links' green. The cards fill whole rows: 7 routes
 # a row on a computer (LTD's 28 routes make 4 full rows), 4 stops (12 busy stops, 3 rows).
 ROUTE_TILE_COLOUR = ROUTE_COLOUR
 STOP_TILE_COLOUR = BRAND
@@ -530,9 +533,18 @@ _TILE_CSS = (
     # a long stop name wraps (all tiles in a row grow together) rather than hiding the number
     ".ebw-tile .ebw-one { display: block; overflow-wrap: anywhere; }"
     ".ebw-tile .ebw-code { color: #666; font-weight: 400; white-space: nowrap; }"
-    ".ebw-tile .ebw-go { margin-left: auto; color: var(--edge); font-weight: 700; font-size: 1.05rem; }"
+    f".ebw-tile .ebw-go {{ margin-left: auto; color: {GO_COLOUR}; font-weight: 700;"
+    " font-size: 1.05rem; }"
     "</style>"
 )
+
+
+def with_filters(href: str, qs: str) -> str:
+    """A link with the page's filter query added (before any #section it opens at)."""
+    if not qs:
+        return href
+    path, hash_, frag = href.partition("#")
+    return path + ("&" if "?" in path else "?") + qs + hash_ + frag
 
 
 def nav_tiles(items: list[tuple[str, str]], kind: str) -> None:
@@ -542,7 +554,7 @@ def nav_tiles(items: list[tuple[str, str]], kind: str) -> None:
     edge = ROUTE_TILE_COLOUR if kind == "route" else STOP_TILE_COLOUR
     tiles = "".join(
         f"<a class='ebw-tile' target='_self' title='Open the report card' "
-        f"href='{html_escape(href + (('&' if '?' in href else '?') + qs if qs else ''))}'>"
+        f"href='{html_escape(with_filters(href, qs))}'>"
         f"<span>{inner}</span><span class='ebw-go'>→</span></a>"
         for href, inner in items
     )
@@ -2211,10 +2223,12 @@ def _weighted_median(values: pd.Series, weights: pd.Series) -> float:
 
 
 def trend_chart(scope_where: dict) -> None:
-    """The typical bus over time for one choice of route, direction and stop, one point per day
-    from marts.mart_trend_daily (all days, all data); per week once there are more than
+    """The typical bus over time for one choice of route, direction and stop, with the band 8 in
+    10 buses fell in, as on the chart by time of day: one point per day from
+    marts.mart_trend_daily (all days, all data); per week once there are more than
     TREND_MAX_POINTS days, per month after that many weeks (then each point is the typical
-    day's typical bus). scope_where: route_id, direction_id, stop_id (None = all)."""
+    day's: the median of the days' typical buses, and the average of their ranges, weighted by
+    arrivals). scope_where: route_id, direction_id, stop_id (None = all)."""
     conds, params = [], []
     for col, flag in (
         ("route_id", "by_route"),
@@ -2229,7 +2243,8 @@ def trend_chart(scope_where: dict) -> None:
             params.append(v)
     try:
         daily = q(
-            "select service_date as d, n, median_delay_s as median_delay "
+            "select service_date as d, n, median_delay_s as median_delay, p10_delay_s as p10, "
+            "p90_delay_s as p90 "
             f"from marts.mart_trend_daily where {' and '.join(conds)} and n >= 5 order by 1",
             tuple(params),
         )
@@ -2238,7 +2253,8 @@ def trend_chart(scope_where: dict) -> None:
     if len(daily) < 2:
         st.caption("A trend needs at least two days with 5 or more arrivals for this choice.")
         return
-    daily["median_delay"] = daily["median_delay"].astype(float)
+    for c in ("median_delay", "p10", "p90"):
+        daily[c] = daily[c].astype(float)
     days = (pd.Timestamp(daily["d"].max()) - pd.Timestamp(daily["d"].min())).days + 1
     unit = (
         "day" if days <= TREND_MAX_POINTS else "week" if days <= 7 * TREND_MAX_POINTS else "month"
@@ -2256,6 +2272,8 @@ def trend_chart(scope_where: dict) -> None:
                         {
                             "n": g["n"].sum(),
                             "median_delay": _weighted_median(g["median_delay"], g["n"]),
+                            "p10": float((g["p10"] * g["n"]).sum() / g["n"].sum()),
+                            "p90": float((g["p90"] * g["n"]).sum() / g["n"].sum()),
                         }
                     )
                     if len(g)
@@ -2265,35 +2283,62 @@ def trend_chart(scope_where: dict) -> None:
             .dropna()
             .reset_index()
         )
-    trend["median_delay"] = trend["median_delay"].astype(float)
+    for c in ("median_delay", "p10", "p90"):
+        trend[c] = trend[c].astype(float)
     when = {
         "day": lambda d: pd.Timestamp(d).strftime("%a %b %-d"),
         "week": lambda d: "Week of " + pd.Timestamp(d).strftime("%b %-d, %Y"),
         "month": lambda d: pd.Timestamp(d).strftime("%B %Y"),
     }[unit]
+    x = list(pd.to_datetime(trend["d"]))
     fig = go.Figure()
     on_time_line(fig)
+    # the band 8 in 10 buses fell in, drawn as on the chart by time of day
     fig.add_trace(
         go.Scatter(
-            x=pd.to_datetime(trend["d"]),
+            x=x + x[::-1],
+            y=list(trend["p90"] / 60) + list(trend["p10"] / 60)[::-1],
+            fill="toself",
+            fillcolor=BRAND,
+            opacity=0.18,
+            mode="lines",
+            line_width=0,
+            hoverinfo="skip",
+            name="8 in 10 buses",
+            legendrank=2,
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=x,
             y=trend["median_delay"] / 60,
             mode="lines+markers",
             name="Typical bus",
+            legendrank=1,
             line={"color": BRAND, "width": LINE_MAIN},
             marker={"size": MARKER_MAIN},
             hovertext=[
-                f"{when(d)}: typical bus {fmt_delay(m)} · {int(n):,} arrivals"
-                for d, m, n in zip(trend["d"], trend["median_delay"], trend["n"], strict=False)
+                f"<b>{when(d)}</b><br>typical bus {fmt_delay(m)}<br>8 in 10 buses: "
+                f"{fmt_range(lo, hi)}<br>{int(n):,} arrivals"
+                for d, m, lo, hi, n in zip(
+                    trend["d"],
+                    trend["median_delay"],
+                    trend["p10"],
+                    trend["p90"],
+                    trend["n"],
+                    strict=False,
+                )
             ],
             hoverinfo="text",
         )
     )
     fig.update_layout(
         xaxis={"type": "date", "title": ""},
-        yaxis=minutes_axis(list(trend["median_delay"] / 60)),
-        showlegend=False,
-        margin={"t": 20},
-        height=320,
+        yaxis=minutes_axis(list(trend["p10"] / 60) + list(trend["p90"] / 60)),
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0, "xanchor": "left"},
+        legend_title="",
+        margin={"t": 40},
+        height=340,
     )
     show_chart(fig)
 
@@ -2330,9 +2375,10 @@ def every_stop_card(
             [
                 {
                     "href": stop_link(r.stop_id, "").split("#")[0],
-                    "hover": f"{r.stop_name}: {int(r.n):,} arrivals measured",
+                    # the routes go in the hover: a stop can have a dozen
+                    "hover": f"{r.stop_name}: {int(r.n):,} arrivals measured"
+                    + (f" · routes {r.routes}" if isinstance(r.routes, str) and r.routes else ""),
                     "stop": f"{r.stop_name}" + (f" · #{r.stop_code}" if r.stop_code else ""),
-                    "routes": r.routes,
                     **range_fields(
                         r.p10_delay_s, r.median_delay_s, r.p90_delay_s, lo, hi, r.mean_abs_delay_s
                     ),
@@ -2341,12 +2387,6 @@ def every_stop_card(
             ],
             [
                 {"key": "stop", "label": "Stop", "width": "minmax(10em, 2fr)", "bold": True},
-                {
-                    "key": "routes",
-                    "label": "Routes",
-                    "width": "minmax(4em, 0.6fr)",
-                    "hide_on_phone": True,
-                },
                 *range_columns(lo, hi),
             ],
             # the Overview's few rows show whole, without scrolling inside the card
@@ -2477,15 +2517,14 @@ def scope_picker(
             )
         else:
             routes = routes_by_service()
-        if len(routes) > 1 or not fixed_stop:
-            route_id = route_picker(
-                routes,
-                key=f"{key}_route",
-                all_label="All routes here" if fixed_stop else "All routes",
-                query_param="route" if in_address else None,
-            )
-        else:
-            route_id = None
+        # offered even where one route serves the stop: "All routes here" and that route then
+        # show the same, but the choice looks the same on every page and says what is shown
+        route_id = route_picker(
+            routes,
+            key=f"{key}_route",
+            all_label="All routes here" if fixed_stop else "All routes",
+            query_param="route" if in_address else None,
+        )
         if route_id:
             row = routes[routes["route_id"].astype(str) == str(route_id)].iloc[0]
             route_name = str(row["route_short_name"])
@@ -2647,7 +2686,21 @@ def predictions_card(
         scope = scope_picker(key, fixed_route, fixed_stop, direction)
         title.subheader(
             f"How far off are the predictions{scope.suffix()}?",
+            # links from the Predictions page's tables open a report card here (#predictions)
+            anchor="predictions",
             help=PREDICTION_OFF_NOTE + f" {period[0].upper() + period[1:]}{help_extra}.",
+        )
+        # Streamlit jumps to #predictions as soon as the heading appears, but the charts above
+        # it are still being drawn and push it down; so jump again once the page has finished
+        st.html(
+            "<script>(function () { if (location.hash !== '#predictions' || window.__ebwJumped)"
+            " return; window.__ebwJumped = true; let tries = 0; const t = setInterval(() => {"
+            " const app = document.querySelector('.stApp'); const el ="
+            " document.getElementById('predictions'); tries += 1;"
+            " if ((app && app.getAttribute('data-test-script-state') !== 'running' && el)"
+            " || tries > 75) { clearInterval(t); if (el) setTimeout(() =>"
+            " el.scrollIntoView({block: 'start'}), 400); } }, 200); })();</script>",
+            unsafe_allow_javascript=True,
         )
         rows = prediction_scope_rows(start, wt, scope, direction)
         fig = (
@@ -2670,9 +2723,10 @@ def predictions_card(
 # of data, per month once there's more than this many weeks, so the chart stays readable.
 TREND_MAX_POINTS = 120
 TREND_HELP = (
-    "The typical bus against the timetable, all days, one point per day: per week once there "
+    "The typical bus against the timetable, and the range 8 in 10 buses fell in (the shading), "
+    "all days, one point per day: per week once there "
     f"are more than {TREND_MAX_POINTS} days of data, per month after {TREND_MAX_POINTS} weeks "
-    "(then each point is the typical day's typical bus). "
+    "(then each point is the typical day's). "
     "Points with fewer than 5 arrivals are left out. All data: this chart doesn't follow the "
     "period and days filters."
 )
@@ -2703,6 +2757,9 @@ def col_range(label: str = "Usual range"):
 
 # ------------------------------------------------------------- clickable tables ----
 
+# the width of the "−1 to 5 min" numbers beside each range strip
+RANGE_TEXT_PX = 86
+
 _TABLE_CSS = """
 <style>
 /* One grid for the whole table: every row (the header too) is a subgrid of it, so a column's
@@ -2723,17 +2780,15 @@ a.ebw-r:hover { background: #eaf1f9; }
 .ebw-sr { display: none; }
 .ebw-n { text-align: right; font-variant-numeric: tabular-nums; }
 .ebw-c { text-align: center; }
-.ebw-go { color: #1f5f9e; font-weight: 700; text-align: right; white-space: nowrap; }
+.ebw-go { color: GO; font-weight: 700; text-align: right; white-space: nowrap; }
 .ebw-go-t { font-weight: 600; font-size: 13px; }
 .ebw-k { font-weight: 700; }
 .ebw-s { color: #666; font-size: 14px; }
 .ebw-g { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
-/* a bar takes the column's width less the number beside it */
+/* the strip takes the column's width less the numbers beside it, the same width in every
+   row so the strips share one scale */
 .ebw-x { position: relative; display: block; flex: 1 1 auto; min-width: 70px; height: 16px; }
-/* an 8-in-10 strip takes the column's whole width, its numbers small underneath */
-.ebw-g.ebw-st { flex-direction: column; align-items: stretch; gap: 1px; }
-.ebw-st > .ebw-s { flex: none; font-size: 13px; line-height: 1.2; }
-.ebw-st .ebw-x0 { top: -6px; height: calc(100% + 8px); }  /* clear of the numbers */
+.ebw-g > .ebw-s { flex: 0 0 RANGE_TEXT_PXpx; }
 .ebw-x > span { position: absolute; display: block; }
 /* on time: a dashed dark grey line running down through every row (as in the charts) */
 .ebw-x0 { top: -10px; width: 0; margin-left: -1px; height: calc(100% + 20px);
@@ -2744,14 +2799,18 @@ a.ebw-r:hover { background: #eaf1f9; }
   .ebw-hide { display: none; } .ebw-t { font-size: 14px; column-gap: 8px;
   grid-template-columns: var(--cols-phone); } .ebw-go-t { display: none; }
   .ebw-r { padding: 7px 8px; }
+  /* on a phone the numbers go under the strip, which then takes the column's whole width */
+  .ebw-g { flex-direction: column; align-items: stretch; gap: 2px; }
+  .ebw-g > .ebw-s { flex: none; }
+  .ebw-x0 { top: -4px; height: calc(100% + 6px); }  /* clear of the numbers under the strip */
 }
 </style>
-"""
+""".replace("RANGE_TEXT_PX", str(RANGE_TEXT_PX)).replace("GO;", GO_COLOUR + ";")
 
 
 def range_strip(p10, med, p90, lo: float, hi: float) -> str:
     """A small horizontal picture of where 8 in 10 buses fell (p10 to p90, seconds) with a tick at
-    the typical bus and a green line at on time (0), on a shared scale lo..hi (minutes)."""
+    the typical bus and a dashed line at on time (0), on a shared scale lo..hi (minutes)."""
     if any(v is None or pd.isna(v) for v in (p10, med, p90)):
         return ""
 
@@ -2786,8 +2845,7 @@ def link_table(
     max_height: int = 460,
     key: str = "t",
     default_sort: str | None = None,
-    go_label: str = "Report card",
-    go_arrow: str = "→",
+    go_label: str = "Report",
 ) -> None:
     """A table whose every row is a link (click anywhere on it) and whose columns sort when
     their header is clicked (again to reverse), without reloading the page.
@@ -2801,9 +2859,8 @@ def link_table(
     the first click; numbers default to latest/largest first).
     key: unique per page, so two tables' sort buttons don't interfere. Links carry the page's
     period and days filters along, so the next page opens with the same choice."""
-    # rows that open another page end in "Report card →" (go_label), coloured as the cards that
-    # open the same pages (green for a route's report card, blue for a stop's); on a phone just
-    # the arrow
+    # rows that open another page end in "Report →" (go_label), in the green of every link to
+    # another page; on a phone just the arrow
     linked = any(r.get("href") for r in rows)
     tracks = " ".join(c["width"] for c in columns) + (" max-content" if linked else "")
     # on a phone the hidden columns get no track; flexible columns may shrink to their content
@@ -2813,12 +2870,7 @@ def link_table(
         if not c.get("hide_on_phone")
     ) + (" 1.1em" if linked else "")
 
-    def go_cell(href: str) -> str:
-        colour = ROUTE_TILE_COLOUR if href.startswith("/route?") else STOP_TILE_COLOUR
-        return (
-            f"<div class='ebw-go' style='color:{colour}'>"
-            f"<span class='ebw-go-t'>{html_escape(go_label)} </span>{go_arrow}</div>"
-        )
+    go_cell = f"<div class='ebw-go'><span class='ebw-go-t'>{html_escape(go_label)} </span>→</div>"
 
     tid = "ebw-" + re.sub(r"[^a-z0-9]", "", key.lower())
     qs = filter_query()
@@ -2894,9 +2946,9 @@ def link_table(
         tip = f" title='{html_escape(r['hover'])}'" if r.get("hover") else ""
         body = "".join(cell(c, r.get(c["key"])) for c in columns)
         if linked:
-            body += go_cell(r["href"]) if r.get("href") else "<div></div>"
+            body += go_cell if r.get("href") else "<div></div>"
         if r.get("href"):
-            href = r["href"] + (("&" if "?" in r["href"] else "?") + qs if qs else "")
+            href = with_filters(r["href"], qs)
             return (
                 f"<a class='ebw-r' href='{html_escape(href)}' target='_self'{tip} "
                 f"style='{';'.join(style)}'>{body}</a>"
@@ -2923,7 +2975,7 @@ def link_table(
 def range_cell(p10, med, p90, lo: float, hi: float) -> str:
     """The 'usual range' cell of a link_table: the strip and the numbers."""
     return (
-        f"<span class='ebw-g ebw-st'>{range_strip(p10, med, p90, lo, hi)}"
+        f"<span class='ebw-g'>{range_strip(p10, med, p90, lo, hi)}"
         f"<span class='ebw-s'>{html_escape(fmt_range(p10, p90))}</span></span>"
     )
 
@@ -2933,7 +2985,7 @@ def range_scale(df: pd.DataFrame, lo_col: str = "p10_delay_s", hi_col: str = "p9
     strips fill the column.
     With many rows, the scale covers the earliest and latest 5% of rows' ends only, so a few
     extreme stops don't squeeze everyone else's strip into a sliver; a strip beyond the scale
-    runs to the column's edge (its numbers under it give its real range)."""
+    runs to the column's edge (its numbers beside it give its real range)."""
     if df.empty:
         return -2.0, 8.0
     lows, highs = df[lo_col].astype(float) / 60, df[hi_col].astype(float) / 60
@@ -2986,11 +3038,11 @@ def range_columns(lo: float, hi: float) -> list[dict]:
         {
             "key": "range",
             "label": "8 in 10 buses",
-            "width": "minmax(12em, 3fr)",
+            "width": "minmax(13em, 2fr)",
             "phone_width": "minmax(6.8em, 1fr)",
             "html": True,
             "help": RANGE_HELP + " The dashed line is on time; the dark tick is the typical bus; "
-            "the numbers under it are the range in minutes against the timetable. Sorts the "
+            "the numbers beside it are the range in minutes against the timetable. Sorts the "
             "narrowest range (the most predictable) first.",
             "sort": "range_s",
             "first": "asc",

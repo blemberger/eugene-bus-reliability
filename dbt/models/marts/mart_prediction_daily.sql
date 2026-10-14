@@ -33,6 +33,7 @@ select
     sum(abs(error_s))::bigint                   as sum_abs_s,
     count(*) filter (where abs(error_s) <= 60)  as n_within_1min,
     count(*) filter (where abs(error_s) <= 120) as n_within_2min,
-    count(*) filter (where abs(error_s) <= 180) as n_within_3min
+    count(*) filter (where abs(error_s) <= 180) as n_within_3min,
+    count(*) filter (where abs(error_s) <= 300) as n_within_5min
 from told
 group by 1, 2, 3, 4, 5, 6

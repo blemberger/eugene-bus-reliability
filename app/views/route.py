@@ -54,11 +54,14 @@ require_db()
 back_button("← All routes", page="views/routes.py")
 title_slot = st.empty()  # filled in once the route is known
 require_marts()
-# Drawn in this order, though the filters are read first: the direction, the route's numbers
-# with every stop on it, the hour-by-hour chart, then the period and days filters that
-# everything on the page follows, then the rest. Stop report cards are laid out the same way.
-dir_slot, table_slot, hour_slot = st.container(), st.container(), st.container()
-start, wt = page_filters()
+# Drawn in this order, though the filters are read first: the direction, the chart by time of
+# day, the route's numbers with every stop on it, then the period and days filters that
+# everything on the page follows, then the predictions, the route's own detail and, last, the
+# trend (usually a flat line). Stop report cards are laid out the same way.
+dir_slot, hour_slot, table_slot = st.container(), st.container(), st.container()
+filters_slot, pred_slot = st.container(), st.container()
+with filters_slot:
+    start, wt = page_filters()
 FV = str(current_fv())  # schedule version in force today
 wt_clause, wt_params = day_sql(wt)
 period = f"{day_label(wt)} since {fmt_date(start)}"
@@ -402,17 +405,18 @@ if not head.empty:
         )
 
 
-# ---- the trend and the predictions: every stop on the route, or one ------------------------
+# ---- the predictions (drawn under the filters) and the trend: every stop on the route, or one
+with pred_slot:
+    predictions_card(
+        "route_pred",
+        start,
+        wt,
+        period,
+        fixed_route=ON_ROUTE,
+        direction=direction,
+        help_extra=IN_DIRECTION,
+    )
 trend_card("route_trend", fixed_route=ON_ROUTE, direction=direction, help_extra=IN_DIRECTION + ".")
-predictions_card(
-    "route_pred",
-    start,
-    wt,
-    period,
-    fixed_route=ON_ROUTE,
-    direction=direction,
-    help_extra=IN_DIRECTION,
-)
 
 # ---- the other routes --------------------------------------------------------------------
 with card():
