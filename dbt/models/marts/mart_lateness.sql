@@ -51,6 +51,7 @@ select
     count(*) filter (where status = 'on_time')              as n_on_time,
     count(*) filter (where status = 'late')                 as n_late,
     percentile_cont(0.5) within group (order by delay_s)    as median_delay_s,
+    avg(abs(delay_s))                                       as mean_abs_delay_s,
     percentile_cont(0.1) within group (order by delay_s)    as p10_delay_s,
     percentile_cont(0.9) within group (order by delay_s)    as p90_delay_s,
     count(distinct service_date)                            as n_days

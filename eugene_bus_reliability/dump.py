@@ -431,6 +431,7 @@ def main(settings: Settings, raw: bool = False) -> None:
                    round(100.0 * trips_reported / nullif(trips_due, 0), 1) pct_trips_reported,
                    round(100.0 * mid_stops_timed / nullif(mid_stops_due, 0), 1) pct_mid_stops_timed,
                    stop_events_implausible implausible,
+                   stop_events_doubtful doubtful,
                    stop_events_imprecise imprecise,
                    round(gap_minutes) feed_gap_min
             from marts.mart_daily_coverage order by 1
@@ -445,7 +446,10 @@ def main(settings: Settings, raw: bool = False) -> None:
         print(
             "first stop / its last stop / bus never reached it in the data / passed before the trip's"
         )
-        print("first report / implausible time / imprecise time / anything else")
+        print(
+            "first report / implausible time / doubtful stop (int_doubtful_stops) / imprecise time /"
+        )
+        print("anything else")
         show(
             cur,
             """
@@ -458,6 +462,7 @@ def main(settings: Settings, raw: bool = False) -> None:
                    count(*) filter (where r = 'never') never_reached,
                    count(*) filter (where r = 'before') before_first_report,
                    count(*) filter (where r = 'implausible') implausible,
+                   count(*) filter (where r = 'doubtful') doubtful,
                    count(*) filter (where r = 'imprecise') imprecise,
                    count(*) filter (where r = 'other') other
             from (
@@ -470,6 +475,7 @@ def main(settings: Settings, raw: bool = False) -> None:
                             when observed_arrival is null then 'never'
                             when not is_bounded then 'before'
                             when not is_plausible then 'implausible'
+                            when is_doubtful then 'doubtful'
                             when not is_precise then 'imprecise'
                             else 'other' end as r
                 from marts.fct_stop_events
@@ -1219,25 +1225,35 @@ def main(settings: Settings, raw: bool = False) -> None:
             cur.connection.rollback()
             print(f"(not available: {e})")
 
-        section("BUSY STOP BUTTONS (Stops, Live map, Accuracy): most scored arrivals, last 30 days")
+        section(
+            "DOUBTFUL STOPS left out (int_doubtful_stops): our GPS time and LTD's record over 2 min "
+            "apart as a rule"
+        )
         show(
             cur,
             """
-            with scored as (
-                select stop_id, count(*) as n from marts.fct_stop_events
-                where status is not null and service_date >= current_date - 30 group by 1
-            ),
-            named as (
-                select s.stop_id, s.stop_code, s.stop_name, sc.n,
-                       row_number() over (partition by lower(trim(s.stop_name)) order by sc.n desc) as rn
-                from scored sc join gtfs.stops s on s.stop_id = sc.stop_id
-                 and s.feed_version_id = (select max(feed_version_id) from gtfs.feed_version)
-                where s.location_type = 0
-                  and s.stop_name not ilike '%%arrival zone%%' and s.stop_name not ilike 'approaching %%'
-            )
-            select stop_name, stop_id, stop_code, n scored_arrivals from named where rn = 1
-            order by n desc limit 9
+            select count(*) stops_left_out,
+                   (select count(*) from marts.fct_stop_events
+                    where is_doubtful and status is null and service_date >= current_date - 30)
+                       arrivals_left_out_30d,
+                   (select count(*) from marts.fct_stop_events
+                    where status is not null and service_date >= current_date - 30) arrivals_scored_30d
+            from intermediate.int_doubtful_stops
         """,
+        )
+        show(
+            cur,
+            """
+            select r.route_short_name route, d.direction_id dir, s.stop_name, s.stop_code, d.n timed_both_ways,
+                   round(d.median_diff_s::numeric) ltd_minus_gps_median_s
+            from intermediate.int_doubtful_stops d
+            left join gtfs.stops s on s.stop_id = d.stop_id
+             and s.feed_version_id = (select max(feed_version_id) from gtfs.feed_version)
+            left join gtfs.routes r on r.route_id = d.route_id
+             and r.feed_version_id = (select max(feed_version_id) from gtfs.feed_version)
+            order by 1, 2, 3
+        """,
+            limit=60,
         )
 
         section("POSITIONS off the route shape (detours / bad fixes)")

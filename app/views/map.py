@@ -17,7 +17,6 @@ from common import (
     LOCAL_TZ,
     STATUS_COLOR,
     STOP_ROWS_PER_ROUTE,
-    busy_stop_buttons,
     card,
     clean_headsigns,
     col_ago,
@@ -42,11 +41,10 @@ from common import (
     require_db,
     route_picker,
     schedule_join,
-    search_stops,
     show_coming,
     status_from_delay,
     stop_buses,
-    stop_buttons,
+    stop_choices,
     table,
 )
 
@@ -593,46 +591,26 @@ with card():
         help=f"The next {STOP_ROWS_PER_ROUTE} buses of each route and direction. In is LTD's "
         "prediction; LTD only predicts trips that are about to run, so later buses show the "
         "timetable. Likely in corrects LTD's prediction by how far off it has usually been for "
-        "this route, time of day and number of minutes ahead; 80% of the time is the range the "
-        "bus actually arrived in, in past data. Empty where there isn't enough history yet.",
+        "this route, time of day and number of minutes ahead; 8 in 10 buses is the range 8 buses in 10 "
+        "actually arrived in, in past data. Empty where there isn't enough history yet.",
     )
-    example = q(f"""
-        select stop_code, stop_name from gtfs.stops
-        where feed_version_id = {FV} and location_type = 0 and stop_code is not null and stop_code <> ''
-        order by stop_name limit 1
-    """)
-    hint = (
-        f"stop name or the number on the sign, e.g. {example['stop_name'][0]} or "
-        f"{example['stop_code'][0]}"
-        if not example.empty
-        else "stop name or number"
+    # Choosing a stop changes what this card shows, so it is the site's in-page chooser (a list
+    # you can type into), not the cards that open a stop's report card.
+    stops = stop_choices(None, None)
+    label_of = dict(zip(stops["stop_id"].astype(str), stops["label"], strict=False))
+    if "live_stop_id" not in st.session_state and st.query_params.get("stop") in label_of:
+        st.session_state["live_stop_id"] = st.query_params["stop"]
+    if st.session_state.get("live_stop_id") not in label_of:
+        st.session_state["live_stop_id"] = None
+    stop_id = st.selectbox(
+        "Stop (type its name or the number on the sign)",
+        list(label_of),
+        index=None,
+        format_func=lambda s: label_of[s],
+        placeholder="Choose a stop",
+        key="live_stop_id",
     )
-    query = st.text_input(
-        "Stop name or the number on the sign",
-        placeholder="Search: " + hint,
-        label_visibility="collapsed",
-    )
-    if not query:
-        picked = busy_stop_buttons("live_busy")
-        if picked:
-            st.session_state["live_stop_id"] = picked
-            st.session_state["live_stop_name"] = st.session_state.get("live_busy_name", picked)
-    if query:
-        matches = search_stops(query)
-        if matches.empty:
-            st.warning("No stop matches that. Try part of a street name.")
-        else:
-            picked = stop_buttons(matches, "live_stop")
-            if picked:
-                st.session_state["live_stop_id"] = picked
-                st.session_state["live_stop_name"] = st.session_state.get("live_stop_name", picked)
-
-    stop_id = st.session_state.get("live_stop_id")
-    if "stop" in st.query_params and not stop_id:
-        stop_id = st.query_params["stop"]
-        st.session_state["live_stop_id"] = stop_id
     if stop_id:
-        st.markdown(f"**{st.session_state.get('live_stop_name', stop_id)}**")
         st.page_link(
             "views/stops.py",
             label="How reliable is this stop? Its report card →",

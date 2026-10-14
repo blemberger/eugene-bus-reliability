@@ -59,6 +59,9 @@ shows lateness grows smoothly between them (a typical extra 2 seconds), so the m
 **8 in 10 buses.** The range from the 10th to the 90th percentile of lateness: one bus in ten came earlier than the
 low end and one in ten later than the high end. Its width is how much you need to allow for when planning.
 
+**Minutes off.** How far the bus was from the timetable, early or late alike, averaged: a route whose buses are
+2 minutes early half the time and 2 minutes late the rest is 2 minutes off, though its typical bus is on time.
+
 **Today so far.** The typical bus over today's service, as of the latest update (every 15 minutes).
 
 **Prediction accuracy.** Every real-time arrival prediction LTD publishes is kept, with when it was shown.
@@ -72,9 +75,10 @@ the first stretch of the route ahead of the last, so a route that uses a street 
 maximum over time removes GPS jitter, and when that fraction steps past a stop between two reports the crossing time is
 interpolated (±15 s at a 30 s poll while moving). Independently, the feed keeps reporting a departure time for stops
 already passed that no longer changes; that "settled" time is recorded too, and the two are compared in the cross-check
-below. Stops passed before a trip's first report can't be timed and are excluded. At a trip's first stop the bus
-usually arrives early and waits, so what counts there is when it leaves: LTD's recorded departure is used for first
-stops, and our GPS arrival everywhere else.
+below. Stops passed before a trip's first report can't be timed and are excluded. What counts is when the bus leaves: at
+a trip's first stop it usually arrives early and waits, and at a timepoint an early bus holds until its time, so at
+both LTD's recorded departure is used (a real measurement there). Everywhere else our GPS time is used, which in practice
+is when the bus goes past or pulls away.
 
 **Headways.** On routes scheduled every 20 minutes or better, the gap between consecutive buses at a stop is compared to
 the scheduled gap. Bunched = under half the scheduled gap; big gap = over 1.5×.
@@ -83,6 +87,8 @@ the scheduled gap. Bunched = under half the scheduled gap; big gap = over 1.5×.
 90 minutes late against the schedule, which in practice means a bus reporting the wrong trip rather than real service
 (counted as "Implausible" in the coverage table below); arrivals whose time can't be pinned down to within 2 minutes
 because the bus's reports around that stop were far apart, usually during a feed outage ("Imprecise" below);
+stops between timepoints where our GPS time and LTD's own record are more than 2 minutes apart as a rule, usually a
+stop whose mapped position isn't where buses really stop ("Doubtful stop" below);
 predictions more than 90 minutes out or made after the bus had arrived; the first stop of a trip for headway purposes.
 
 **Known failure modes we measure rather than assume.** Feed outages, vehicles with stale GPS, trips cancelled without a
@@ -194,6 +200,7 @@ with card():
                         "Stop events scheduled": cov["stop_events_scheduled"],
                         "Observed": cov["stop_events_observed"],
                         "Implausible": cov["stop_events_implausible"],
+                        "Doubtful stop": cov["stop_events_doubtful"],
                         "Imprecise": cov["stop_events_imprecise"],
                         "Feed gaps": pd.to_numeric(cov["gap_minutes"]).fillna(0).astype(float),
                     }
@@ -232,13 +239,19 @@ with card():
                     "Observed": col_count(
                         "Observed",
                         help="Arrivals measured and used on the site (after leaving out the "
-                        "implausible and imprecise ones).",
+                        "ones left out, in the next three columns).",
                     ),
                     "Implausible": col_count(
                         "Implausible",
                         help="Arrivals left out because they were more than 30 min early or 90 "
                         "min late against the timetable: in practice a bus reporting the wrong "
                         "trip, not real service.",
+                    ),
+                    "Doubtful stop": col_count(
+                        "Doubtful stop",
+                        help="Arrivals left out because they were at a stop where our GPS time "
+                        "and LTD's own record are more than 2 minutes apart as a rule (checked "
+                        "over the last 30 days), so neither time can be trusted there.",
                     ),
                     "Imprecise": col_count(
                         "Imprecise",

@@ -14,7 +14,6 @@ from common import (
     REPORT_TABLE_HEIGHT,
     STOP_ROWS_PER_ROUTE,
     TYPICAL_HELP,
-    arrivals_column,
     back_button,
     busy_stops,
     card,
@@ -266,7 +265,7 @@ def route_key(v) -> tuple:
 by_route = q(
     f"""
     select route_id, route_short_name as route, direction_id, count(*) as n,
-           count(*) filter (where status = 'on_time') as on_time,
+           avg(abs(delay_s)) as mean_abs,
            count(*) filter (where status = 'early') as early,
            count(*) filter (where status = 'late') as late,
            percentile_cont(0.5) within group (order by delay_s) as median_delay,
@@ -324,7 +323,7 @@ here = q(
     select percentile_cont(0.5) within group (order by delay_s) as median_delay_s,
            percentile_cont(0.1) within group (order by delay_s) as p10_delay_s,
            percentile_cont(0.9) within group (order by delay_s) as p90_delay_s, count(*) as n,
-           count(*) filter (where status = 'on_time') as n_on_time
+           avg(abs(delay_s)) as mean_abs_delay_s
     from marts.fct_stop_events
     where stop_id = %s and status is not null and service_date >= %s {wt_clause}
     """,
@@ -346,7 +345,7 @@ with routes_slot, card():
                 "hover": f"Route {r.route} here: {int(r.n):,} arrivals measured",
                 "route": r.route,
                 "toward": r.headsign if isinstance(r.headsign, str) else "",
-                **range_fields(r.p10, r.median_delay, r.p90, lo, hi, r.on_time, r.n),
+                **range_fields(r.p10, r.median_delay, r.p90, lo, hi, r.mean_abs),
             }
             for r in tbl.itertuples()
         ],
@@ -354,7 +353,6 @@ with routes_slot, card():
             {"key": "route", "label": "Route", "width": "3.8em", "bold": True},
             {"key": "toward", "label": "Toward", "width": "minmax(6em, 1.2fr)"},
             *range_columns(lo, hi),
-            arrivals_column(),
         ],
         key="stop_routes",
         default_sort="route:asc",

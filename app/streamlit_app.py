@@ -56,14 +56,9 @@ st.html(
     "[data-testid^='stBaseButton'] { min-height: 2.75rem; font-size: 1.05rem;"
     " padding: 0.45rem 1.1rem; }"
     "[data-testid='stPageLink'] p { font-size: 1.05rem; font-weight: 600; }"
-    # buttons that pick a stop on the page (common.stop_buttons): drawn like the stop cards
-    "[class*='st-key-stopbtn_'] button { justify-content: flex-start; text-align: left;"
-    " border-left: 4px solid #4a5a6e; border-radius: 6px; padding: 0.45rem 0.65rem;"
-    " min-height: 0; }"
-    "[class*='st-key-stopbtn_'] button > div { justify-content: flex-start; }"
-    "[class*='st-key-stopbtn_'] button p { text-align: left; }"
-    "[class*='st-key-stopbtn_'] button * { white-space: normal !important;"
-    " overflow: visible !important; text-overflow: clip !important; }"
+    # Streamlit's link-to-this-heading icon (a chain link shown on hover): headings change with
+    # the choices on a page, so such a link would break; the ? help stays
+    "[data-testid='stHeaderActionElements'] a[aria-label='Link to heading'] { display: none; }"
     # the label above every control (Stop, Period, Days, Direction, ...): bold, so it reads as
     # the control's name rather than as text
     "[data-testid='stWidgetLabel'] p { font-size: 1rem !important; font-weight: 650;"

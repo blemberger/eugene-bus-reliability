@@ -1,7 +1,9 @@
 -- Every prediction the feed made, scored against what happened.
 -- horizon_s: how far ahead the prediction was made (predicted arrival − time it
 -- was first asserted). error_s: observed − predicted; positive = bus came later
--- than the sign said. Only stops with a bounded, plausible, precise observed arrival are scored.
+-- than the sign said. Scored against the time fct_stop_events scores for the stop (when the bus
+-- left: LTD's recorded departure at first stops and timepoints, our GPS time elsewhere), so
+-- only stops it scores count, and both measures use the same time.
 
 -- Built incrementally (macros/incremental.sql): each build recomputes the latest two service days.
 
@@ -26,10 +28,9 @@ with preds as (
 
 obs as (
     select service_date, trip_id, stop_sequence, stop_id, route_id, direction_id,
-           scheduled_arrival, observed_arrival, uncertainty_s, is_timepoint
-    from {{ ref('int_observed_arrivals') }}
-    where is_bounded and is_plausible and uncertainty_s <= {{ var('max_uncertainty_seconds') }}
-      and {{ recent_days() }}
+           scheduled_arrival, scored_time as observed_arrival, uncertainty_s, is_timepoint
+    from {{ ref('fct_stop_events') }}
+    where status is not null and {{ recent_days() }}
 )
 
 select

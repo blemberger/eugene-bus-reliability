@@ -18,7 +18,6 @@ from common import (
     col_late,
     col_likely,
     col_minutes,
-    col_pct,
     col_stop,
     col_time,
     col_usual,
@@ -39,7 +38,6 @@ from common import (
     require_db,
     route_picker,
     schedule_join,
-    share_pct,
     show_chart,
     stop_link,
     table,
@@ -370,7 +368,7 @@ def board() -> None:
              and m.direction_id is not distinct from t.direction_id
              and m.hour_local = extract(hour from coalesce(p.arrival_time, p.departure_time) at time zone 'America/Los_Angeles')::int
              and m.weekday_type = case extract(isodow from p.start_date) when 6 then 'saturday' when 7 then 'sunday' else 'weekday' end"""
-        stats_cols = ", m.n_events, m.n_on_time, m.median_delay_s"
+        stats_cols = ", m.n_events, m.median_delay_s"
     upcoming = q_fresh(
         f"""
         select p.trip_id, p.stop_sequence, p.stop_id, t.route_id, t.trip_headsign as headsign, t.direction_id, s.stop_name, r.route_short_name as route,
@@ -490,7 +488,7 @@ def board() -> None:
                     "Predicted": local_times(block["predicted"]).to_numpy(),
                     "In": block["mins"].round().to_numpy(),
                     "Likely in": block["likely_min"].to_numpy(),
-                    "80% of the time": block["usual_range"].to_numpy(),
+                    "8 in 10 buses": block["usual_range"].to_numpy(),
                     "Scheduled": local_times(block["scheduled"]).to_numpy(),
                 }
             )
@@ -499,15 +497,13 @@ def board() -> None:
                 "Predicted": col_time("Predicted"),
                 "In": col_minutes("In", help="Minutes until LTD's predicted time (0 = now)."),
                 "Likely in": col_likely(),
-                "80% of the time": col_usual(),
+                "8 in 10 buses": col_usual(),
                 "Scheduled": col_time("Scheduled"),
             }
             if has_marts:
-                out["Usually on time"] = share_pct(block["n_on_time"], block["n_events"]).to_numpy()
                 out["Usually runs"] = late_minutes(block["median_delay_s"]).to_numpy()
                 out["Sample"] = block["n_events"].to_numpy()
                 config |= {
-                    "Usually on time": col_pct("Usually on time", bar=True),
                     "Usually runs": col_late("Usually runs (min late)"),
                     "Sample": col_count("Sample", help="Arrivals behind the 'usually' numbers."),
                 }

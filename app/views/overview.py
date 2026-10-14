@@ -16,6 +16,7 @@ from common import (
     headline_metrics,
     hourly_lines_chart,
     lateness,
+    lateness_title,
     marts_ready,
     page_filters,
     predictions_card,
@@ -47,7 +48,7 @@ with card():
     start, wt = page_filters()
     period = f"{day_label(wt)} since {fmt_date(start)}"
     title.subheader(
-        f"Which times of day run late{scope.suffix()}?",
+        lateness_title(scope),
         help=LATENESS_CHART_NOTE + f" {period[0].upper() + period[1:]}.",
     )
     tot, hourly = scoped_lateness(start, wt, scope)
@@ -89,7 +90,9 @@ if marts_ready():
             route_table(per, start, key="ov_routes")
     by_stop = lateness(start, wt, "stop")
     if not by_stop.empty:
-        every_stop_card(stops_with_numbers(by_stop), period[0].upper() + period[1:], "ov_stops")
+        every_stop_card(
+            stops_with_numbers(by_stop), period[0].upper() + period[1:], "ov_stops", limit=15
+        )
     trend_card("ov_trend")
     predictions_card("ov_pred", start, wt, period)
 

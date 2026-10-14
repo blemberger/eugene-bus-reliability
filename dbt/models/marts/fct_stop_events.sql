@@ -6,11 +6,13 @@
 -- methods_diff_s are left empty for unbounded arrivals, whose "time" is only the trip's
 -- first report.
 --
--- At a trip's first stop the time that matters is when the bus leaves, but our GPS time is
--- when it got there (often several minutes before it is due out, waiting at the stop). So
--- there, when LTD's feed recorded a departure for a trip we saw running, that departure is
--- the time scored (time_source 'ltd_departure'); everywhere else it is our GPS arrival
--- ('gps').
+-- The time scored is when the bus left the stop. At a trip's first stop and at timepoints,
+-- LTD's feed records that departure itself (a real measurement there, unlike its estimates
+-- between timepoints); our GPS time can instead catch a bus that is waiting (at the first
+-- stop for minutes before it is due out, at a timepoint when it is early and holding). So
+-- there, when LTD recorded a departure for a trip we saw running, that is the time scored
+-- (time_source 'ltd_departure'); everywhere else it is our GPS time ('gps'), except at stops
+-- where our GPS time is doubtful as a rule (int_doubtful_stops), which are not scored.
 
 -- Built incrementally (macros/incremental.sql): each build recomputes the latest two service days.
 
@@ -56,6 +58,10 @@ routes as (
     select feed_version_id, route_id, route_short_name, route_long_name from {{ ref('stg_gtfs__routes') }}
 ),
 
+doubtful as (
+    select route_id, direction_id, stop_id from {{ ref('int_doubtful_stops') }}
+),
+
 joined as (
     select
         s.service_date,
@@ -85,13 +91,14 @@ joined as (
         case when o.is_bounded then extract(epoch from f.settled_time - o.observed_arrival)::int end as methods_diff_s,
         coalesce(
             -- was_skipped is null (not false) for a stop the feed made no remark about
-            s.is_first_stop and f.settled_time is not null
+            (s.is_first_stop or s.is_timepoint) and f.settled_time is not null
             and not coalesce(f.was_skipped, false) and st.trip_id is not null
             and extract(epoch from f.settled_time - s.scheduled_arrival)
                 between -{{ var('plausible_early_seconds') }} and {{ var('plausible_late_seconds') }},
             false
         ) as use_ltd_departure,
-        o.is_bounded and o.is_plausible
+        d.stop_id is not null as is_doubtful,
+        o.is_bounded and o.is_plausible and d.stop_id is null
             and o.uncertainty_s <= {{ var('max_uncertainty_seconds') }} as gps_scorable,
         s.scheduled_arrival as sched_time
     from sched s
@@ -99,6 +106,8 @@ joined as (
     left join seen_trips st on st.trip_id = s.trip_id and st.service_date = s.service_date
     left join obs o on o.trip_id = s.trip_id and o.service_date = s.service_date and o.stop_sequence = s.stop_sequence
     left join settled f on f.trip_id = s.trip_id and f.service_date = s.service_date and f.stop_sequence = s.stop_sequence
+    left join doubtful d on d.route_id = s.route_id and d.stop_id = s.stop_id
+     and d.direction_id is not distinct from s.direction_id
 ),
 
 scored as (
@@ -112,11 +121,14 @@ select
     service_date, trip_id, stop_sequence, stop_id, route_id, route_short_name, direction_id,
     is_timepoint, is_first_stop, is_last_stop, scheduled_arrival, hour_local, weekday_type,
     trip_had_realtime, vehicle_id, observed_arrival, uncertainty_s, is_bounded, is_plausible,
-    is_precise, feed_settled_time, feed_scheduled_time, was_skipped, methods_diff_s,
+    is_precise, is_doubtful, feed_settled_time, feed_scheduled_time, was_skipped, methods_diff_s,
+    -- when the bus left, as scored (status is set): LTD's departure or our GPS time
+    case when scored_time is not null then scored_time end as scored_time,
     case when use_ltd_departure then 'ltd_departure' when observed_arrival is not null then 'gps' end
         as time_source,
     case when use_ltd_departure then extract(epoch from feed_settled_time - sched_time)::int
-         when is_bounded then extract(epoch from observed_arrival - sched_time)::int end as delay_s,
+         when is_bounded and not is_doubtful then extract(epoch from observed_arrival - sched_time)::int
+    end as delay_s,
     case
         when scored_time is null then null
         when extract(epoch from scored_time - sched_time) < -{{ var('early_seconds') }} then 'early'

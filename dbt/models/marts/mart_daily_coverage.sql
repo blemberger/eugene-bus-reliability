@@ -46,8 +46,11 @@ events as (
         count(*)                                        as stop_events_scheduled,
         count(*) filter (where trip_had_realtime)       as stop_events_trip_seen,
         count(*) filter (where status is not null)      as stop_events_observed,
-        count(*) filter (where is_bounded and not is_plausible) as stop_events_implausible,
-        count(*) filter (where is_bounded and is_plausible and not is_precise) as stop_events_imprecise,
+        -- left out (no status), one reason each: implausible, then doubtful stop, then imprecise
+        count(*) filter (where status is null and is_bounded and not is_plausible) as stop_events_implausible,
+        count(*) filter (where status is null and is_bounded and is_plausible and is_doubtful) as stop_events_doubtful,
+        count(*) filter (where status is null and is_bounded and is_plausible and not is_doubtful
+                           and not is_precise) as stop_events_imprecise,
         count(distinct trip_id)                         as trips_scheduled,
         count(distinct trip_id) filter (where trip_had_realtime) as trips_seen,
         count(*) filter (where is_first_stop and due)                       as trips_due,
@@ -83,6 +86,7 @@ select
     e.trips_due, e.trips_reported, e.mid_stops_due, e.mid_stops_timed,
     e.stop_events_scheduled, e.stop_events_trip_seen, e.stop_events_observed,
     e.stop_events_implausible,
+    e.stop_events_doubtful,
     e.stop_events_imprecise
 from events e
 left join fetch_day f using (service_date)

@@ -14,7 +14,6 @@ from common import (
     LINE_MAIN,
     MARKER_MAIN,
     REPORT_TABLE_HEIGHT,
-    arrivals_column,
     back_button,
     card,
     clean_headsign,
@@ -139,7 +138,7 @@ dir_params: tuple = (direction,) if direction is not None else ()
 
 # ---- the route's numbers, and every stop on it ----------------------------------------------
 numbers_sql = f"""
-    select count(*) as n, count(*) filter (where status = 'on_time') as n_on_time,
+    select count(*) as n, avg(abs(delay_s)) as mean_abs_delay_s,
            percentile_cont(0.5) within group (order by delay_s) as median_delay,
            percentile_cont(0.1) within group (order by delay_s) as p10_delay_s,
            percentile_cont(0.9) within group (order by delay_s) as p90_delay_s
@@ -161,7 +160,7 @@ today = q(
 along = q(
     f"""
     select e.stop_sequence, s.stop_name, bool_or(e.is_timepoint) as is_timepoint, e.stop_id,
-           count(*) as n, count(*) filter (where e.status = 'on_time') as n_on_time,
+           count(*) as n, avg(abs(e.delay_s)) as mean_abs,
            percentile_cont(0.5) within group (order by e.delay_s) as median_delay,
            percentile_cont(0.1) within group (order by e.delay_s) as p10,
            percentile_cont(0.9) within group (order by e.delay_s) as p90
@@ -194,7 +193,7 @@ with table_slot, card():
                     "hover": f"{r.stop_name}: {int(r.n):,} arrivals measured",
                     "seq": int(r.stop_sequence),
                     "stop": r.stop_name,
-                    **range_fields(r.p10_s, r.med_s, r.p90_s, lo, hi, r.n_on_time, r.n),
+                    **range_fields(r.p10_s, r.med_s, r.p90_s, lo, hi, r.mean_abs),
                 }
                 for r in along.itertuples()
             ],
@@ -209,7 +208,6 @@ with table_slot, card():
                 },
                 {"key": "stop", "label": "Stop", "width": "minmax(10em, 2fr)", "bold": True},
                 *range_columns(lo, hi),
-                arrivals_column(),
             ],
             max_height=REPORT_TABLE_HEIGHT,
             key="route_stops",
