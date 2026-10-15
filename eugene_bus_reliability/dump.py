@@ -1226,8 +1226,8 @@ def main(settings: Settings, raw: bool = False) -> None:
             print(f"(not available: {e})")
 
         section(
-            "DOUBTFUL STOPS left out (int_doubtful_stops): our GPS time and LTD's record over 2 min "
-            "apart as a rule"
+            "DOUBTFUL STOPS left out (int_doubtful_stops): our GPS time over 2 min out of line "
+            "with the stops either side, as a rule"
         )
         show(
             cur,
@@ -1244,8 +1244,8 @@ def main(settings: Settings, raw: bool = False) -> None:
         show(
             cur,
             """
-            select r.route_short_name route, d.direction_id dir, s.stop_name, s.stop_code, d.n timed_both_ways,
-                   round(d.median_diff_s::numeric) ltd_minus_gps_median_s
+            select r.route_short_name route, d.direction_id dir, s.stop_name, s.stop_code, d.n trips,
+                   round(d.median_spike_s::numeric) median_spike_s
             from intermediate.int_doubtful_stops d
             left join gtfs.stops s on s.stop_id = d.stop_id
              and s.feed_version_id = (select max(feed_version_id) from gtfs.feed_version)
@@ -1254,6 +1254,56 @@ def main(settings: Settings, raw: bool = False) -> None:
             order by 1, 2, 3
         """,
             limit=60,
+        )
+        print(
+            "The previous rule (LTD's time and ours over 2 min apart as a rule), for comparison: how\n"
+            "many stops it flagged, how many of those the new rule flags too, and the spike at the\n"
+            "rest. Spikes near 0 there: our time was in line with its neighbours, so LTD's estimate,\n"
+            "not our time, was what was off (the reason for the change)."
+        )
+        show(
+            cur,
+            """
+            with old as (
+                select o.route_id, o.direction_id, o.stop_id
+                from intermediate.int_observed_arrivals o
+                join intermediate.int_feed_settled_times f
+                  on f.trip_id = o.trip_id and f.service_date = o.service_date
+                 and f.stop_sequence = o.stop_sequence
+                where o.is_bounded and f.is_settled and o.service_date >= current_date - 30
+                group by 1, 2, 3
+                having count(*) >= 20 and abs(percentile_cont(0.5) within group (
+                    order by extract(epoch from f.settled_time - o.observed_arrival))) > 120
+            ),
+            ours as (
+                select service_date, trip_id, stop_sequence, route_id, direction_id, stop_id,
+                       extract(epoch from observed_arrival - scheduled_arrival) late_s
+                from intermediate.int_observed_arrivals
+                where is_bounded and is_plausible and service_date >= current_date - 30
+                  and not is_first_stop and not is_last_stop
+            ),
+            spikes as (
+                select route_id, direction_id, stop_id,
+                       late_s - (lag(late_s) over w + lead(late_s) over w) / 2.0 spike_s
+                from ours window w as (partition by service_date, trip_id order by stop_sequence)
+            ),
+            per_stop as (
+                select route_id, direction_id, stop_id,
+                       percentile_cont(0.5) within group (order by spike_s) median_spike_s
+                from spikes where spike_s is not null group by 1, 2, 3
+            )
+            select count(*) old_rule_stops,
+                   count(*) filter (where n.stop_id is not null) also_new_rule,
+                   round(percentile_cont(0.5) within group (order by p.median_spike_s)::numeric)
+                       median_spike_s,
+                   round(percentile_cont(0.9) within group (order by abs(p.median_spike_s))::numeric)
+                       p90_abs_spike_s
+            from old o
+            left join per_stop p on p.route_id = o.route_id and p.stop_id = o.stop_id
+             and p.direction_id is not distinct from o.direction_id
+            left join intermediate.int_doubtful_stops n on n.route_id = o.route_id
+             and n.stop_id = o.stop_id and n.direction_id is not distinct from o.direction_id
+        """,
         )
 
         section("POSITIONS off the route shape (detours / bad fixes)")

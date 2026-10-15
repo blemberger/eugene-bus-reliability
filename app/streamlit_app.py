@@ -55,13 +55,22 @@ st.html(
     " padding: 0.4rem 1.05rem; }"
     "[data-testid^='stBaseButton'] { min-height: 2.75rem; font-size: 1.05rem;"
     " padding: 0.45rem 1.1rem; }"
-    # a link to another page ("All 43 stops →"): the green of every such link (common.GO_COLOUR)
-    "[data-testid='stPageLink'] p { font-size: 1.05rem; font-weight: 600; color: #1d6b48; }"
+    # a link to another page ("All 43 stops →", "Route 11's report card →"): an outlined button
+    # in the green of every such link (common.GO_COLOUR); the way back below is the same shape
+    # in blue
+    "[data-testid='stPageLink'] a { display: inline-flex; width: auto;"
+    " border: 2px solid #1d6b48; border-radius: 8px; background: #ffffff;"
+    " padding: 0.35rem 1rem; min-height: 2.6rem; }"
+    "[data-testid='stPageLink'] a:hover { background: #e8f3ee; }"
+    "[data-testid='stPageLink'] p { font-size: 1.05rem; font-weight: 650; color: #1d6b48; }"
     # Streamlit's link-to-this-heading icon (a chain link shown on hover): headings change with
     # the choices on a page, so such a link would break; the ? help stays
     "[data-testid='stHeaderActionElements'] a[aria-label='Link to heading'] { display: none; }"
     # a link that opens a page at a section (#predictions) leaves its heading clear of the top bar
     "h3[id] { scroll-margin-top: 5.5rem; }"
+    # the period and days buttons repeated further down a long page (common.filters_again): set
+    # apart a little from the card above
+    "[class*='st-key-filters_again'] { margin-top: 0.6rem; }"
     # the label above every control (Stop, Period, Days, Direction, ...): bold, so it reads as
     # the control's name rather than as text
     "[data-testid='stWidgetLabel'] p { font-size: 1rem !important; font-weight: 650;"

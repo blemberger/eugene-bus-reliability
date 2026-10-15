@@ -45,6 +45,11 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--once", action="store_true", help="run dbt build once and exit (for testing)")
 
     p = sub.add_parser(
+        "static-site", help="write the plain report pages, sitemap and robots.txt (STATIC_SITE_DIR)"
+    )
+    p.add_argument("--out", help="write here instead of STATIC_SITE_DIR (default /site)")
+
+    p = sub.add_parser(
         "wait-ready",
         help="wait until the analysis is rebuilt for the current code, printing progress",
     )
@@ -109,6 +114,12 @@ def main(argv: list[str] | None = None) -> None:
             scheduler.run_dbt_build(settings)
         else:
             scheduler.main(settings)
+    elif args.cmd == "static-site":
+        from pathlib import Path
+
+        from eugene_bus_reliability import static_site
+
+        static_site.build(settings.database_url, Path(args.out) if args.out else None)
     elif args.cmd == "wait-ready":
         from eugene_bus_reliability import scheduler
 

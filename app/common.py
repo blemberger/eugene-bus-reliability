@@ -43,8 +43,9 @@ STATUS_COLOR = {
 #   main line of a chart. Blue: it says nothing about good or bad, so it never competes with...
 # - the status colours (STATUS_COLOR): green = on time, amber = early, red = late, on the stop
 #   map. Kept for meaning only, never for decoration.
-# - ON_TIME_LINE: the timetable itself (0 minutes) in charts and tables, a dashed dark grey
-#   line: a reference to read against, not a result, so it carries no status colour.
+# - ON_TIME_LINE: the timetable itself (0 minutes) in charts and tables, and the printed
+#   timetable's line on the prediction charts: a dashed dark grey line, a reference to read
+#   against, not a result, so it carries no status colour.
 # - ROUTE_COLOUR: route cards, a deep green (a route is a line through town, like a green
 #   transit line on a map; stops, places, keep the site's blue). Darker and bluer than the
 #   on-time green, and only ever a card's edge or a link's text, so it never reads as "on time".
@@ -69,75 +70,12 @@ def require_db() -> None:
         st.stop()
 
 
-_COMPASS = {
-    "N": "north",
-    "S": "south",
-    "E": "east",
-    "W": "west",
-    "NE": "northeast",
-    "NW": "northwest",
-    "SE": "southeast",
-    "SW": "southwest",
-}
-_STOP_WORDS = {
-    "SPFLD": "Springfield",
-    "STA": "Station",
-    "STN": "Station",
-    "CTR": "Center",
-    "MKTPL": "Marketplace",
-    "HWY": "Hwy",
-    "EUG": "Eugene",
-}
-_SIDE = r"(?P<side>[NSEW])/\s?S\.?\s+of\s+"
-_STOP_RULES = [
-    (
-        "side, street, direction of cross street",
-        re.compile(
-            _SIDE + r"(?P<street>.+?)\s+(?P<dir>NE|NW|SE|SW|N|S|E|W)\.?\s+of\s+(?P<cross>.+)$", re.I
-        ),
-        "{street} {dir} of {cross} ({side} side)",
-    ),
-    (
-        "side, street at cross street",
-        re.compile(_SIDE + r"(?P<street>.+?)\s+(?:at|@|&|and)\s+(?P<cross>.+)$", re.I),
-        "{street} at {cross} ({side} side)",
-    ),
-    ("side, street only", re.compile(_SIDE + r"(?P<street>.+)$", re.I), "{street} ({side} side)"),
-]
-STOP_NAME_COLUMNS = ("stop_name", "next_stop", "stop2", "name1", "name2")
-
-
-def _tidy_words(s: str) -> str:
-    out = []
-    for w in s.split():
-        key = w.strip(".,").upper()
-        if key in _STOP_WORDS:
-            out.append(_STOP_WORDS[key])
-        elif w.isupper() and len(w) > 3 and w.isalpha():  # "HILYARD" -> "Hilyard"; keep "LCC", "UO"
-            out.append(w.capitalize())
-        else:
-            out.append(w)
-    return " ".join(out)
-
-
-def stop_name_rule(name) -> tuple[str, str | None]:
-    """(readable name, the rule that produced it or None if no rule matched)."""
-    if name is None or (isinstance(name, float) and math.isnan(name)):
-        return "", None
-    raw = " ".join(str(name).split())
-    for label, rx, template in _STOP_RULES:
-        m = rx.match(raw)
-        if m:
-            parts = {k: _tidy_words(v) for k, v in m.groupdict().items()}
-            parts["side"] = m.group("side").upper()  # "(S side)": short, it's on every stop
-            if "dir" in parts:
-                parts["dir"] = _COMPASS[m.group("dir").upper()]
-            return template.format(**parts), label
-    return _tidy_words(raw), None
-
-
-def clean_stop_name(name) -> str:
-    return stop_name_rule(name)[0]
+# stop names as people read them (shared with the plain report pages)
+from eugene_bus_reliability.names import (  # noqa: E402
+    STOP_NAME_COLUMNS,
+    clean_stop_name,
+    stop_name_rule,  # noqa: F401 — used by app/selfcheck.py
+)
 
 
 def readable_stop_names(df: pd.DataFrame) -> pd.DataFrame:
@@ -1385,6 +1323,7 @@ def page_filters() -> tuple[date, str | None]:
     # remember the choice for the next page, and show it in the address
     st.session_state["_f_period"], st.session_state["_f_days"] = period, day
     st.session_state["_f_dow"] = one or "all"
+    st.session_state["_f_wt"] = wt  # for the titles (days_suffix)
     for param, value, default in (
         ("period", period, DEFAULT_PERIOD),
         ("days", day, "all"),
@@ -1395,6 +1334,62 @@ def page_filters() -> tuple[date, str | None]:
         else:
             st.query_params.pop(param, None)
     return start, wt
+
+
+def days_suffix() -> str:
+    """The days the page's numbers cover, for a title: ' on Saturdays', ' on weekdays',
+    ' on Mondays'; nothing for all days (the default). Every title whose chart or table follows
+    the days filter ends with it, so what is shown is always said where it is shown."""
+    wt = st.session_state.get("_f_wt")
+    if not wt:
+        return ""
+    return f" on {day_label(wt)}"
+
+
+def current_days() -> str | None:
+    """The page's days filter (as page_filters() returned it), for charts drawn without it."""
+    return st.session_state.get("_f_wt")
+
+
+def _mirror(name: str) -> None:
+    """A click on the repeated filter buttons (filters_again) sets the page's own."""
+    v = st.session_state.get(f"f2_{name}")
+    if v is not None:
+        st.session_state[f"f_{name}"] = v
+
+
+def filters_again() -> None:
+    """The page's period and days buttons again, further down a long page: they show what
+    everything below follows, and change it from here (the same choice as at the top)."""
+    with st.container(key="filters_again"):  # styled in streamlit_app.py
+        c1, c2 = st.columns([1, 1])
+        for name in ("period", "days", "dow"):
+            st.session_state[f"f2_{name}"] = st.session_state.get(f"_f_{name}")
+        c1.segmented_control(
+            "Period",
+            list(PERIODS),
+            format_func=PERIODS.get,
+            key="f2_period",
+            on_change=_mirror,
+            args=("period",),
+        )
+        c2.segmented_control(
+            "Days",
+            list(DAY_CHOICES),
+            format_func=DAY_CHOICES.get,
+            key="f2_days",
+            on_change=_mirror,
+            args=("days",),
+        )
+        if st.session_state.get("_f_days") == "weekday":
+            c2.segmented_control(
+                "Which weekday",
+                ["all", *WEEKDAYS],
+                format_func=lambda d: "All weekdays" if d == "all" else d,
+                key="f2_dow",
+                on_change=_mirror,
+                args=("dow",),
+            )
 
 
 def filter_query() -> str:
@@ -1429,7 +1424,8 @@ def day_label(wt: str | None) -> str:
         return "all days"
     if wt.startswith("dow:"):
         return ["Mondays", "Tuesdays", "Wednesdays", "Thursdays", "Fridays"][int(wt[4:]) - 1]
-    return weekday_type_label(wt).lower()
+    # 'weekdays'; day names keep their capital ('Saturdays')
+    return "weekdays" if wt == "weekday" else weekday_type_label(wt)
 
 
 HEADSIGN_WORDS = {
@@ -1665,16 +1661,43 @@ NOT_ENOUGH_HOURLY = "Not enough arrivals yet for this chart (needs {n} in an hou
 
 PREDICTION_OFF_NOTE = (
     "How many minutes, on average, the bus came from the time it was given, early or late "
-    "alike; lower is better. Thick line with dots: LTD's real-time predictions (what apps like "
-    "Transit show), by how many minutes away the prediction said the bus was. Thin straight line: "
-    "the printed timetable for the same bus arrivals (flat, because the timetable doesn't change "
-    "as the bus gets nearer). Minutes away is what the prediction said at the time, not when the "
+    "alike; lower is better. Line with dots: LTD's real-time predictions (what apps like "
+    "Transit show), by how many minutes away the prediction said the bus was; the shading is "
+    "the range 8 buses in 10 were off by. Dashed line: the printed timetable for the same bus "
+    "arrivals (flat, because the timetable doesn't change as the bus gets nearer). Minutes away is what the prediction said at the time, not when the "
     "bus actually came. Measured on bus arrivals that had a prediction 15 minutes out, each "
     "counted once at each distance; points with fewer than 20 are left out."
 )
 
 # the key for "every route together" in prediction_off() and countdown_off_chart()
 ALL_ROUTES = ""
+
+
+# The minutes-off thresholds (seconds) the prediction marts keep running counts for (n_le_15s,
+# ...): the same list as dbt/macros/error_counts.sql.
+ERROR_THRESHOLDS = [15, 30, 45, 60, 90, 120, 150, 180, 240, 300, 360, 480, 600, 900]
+ERROR_COUNT_SUMS = ", ".join(f"sum(n_le_{t}s) as n_le_{t}s" for t in ERROR_THRESHOLDS)
+
+
+def off_percentile(row, share: float) -> float | None:
+    """Minutes off (in minutes) that `share` of the arrivals in a prediction_off() row came
+    within, read off its running counts (straight-line between thresholds). None without the
+    counts; the last threshold when more than that are further off."""
+    n = row.get("n")
+    if n is None or pd.isna(n) or not n or f"n_le_{ERROR_THRESHOLDS[0]}s" not in row:
+        return None
+    want = share * float(n)
+    prev_t, prev_c = 0.0, 0.0
+    for t in ERROR_THRESHOLDS:
+        c = row.get(f"n_le_{t}s")
+        if c is None or pd.isna(c):
+            return None
+        c = float(c)
+        if c >= want:
+            frac = 0.0 if c == prev_c else (want - prev_c) / (c - prev_c)
+            return (prev_t + frac * (t - prev_t)) / 60
+        prev_t, prev_c = float(t), c
+    return ERROR_THRESHOLDS[-1] / 60
 
 
 def prediction_off(start: date, wt: str | None) -> pd.DataFrame:
@@ -1688,7 +1711,8 @@ def prediction_off(start: date, wt: str | None) -> pd.DataFrame:
             f"""
             select basis, ahead_min,
                    case when grouping(route_id) = 0 then route_id end as route_id,
-                   sum(n) as n, sum(sum_abs_s)::float8 / nullif(sum(n), 0) as mean_abs_s
+                   sum(n) as n, sum(sum_abs_s)::float8 / nullif(sum(n), 0) as mean_abs_s,
+                   {ERROR_COUNT_SUMS}
             from marts.mart_prediction_daily
             where service_date >= %s {clause}
             group by grouping sets ((basis, ahead_min), (basis, ahead_min, route_id))
@@ -1712,7 +1736,8 @@ def _prediction_stop_rows(
         return q(
             f"""
             select basis, ahead_min, case when grouping({key}) = 0 then {key} end as route_id,
-                   sum(n) as n, sum(sum_abs_s)::float8 / nullif(sum(n), 0) as mean_abs_s
+                   sum(n) as n, sum(sum_abs_s)::float8 / nullif(sum(n), 0) as mean_abs_s,
+                   {ERROR_COUNT_SUMS}
             from marts.mart_prediction_stop_daily
             where {where} and service_date >= %s {clause}
             group by grouping sets ((basis, ahead_min), (basis, ahead_min, {key}))
@@ -1781,10 +1806,11 @@ def countdown_off_chart(
     min_n: int = 20,
     colors: dict[str, str] | None = None,
 ) -> go.Figure | None:
-    """Average minutes off against how many minutes away the prediction said the bus was. For
-    each selected key (ALL_ROUTES or a route id) two lines in one colour: the prediction (thick,
-    with dots) and the printed timetable for the same arrivals (thin, straight). None when
-    nothing selected has two points to draw."""
+    """Average minutes off against how many minutes away the prediction said the bus was, for
+    each selected key (ALL_ROUTES or a route id): the prediction (thick, with dots), with the
+    band 8 in 10 buses fell in when one key is shown (as on the lateness charts), and the
+    printed timetable for the same arrivals (a dashed grey reference line, as the on-time line
+    is on the lateness charts). None when nothing selected has two points to draw."""
     if df.empty or not selected:
         return None
     df = df.assign(
@@ -1798,6 +1824,7 @@ def countdown_off_chart(
     colors = (
         line_colours("countdown", selected) if colors is None else colors
     )  # callers pass theirs
+    one = len(selected) == 1
     fig = go.Figure()
     drawn = 0
     for rank, key in enumerate(selected):
@@ -1808,6 +1835,25 @@ def countdown_off_chart(
         label = all_label if key == ALL_ROUTES else names.get(key, key)
         colour = colors.get(key, BRAND if key == ALL_ROUTES else "#777777")
         t = tt.get(key)
+        lows = [off_percentile(r, 0.1) for r in g.to_dict("records")]
+        highs = [off_percentile(r, 0.9) for r in g.to_dict("records")]
+        has_band = one and all(v is not None for v in lows + highs)
+        if has_band:
+            x = list(g["ahead_min"])
+            fig.add_trace(
+                go.Scatter(
+                    x=x + x[::-1],
+                    y=highs + lows[::-1],
+                    fill="toself",
+                    fillcolor=colour,
+                    opacity=0.18,
+                    mode="lines",
+                    line_width=0,
+                    hoverinfo="skip",
+                    name="8 in 10 buses",
+                    legendrank=2,
+                )
+            )
         fig.add_trace(
             go.Scatter(
                 x=g["ahead_min"],
@@ -1816,15 +1862,23 @@ def countdown_off_chart(
                 # one choice per chart, named in the chart's title: the legend says which line is
                 # which
                 name="Predictions",
-                legendgroup=key or "all",
-                legendrank=2 * rank,
+                # paired in the legend only when several choices are drawn
+                legendgroup=None if one else key or "all",
+                legendrank=1 if one else 3 * rank,
                 line={"color": colour, "width": LINE_MAIN},
                 marker={"size": MARKER_MAIN},
                 hovertext=[
                     f"<b>{label}</b><br>predicted {int(m)} min away: {o:.1f} min off on average"
+                    + (
+                        f"<br>8 in 10 buses: {lo:.1f} to {hi:.1f} min off"
+                        if has_band and lo is not None and hi is not None
+                        else ""
+                    )
                     + (f"<br>printed timetable: {t:.1f} min off" if t is not None else "")
                     + f"<br>{int(n):,} bus arrivals"
-                    for m, o, n in zip(g["ahead_min"], g["off"], g["n"], strict=False)
+                    for m, o, n, lo, hi in zip(
+                        g["ahead_min"], g["off"], g["n"], lows, highs, strict=False
+                    )
                 ],
                 hoverinfo="text",
             )
@@ -1836,9 +1890,9 @@ def countdown_off_chart(
                     y=[t, t],
                     mode="lines",
                     name="Printed timetable",
-                    legendgroup=key or "all",
-                    legendrank=2 * rank + 1,
-                    line={"color": colour, "width": 1.6},
+                    legendgroup=None if one else key or "all",
+                    legendrank=3 if one else 3 * rank + 1,
+                    line={"color": TIMETABLE_LINE if one else colour, "width": 2.6, "dash": "dash"},
                     hovertemplate=f"<b>Printed timetable ({in_parens(label)})</b><br>{t:.1f} min off on "
                     "average, for the same bus arrivals<extra></extra>",
                 )
@@ -1847,17 +1901,16 @@ def countdown_off_chart(
         return None
     fig.update_layout(
         xaxis={"title": "Minutes away", "range": [0, 15.5], "dtick": 5, "zeroline": False},
-        # fitted to the lines, not from zero: the differences are what the chart is for
-        yaxis={"title": "Average minutes off", "zeroline": False},
-        # each choice's two lines (predictions, timetable) stacked as a pair in the legend
+        # from zero once the band is drawn (it starts near 0); fitted to the lines otherwise
+        yaxis={"title": "Average minutes off", "zeroline": False, "rangemode": "tozero"},
+        # the entries side by side in one row above the plot (they wrap when there are many)
         legend={
             "orientation": "h",
             "yanchor": "bottom",
             "y": 1.02,
             "x": 0,
             "xanchor": "left",
-            "traceorder": "grouped",
-            "tracegroupgap": 18,
+            "traceorder": "normal" if one else "grouped",
         },
         hovermode="closest",
         height=440,
@@ -1866,6 +1919,8 @@ def countdown_off_chart(
 
 
 ON_TIME_LINE = "#4b5563"
+# the printed timetable on the prediction charts: the same reference, drawn the same way
+TIMETABLE_LINE = ON_TIME_LINE
 
 # One look for every chart on the site: line weights, the grey of comparison lines, and (in
 # show_chart) the text sizes and behaviour.
@@ -1961,7 +2016,7 @@ def service_hour_key(h) -> int:
 
 LATENESS_CHART_NOTE = (
     "Against the printed timetable, by the hour the bus was scheduled. The line is the typical "
-    "bus (the median); below the green line = early. The shaded band is where 8 in 10 buses "
+    "bus (the median); below the dashed line = early. The shaded band is where 8 in 10 buses "
     "fell. Hover a point for the numbers. When each bus reached each stop is worked out from "
     "its GPS reports (see Data & methods)."
 )
@@ -2119,7 +2174,7 @@ def hourly_lines_chart(
 # the help text of the hour-by-hour charts on the report cards, where lines can be compared
 LINES_HELP = (
     "Against the printed timetable, by the hour the bus was scheduled. Each line is the typical "
-    "bus (the median); below the green line = early. With one line showing, the shaded band is "
+    "bus (the median); below the dashed line = early. With one line showing, the shaded band is "
     "where 8 in 10 of its buses fell. {choose} An hour needs 5 arrivals to show. Hover a point "
     "for the numbers."
 )
@@ -2222,13 +2277,14 @@ def _weighted_median(values: pd.Series, weights: pd.Series) -> float:
     return float(values.loc[order][cum >= cum.iloc[-1] / 2].iloc[0])
 
 
-def trend_chart(scope_where: dict) -> None:
+def trend_chart(scope_where: dict, wt: str | None = None) -> None:
     """The typical bus over time for one choice of route, direction and stop, with the band 8 in
     10 buses fell in, as on the chart by time of day: one point per day from
     marts.mart_trend_daily (all days, all data); per week once there are more than
     TREND_MAX_POINTS days, per month after that many weeks (then each point is the typical
     day's: the median of the days' typical buses, and the average of their ranges, weighted by
-    arrivals). scope_where: route_id, direction_id, stop_id (None = all)."""
+    arrivals). scope_where: route_id, direction_id, stop_id (None = all); wt: the page's days
+    filter (all data, but only those days)."""
     conds, params = [], []
     for col, flag in (
         ("route_id", "by_route"),
@@ -2241,12 +2297,19 @@ def trend_chart(scope_where: dict) -> None:
         else:
             conds.append(f"{flag} and {col} = %s")
             params.append(v)
+    day_clause, day_params = day_sql(
+        wt,
+        "service_date",
+        "(case extract(isodow from service_date) when 6 then 'saturday' when 7 then 'sunday' "
+        "else 'weekday' end)",
+    )
     try:
         daily = q(
             "select service_date as d, n, median_delay_s as median_delay, p10_delay_s as p10, "
             "p90_delay_s as p90 "
-            f"from marts.mart_trend_daily where {' and '.join(conds)} and n >= 5 order by 1",
-            tuple(params),
+            f"from marts.mart_trend_daily where {' and '.join(conds)} and n >= 5 {day_clause} "
+            "order by 1",
+            (*params, *day_params),
         )
     except Exception:  # noqa: BLE001 — the table is being rebuilt
         daily = pd.DataFrame()
@@ -2367,7 +2430,8 @@ def every_stop_card(
     lo, hi = range_scale(rows_df)
     with card():
         st.subheader(
-            "How reliable are the busiest stops?" if limit else "How reliable is each stop?",
+            ("How reliable are the busiest stops" if limit else "How reliable is each stop")
+            + f"{days_suffix()}?",
             help=f"{period}, stops with at least 20 measured arrivals, busiest first. Click a "
             "column heading to sort, again to reverse.",
         )
@@ -2567,7 +2631,7 @@ def scope_picker(
 def lateness_title(scope: Scope) -> str:
     """The title of every 'when are the buses late' chart (Overview, report cards), naming the
     route and stop chosen: the chart shows both the typical bus and the spread."""
-    return f"How late are the buses{scope.suffix()}?"
+    return f"How late are the buses{scope.suffix()}{days_suffix()}?"
 
 
 def scoped_lateness(
@@ -2630,10 +2694,12 @@ def trend_card(
         title = st.empty()
         scope = scope_picker(key, fixed_route, fixed_stop, direction)
         title.subheader(
-            f"Is lateness getting better or worse{scope.suffix()}?", help=TREND_HELP + help_extra
+            f"Is lateness getting better or worse{scope.suffix()}{days_suffix()}?",
+            help=TREND_HELP + help_extra,
         )
         trend_chart(
-            {"route_id": scope.route_id, "direction_id": direction, "stop_id": scope.stop_id}
+            {"route_id": scope.route_id, "direction_id": direction, "stop_id": scope.stop_id},
+            current_days(),
         )
 
 
@@ -2657,7 +2723,8 @@ def prediction_scope_rows(
         return q(
             f"""
             select basis, ahead_min, null::text as route_id, sum(n) as n,
-                   sum(sum_abs_s)::float8 / nullif(sum(n), 0) as mean_abs_s
+                   sum(sum_abs_s)::float8 / nullif(sum(n), 0) as mean_abs_s,
+                   {ERROR_COUNT_SUMS}
             from marts.mart_prediction_stop_daily
             where service_date >= %s {where} {clause}
             group by 1, 2
@@ -2685,7 +2752,7 @@ def predictions_card(
         title = st.empty()
         scope = scope_picker(key, fixed_route, fixed_stop, direction)
         title.subheader(
-            f"How far off are the predictions{scope.suffix()}?",
+            f"How far off are the predictions{scope.suffix()}{days_suffix()}?",
             # links from the Predictions page's tables open a report card here (#predictions)
             anchor="predictions",
             help=PREDICTION_OFF_NOTE + f" {period[0].upper() + period[1:]}{help_extra}.",
@@ -2727,8 +2794,8 @@ TREND_HELP = (
     "all days, one point per day: per week once there "
     f"are more than {TREND_MAX_POINTS} days of data, per month after {TREND_MAX_POINTS} weeks "
     "(then each point is the typical day's). "
-    "Points with fewer than 5 arrivals are left out. All data: this chart doesn't follow the "
-    "period and days filters."
+    "Points with fewer than 5 arrivals are left out. All data, so this chart doesn't follow the "
+    "period filter; it does follow the days filter."
 )
 
 
@@ -2772,13 +2839,20 @@ _TABLE_CSS = """
          text-decoration: none; }
 a.ebw-r:hover { background: #eaf1f9; }
 .ebw-h { position: sticky; top: 0; order: -1; background: #f6f8f9; font-weight: 600;
-         align-items: end; font-size: 13px; color: #555; z-index: 1; }
-.ebw-h > div { white-space: nowrap; }  /* a heading on one line, over its column */
-.ebw-h label { cursor: pointer; user-select: none; }
-.ebw-h label:hover { color: #1f5f9e; }
+         align-items: stretch; font-size: 13px; color: #555; z-index: 1; padding: 0 12px; }
+/* a heading on one line, centred over its column (names, left, over theirs); the whole
+   heading, gaps beside it included, is the button that sorts by it */
+.ebw-h > div { white-space: nowrap; display: flex; align-items: flex-end;
+               justify-content: center; padding: 7px 0; }
+.ebw-h > div.ebw-left { justify-content: flex-start; }
+.ebw-h > div.ebw-hc { padding: 0; }
+.ebw-h label { cursor: pointer; user-select: none; display: flex; align-items: flex-end;
+               justify-content: inherit; width: calc(100% + 14px); margin: 0 -7px;
+               padding: 7px; box-sizing: border-box; }
+.ebw-h label:hover { color: #1f5f9e; background: #edf1f5; }
 .ebw-so::after { content: ' ↕'; color: #b5b5b5; }
 .ebw-sr { display: none; }
-.ebw-n { text-align: right; font-variant-numeric: tabular-nums; }
+.ebw-n { text-align: center; font-variant-numeric: tabular-nums; }
 .ebw-c { text-align: center; }
 .ebw-go { color: GO; font-weight: 700; text-align: right; white-space: nowrap; }
 .ebw-go-t { font-weight: 600; font-size: 13px; }
@@ -2906,7 +2980,9 @@ def link_table(
     radios = []
     head = []
     for j, c in enumerate(columns):
-        cls = ("ebw-n " if c.get("num") else "") + ("ebw-hide" if c.get("hide_on_phone") else "")
+        cls = ("ebw-left " if not (c.get("num") or c.get("html")) else "") + (
+            "ebw-hide" if c.get("hide_on_phone") else ""
+        )
         label = html_escape(c["label"])
         tip = html_escape(c.get("help", ""))
         if j not in ranks:
@@ -2928,15 +3004,15 @@ def link_table(
                 f"{{ content: ' {arrow}'; color: {BRAND}; }}"
             )
         css.append(
-            f".{rid}-2 {{ display: none; }}"
-            f"#{rid}-{first}:checked ~ .ebw-t .{rid}-1 {{ display: none; }}"
-            f"#{rid}-{first}:checked ~ .ebw-t .{rid}-2 {{ display: inline; }}"
+            f".ebw-h label.{rid}-2 {{ display: none; }}"
+            f"#{rid}-{first}:checked ~ .ebw-t .ebw-h label.{rid}-1 {{ display: none; }}"
+            f"#{rid}-{first}:checked ~ .ebw-t .ebw-h label.{rid}-2 {{ display: flex; }}"
         )
         head.append(
-            f"<div class='{cls}' title='{tip}'><span class='ebw-so {rid}-h'>"
-            f"<label for='{rid}-{first}' class='{rid}-1'>{label}</label>"
-            f"<label for='{rid}-{other}' class='{rid}-2'>{label}</label></span>"
-            f"{c.get('axis', '')}</div>"
+            f"<div class='{cls} ebw-hc' title='{tip}'>"
+            f"<label for='{rid}-{first}' class='{rid}-1'><span class='ebw-so {rid}-h'>{label}"
+            f"</span></label><label for='{rid}-{other}' class='{rid}-2'>"
+            f"<span class='ebw-so {rid}-h'>{label}</span></label>{c.get('axis', '')}</div>"
         )
 
     def row(i: int, r: dict) -> str:
@@ -3286,6 +3362,8 @@ def data_note(start: date | None = None) -> None:
         line += " " + build_status()
     st.caption(
         line + " [How it's measured](/methods) · "
+        # plain pages with the headline numbers (static_site.py): quick to load and to share
+        "[Every route and stop on one page](/reports/) · "
         "[Source code on GitHub](https://github.com/blemberger/eugene-bus-reliability)"
     )
 

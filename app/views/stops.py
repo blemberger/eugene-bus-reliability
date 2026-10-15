@@ -22,7 +22,9 @@ from common import (
     data_note,
     day_label,
     day_sql,
+    days_suffix,
     every_stop_card,
+    filters_again,
     fmt_date,
     fmt_delay,
     headline_metrics,
@@ -92,7 +94,7 @@ def every_stop(start, wt, table_slot, map_slot) -> None:
 
     with map_slot, card():
         st.subheader(
-            "Where do buses run late?",
+            f"Where do buses run late{days_suffix()}?",
             help="Each dot is a stop, coloured by how late its typical bus is against the "
             "timetable. " + f"{period}; stops with at least 20 arrivals.",
         )
@@ -342,7 +344,7 @@ def early_fields(p05, n) -> dict:
 
 with routes_slot, card():
     st.subheader(
-        f"How reliable is each route at {SNAME}?",
+        f"How reliable is each route at {SNAME}{days_suffix()}?",
         help=f"{period[0].upper() + period[1:]}. Click a column heading to sort.",
     )
     headline_metrics(here, today_lateness(stop_id=stop_id), start, " here vs timetable")
@@ -393,10 +395,13 @@ predictions_card("stop_pred", start, wt, period, fixed_stop=(stop_id, SNAME))
 trend_card("stop_trend", fixed_stop=(stop_id, SNAME))
 
 
+# ---- the period and days buttons again, for everything below -------------------------------
+filters_again()
+
 # ---- each scheduled bus ---------------------------------------------------------------------
 with card():
     st.subheader(
-        f"Each scheduled departure from {SNAME}",
+        f"Each scheduled departure from {SNAME}{days_suffix()}",
         help="How each scheduled bus of this route usually runs here against the timetable "
         "(negative = early), and the earliest and latest it came. A departure shows once it has "
         f"been measured on 3 days; hover a row for how many. {period[0].upper() + period[1:]}.",

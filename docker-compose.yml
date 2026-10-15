@@ -73,6 +73,10 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       PGHOST: db
       PGPORT: "5432"
+      # the plain report pages for search engines (static_site.py), served by Caddy
+      STATIC_SITE_DIR: /site
+    volumes:
+      - site:/site
     command: ["python", "-m", "eugene_bus_reliability", "schedule"]
 
   app:
@@ -110,6 +114,8 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
+      # the plain report pages the scheduler writes (/reports/, sitemap.xml, robots.txt)
+      - site:/srv/site:ro
     environment:
       SITE_ADDRESS: ${SITE_ADDRESS:-:80}
 
@@ -118,3 +124,4 @@ volumes:
   caddy_data:
   caddy_config:
   app_cache:
+  site:

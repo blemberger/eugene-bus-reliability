@@ -6,6 +6,8 @@ Runs forever in its own container (docker compose service `scheduler`):
                    DBT_BUILD_EVERY_MINUTES changes the interval. Most models recompute only
                    the latest two service days (dbt/macros/incremental.sql); when the analysis
                    code has changed since the last full refresh, the build is a full refresh
+  * after a build, at most every 6 h — the plain report pages for search engines
+                   (static_site.py), written to STATIC_SITE_DIR for Caddy to serve
   * every day    — reload the static schedule if LTD published a new one,
                    and move stale predictions from rt.prediction_current to history
 A loop that checks the clock is all this workload needs; the jobs are plain
@@ -26,7 +28,7 @@ from zoneinfo import ZoneInfo
 
 import psycopg
 
-from eugene_bus_reliability import gtfs_static
+from eugene_bus_reliability import gtfs_static, static_site
 from eugene_bus_reliability.config import Settings
 
 log = logging.getLogger(__name__)
@@ -103,7 +105,7 @@ def record_failure(settings: Settings, full: bool, version: str, message: str) -
         log.exception("could not record the failed build")
 
 
-def run_dbt_build(settings: Settings) -> None:
+def run_dbt_build(settings: Settings) -> bool:
     version = analysis_code_version()
     full = refreshed_version(settings) != version
     log.info("dbt build starting%s", " (full refresh: analysis code changed)" if full else "")
@@ -123,6 +125,7 @@ def run_dbt_build(settings: Settings) -> None:
                 "insert into analytics.build_code (version, refreshed_at) values (%s, now())",
                 (version,),
             )
+    return models_built_ok()
 
 
 LOCAL_TZ = ZoneInfo("America/Los_Angeles")
@@ -253,6 +256,7 @@ def main(settings: Settings, daily_hour_utc: int = 10) -> None:
     every = timedelta(minutes=int(os.environ.get("DBT_BUILD_EVERY_MINUTES", "15")))
     last_build: datetime | None = None
     last_daily: datetime | None = None
+    last_pages: datetime | None = None
     log.info("scheduler up: dbt build every %s, daily jobs at %02d:00 UTC", every, daily_hour_utc)
     while True:
         now = datetime.now(tz=UTC)
@@ -266,8 +270,17 @@ def main(settings: Settings, daily_hour_utc: int = 10) -> None:
                 run_daily(settings)
             if last_build is None or now - last_build >= every:
                 last_build = now
-                run_dbt_build(settings)
+                built = run_dbt_build(settings)
                 run_source_freshness(settings)
+                if built and (
+                    last_pages is None
+                    or now - last_pages >= timedelta(hours=static_site.REBUILD_HOURS)
+                ):
+                    last_pages = now
+                    try:
+                        static_site.build(settings.database_url)
+                    except Exception:
+                        log.exception("writing the plain report pages failed")
         except Exception:
             log.exception("scheduled job failed")
         time.sleep(30)

@@ -11,7 +11,9 @@ from common import (
     card,
     data_note,
     day_label,
+    days_suffix,
     every_stop_card,
+    filters_again,
     fmt_date,
     headline_metrics,
     hourly_lines_chart,
@@ -83,7 +85,7 @@ if marts_ready():
     if not per.empty:
         with card():
             st.subheader(
-                "How reliable is each route?",
+                f"How reliable is each route{days_suffix()}?",
                 help=f"{period[0].upper() + period[1:]}, every stop. Click a column heading to "
                 "sort, again to reverse.",
             )
@@ -93,6 +95,7 @@ if marts_ready():
         every_stop_card(
             stops_with_numbers(by_stop), period[0].upper() + period[1:], "ov_stops", limit=15
         )
+    filters_again()  # the period and days buttons again, for everything below
     predictions_card("ov_pred", start, wt, period)
     trend_card("ov_trend")
 

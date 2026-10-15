@@ -40,7 +40,7 @@ models:
       - name: scored_time
         description: "When the bus left the stop, as scored (set where status is): LTD's recorded departure or our GPS time."
       - name: is_doubtful
-        description: "Our GPS time at this stop (route, direction) disagrees with LTD's as a rule (int_doubtful_stops); not scored unless LTD's departure is used."
+        description: "Our GPS time at this stop (route, direction) is out of line with the stops either side as a rule (int_doubtful_stops); not scored unless LTD's departure is used."
       - name: time_source
         description: >
           Which time was scored: 'ltd_departure' (LTD's recorded departure, used at a trip's

@@ -21,6 +21,8 @@ from common import (
     data_note,
     day_label,
     day_sql,
+    days_suffix,
+    filters_again,
     fmt_date,
     fmt_delay,
     fmt_range,
@@ -178,7 +180,7 @@ along = q(
 )
 with table_slot, card():
     st.subheader(
-        f"How reliable is each stop on route {route_name}?",
+        f"How reliable is each stop on route {route_name}{days_suffix()}?",
         help=f"{period[0].upper() + period[1:]}, in the direction chosen above, in the order the "
         "bus reaches them. Click a column heading to sort.",
     )
@@ -231,10 +233,13 @@ with hour_slot:
         help_extra=IN_DIRECTION,
     )
 
+# ---- the period and days buttons again, for everything below -------------------------------
+filters_again()
+
 # ---- along the route ------------------------------------------------------------------------
 with card():
     st.subheader(
-        f"Where along route {route_name} does the delay build up?",
+        f"Where along route {route_name} does the delay build up{days_suffix()}?",
         help="Lateness against the timetable at each stop, in the order the bus reaches them (left "
         "to right). The line is the typical bus; the shaded band is where 8 in 10 buses fell. A "
         "line climbing means the bus loses time against the timetable there; falling means the "
@@ -338,7 +343,7 @@ if not head.empty:
     with card():
         head = head.assign(_k=head["hour_local"].map(service_hour_key)).sort_values("_k")
         st.subheader(
-            f"Do route {route_name}'s buses come evenly, or bunch up?",
+            f"Do route {route_name}'s buses come evenly, or bunch up{days_suffix()}?",
             help="On routes scheduled every 20 minutes or better, riders don't check a timetable; "
             "what matters is the gap between buses. Bunched = arrived less than half the "
             "scheduled gap after the previous bus. Big gap = more than 1.5 times the scheduled "

@@ -59,6 +59,15 @@ sends the `www` name to the bare one. Before DNS exists, `SITE_ADDRESS=:80` serv
 HTTP on the server's IP. The site connects as the read-only database user, so nothing on
 it can change data.
 
+**Plain pages for search engines.** The site is drawn by JavaScript, which search engines
+and AI answer engines mostly don't run. So the scheduler also writes a plain HTML page for
+every route and stop (`/reports/`), a `sitemap.xml` and a `robots.txt`, after an analysis
+build at most every 6 hours (`eugene_bus_reliability/static_site.py`); Caddy serves them as
+files. To write them now (server): `docker compose exec scheduler python -m
+eugene_bus_reliability static-site`. Once, tell Google about the sitemap: in Google Search
+Console, add the domain, then Sitemaps → `https://eugenebuswatch.com/sitemap.xml` (Bing
+Webmaster Tools can import it from Google's).
+
 ## 4. Updating the server after a code change
 
 Once, on the laptop, add the server to `.env`: `VPS_HOST=root@<server ip>`. Then, after

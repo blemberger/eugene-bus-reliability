@@ -1,27 +1,40 @@
--- Stops (on one route, in one direction) where our GPS time can't be trusted: where it and
--- LTD's own record of when the bus left disagree by more than 2 minutes as a rule (the median
--- over the last 30 days, 20 or more arrivals timed both ways). Normally the two agree to within
--- seconds at timepoints and LTD's runs about a minute early between them (its own estimate
--- there); a gap twice that, held over weeks, is the stop sitting where our method places the
--- bus wrongly (a shape that doubles back, a stop far off the street the bus uses). Our GPS
--- times there are left out of every number (fct_stop_events), and so are the predictions
--- scored against them; the Data & methods page counts them.
+-- Stops (on one route, in one direction) where our GPS time can't be trusted: where, as a rule
+-- (the median over the last 30 days, 20 or more trips), our time there is more than 2 minutes
+-- out of line with our own times at the stops just before and after it on the same trip.
+--
+-- A bus's lateness changes smoothly from stop to stop, so a stop that sits minutes away from
+-- both of its neighbours, trip after trip, is our method placing the bus wrongly there (a
+-- route shape that doubles back, a stop mapped away from the street the bus uses), not how the
+-- bus ran. The timetable's own guessed times between timepoints change smoothly too, so they
+-- cancel out of this test. (An earlier version compared our time with LTD's; but between
+-- timepoints LTD's time is its own estimate, so that flagged whole stretches where LTD's
+-- estimate, not our time, was off.) Our GPS times at these stops are left out of every number
+-- (fct_stop_events), and so are the predictions scored against them; the Data & methods page
+-- counts them.
 
 {{ config(materialized='table') }}
 
-with timed_both_ways as (
-    select o.route_id, o.direction_id, o.stop_id,
-           extract(epoch from f.settled_time - o.observed_arrival) as diff_s
-    from {{ ref('int_observed_arrivals') }} o
-    join {{ ref('int_feed_settled_times') }} f
-      on f.trip_id = o.trip_id and f.service_date = o.service_date
-     and f.stop_sequence = o.stop_sequence
-    where o.is_bounded and f.is_settled and o.service_date >= current_date - 30
+with ours as (
+    select service_date, trip_id, stop_sequence, route_id, direction_id, stop_id,
+           is_first_stop, is_last_stop,
+           extract(epoch from observed_arrival - scheduled_arrival) as late_s
+    from {{ ref('int_observed_arrivals') }}
+    where is_bounded and is_plausible and service_date >= current_date - 30
+),
+
+around as (
+    select *,
+           lag(late_s) over w as before_s,
+           lead(late_s) over w as after_s
+    from ours
+    window w as (partition by service_date, trip_id order by stop_sequence)
 )
 
 select route_id, direction_id, stop_id, count(*) as n,
-       percentile_cont(0.5) within group (order by diff_s) as median_diff_s
-from timed_both_ways
+       percentile_cont(0.5) within group (order by late_s - (before_s + after_s) / 2.0)
+           as median_spike_s
+from around
+where before_s is not null and after_s is not null and not is_first_stop and not is_last_stop
 group by 1, 2, 3
 having count(*) >= 20
-   and abs(percentile_cont(0.5) within group (order by diff_s)) > 120
+   and abs(percentile_cont(0.5) within group (order by late_s - (before_s + after_s) / 2.0)) > 120

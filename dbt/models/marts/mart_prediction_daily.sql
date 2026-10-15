@@ -34,6 +34,8 @@ select
     count(*) filter (where abs(error_s) <= 60)  as n_within_1min,
     count(*) filter (where abs(error_s) <= 120) as n_within_2min,
     count(*) filter (where abs(error_s) <= 180) as n_within_3min,
-    count(*) filter (where abs(error_s) <= 300) as n_within_5min
+    count(*) filter (where abs(error_s) <= 300) as n_within_5min,
+    -- running counts for the "8 in 10 buses" range of minutes off (macros/error_counts.sql)
+    {{ abs_error_counts('error_s') }}
 from told
 group by 1, 2, 3, 4, 5, 6

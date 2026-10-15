@@ -34,11 +34,14 @@ SHELL = (
     'max-width:46rem;margin:0 auto;padding:4.5rem 1rem 1rem;color:#262730">'
     '<div style="font-size:1.6rem;font-weight:700">Eugene Bus Watch</div>'
     '<p style="font-size:1rem;color:#5f6368">How reliable are Eugene\'s buses? '
-    "Loading the latest data&hellip;</p></div></div>"
+    "Loading the latest data&hellip;</p>"
+    # a plain link a crawler can follow to the report pages (static_site.py)
+    '<p style="font-size:1rem"><a href="/reports/">Every route and stop</a></p></div></div>'
 )
 NOSCRIPT = (
     f"<noscript><h1>{escape(TITLE)}</h1><p>{escape(DESCRIPTION)}</p>"
-    "<p>This site needs JavaScript.</p></noscript>"
+    "<p>This site needs JavaScript. Plain report pages for every route and stop: "
+    '<a href="/reports/">/reports/</a></p></noscript>'
 )
 
 

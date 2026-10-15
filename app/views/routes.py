@@ -8,6 +8,7 @@ from common import (
     card,
     data_note,
     day_label,
+    days_suffix,
     fmt_date,
     lateness,
     marts_ready,
@@ -52,7 +53,7 @@ if rank.empty:
 
 with table_slot, card():
     st.subheader(
-        "How reliable is each route?",
+        f"How reliable is each route{days_suffix()}?",
         help=f"{period[0].upper() + period[1:]}, every stop (the filters below). Click a column "
         "heading to sort, again to reverse.",
     )

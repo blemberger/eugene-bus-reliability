@@ -19,6 +19,7 @@ from common import (
     current_fv,
     day_label,
     day_sql,
+    days_suffix,
     fmt_date,
     fmt_minutes,
     hour_label,
@@ -83,7 +84,8 @@ PERIOD = period[0].upper() + period[1:]
 # ---- how far off: the prediction at each distance, and the timetable ----------------------
 with chart_slot, card():
     st.subheader(
-        f"How far off are the predictions{SUFFIX}?", help=PREDICTION_OFF_NOTE + f" {PERIOD}."
+        f"How far off are the predictions{SUFFIX}{days_suffix()}?",
+        help=PREDICTION_OFF_NOTE + f" {PERIOD}.",
     )
     rows = prediction_scope_rows(start, wt, scope)
     fig0 = (
@@ -102,7 +104,7 @@ with chart_slot, card():
 # ---- by time of day ---------------------------------------------------------------------
 with card():
     st.subheader(
-        f"Does accuracy depend on the time of day{SUFFIX}?",
+        f"Does accuracy depend on the time of day{SUFFIX}{days_suffix()}?",
         help="Predictions made about this far ahead, by the hour they were on show. Each bar "
         "builds up: the dark part is the share right to within 2 minutes; add the middle part "
         "for within 3 minutes; the whole bar is within 5 minutes. The space above is how often "
@@ -323,7 +325,9 @@ TABLE_HELP = (
 
 with card():
     at_stop = f" at {scope.stop_name}" if scope.stop_id else ""
-    st.subheader(f"Which routes have the best predictions{at_stop}?", help=TABLE_HELP)
+    st.subheader(
+        f"Which routes have the best predictions{at_stop}{days_suffix()}?", help=TABLE_HELP
+    )
     if scope.stop_id:
         by_route = off_by("route_id", "and stop_id = %s", (scope.stop_id,), daily=False)
     else:
@@ -343,7 +347,9 @@ with card():
 
 with card():
     on_route = f" on route {scope.route_name}" if scope.route_id else ""
-    st.subheader(f"Which stops have the best predictions{on_route}?", help=TABLE_HELP)
+    st.subheader(
+        f"Which stops have the best predictions{on_route}{days_suffix()}?", help=TABLE_HELP
+    )
     by_stop = off_by(
         "stop_id",
         "and route_id = %s" if scope.route_id else "",

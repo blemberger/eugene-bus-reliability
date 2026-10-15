@@ -6,7 +6,16 @@
 	# one address for the site: the www. version redirects to the plain name, keeping the page path
 	@www header_regexp www Host ^www\.(.+)$
 	redir @www https://{re.www.1}{uri} permanent
-	reverse_proxy app:8501
+	# the plain report pages for search engines, written by the scheduler (static_site.py);
+	# everything else is the site itself
+	@pages path /reports /reports/* /sitemap.xml /robots.txt
+	handle @pages {
+		root * /srv/site
+		file_server
+	}
+	handle {
+		reverse_proxy app:8501
+	}
 	# access log for `make visitors` (where visitors came from); kept to about 400 MB
 	log {
 		output file /data/access.log {

@@ -87,8 +87,8 @@ the scheduled gap. Bunched = under half the scheduled gap; big gap = over 1.5×.
 90 minutes late against the schedule, which in practice means a bus reporting the wrong trip rather than real service
 (counted as "Implausible" in the coverage table below); arrivals whose time can't be pinned down to within 2 minutes
 because the bus's reports around that stop were far apart, usually during a feed outage ("Imprecise" below);
-stops between timepoints where our GPS time and LTD's own record are more than 2 minutes apart as a rule, usually a
-stop whose mapped position isn't where buses really stop ("Doubtful stop" below);
+stops where, trip after trip, our GPS time is more than 2 minutes out of line with the stops just before and after
+it, usually a stop whose mapped position isn't where buses really stop ("Doubtful stop" below);
 predictions more than 90 minutes out or made after the bus had arrived; the first stop of a trip for headway purposes.
 
 **Known failure modes we measure rather than assume.** Feed outages, vehicles with stale GPS, trips cancelled without a
@@ -249,9 +249,10 @@ with card():
                     ),
                     "Doubtful stop": col_count(
                         "Doubtful stop",
-                        help="Arrivals left out because they were at a stop where our GPS time "
-                        "and LTD's own record are more than 2 minutes apart as a rule (checked "
-                        "over the last 30 days), so neither time can be trusted there.",
+                        help="Arrivals left out because they were at a stop where, as a rule, "
+                        "our GPS time is more than 2 minutes out of line with the stops just "
+                        "before and after it (checked over the last 30 days): our method places "
+                        "the bus wrongly there.",
                     ),
                     "Imprecise": col_count(
                         "Imprecise",

@@ -1,7 +1,8 @@
 -- mart_prediction_daily, but per stop and direction as well: how far off LTD's real-time
 -- predictions were at each stop on each route, and the printed timetable for the same bus
 -- arrivals, added up per service day. The stop and route report cards sum these rows for any
--- period and days of the week (an average is sum_abs_s / n), instead of scanning
+-- period and days of the week (an average is sum_abs_s / n; the n_le_ counts give the range
+-- 8 in 10 buses fell in), instead of scanning
 -- fct_countdown_samples. Same rows and rules as mart_prediction_daily (in_comparison
 -- arrivals; basis 'sign' per minute away 1 to 15, basis 'timetable' once per arrival).
 -- Built incrementally (macros/incremental.sql), like its source.
@@ -41,6 +42,8 @@ told as (
 select
     service_date, weekday_type, route_id, direction_id, stop_id, basis, ahead_min,
     count(*)                  as n,
-    sum(abs(error_s))::bigint as sum_abs_s
+    sum(abs(error_s))::bigint as sum_abs_s,
+    -- running counts for the "8 in 10 buses" range of minutes off (macros/error_counts.sql)
+    {{ abs_error_counts('error_s') }}
 from told
 group by 1, 2, 3, 4, 5, 6, 7
