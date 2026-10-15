@@ -192,16 +192,16 @@ if not stop_id:
     with card():
         st.subheader("Find your stop")
         stop_finder()
-    # every stop in a table and on a map, every stop together hour by hour, then the period and
-    # days filters they all follow (drawn in that order; the filters are read first), as on the
-    # Routes page
-    every_slot, map_slot, chart_slot = st.container(), st.container(), st.container()
+    # the period and days filters right above the first thing they change, then every stop in a
+    # table and on a map, every stop together hour by hour, and (with the filters again) the
+    # predictions and the trend, as on the Routes page
     start, wt = page_filters()
+    every_slot, map_slot, chart_slot = st.container(), st.container(), st.container()
     every_stop(start, wt, every_slot, map_slot)
     period = f"{day_label(wt)} since {fmt_date(start)}"
     with chart_slot:
         times_of_day_card("stops_tod", start, wt, period)
-    # below the filters, as on a stop's report card: the trend, then the predictions
+    filters_again()  # the period and days buttons again, for everything below
     predictions_card("stops_pred", start, wt, period)
     trend_card("stops_trend")
     st.divider()
@@ -250,10 +250,10 @@ def stop_right_now() -> None:
     show_left(left, f"No bus has left this stop in the last {JUST_LEFT_MINUTES} minutes.")
 
 
-# ---- reliability: the chart by time of day, then the routes table, then the period and days
-# filters that they and everything below follow (drawn in that order; the filters are read first)
-hour_slot, routes_slot = st.container(), st.container()
+# ---- reliability: the period and days filters everything on the page follows, right under the
+# title, then the chart by time of day and the routes table
 start, wt = page_filters()
+hour_slot, routes_slot = st.container(), st.container()
 wt_clause, wt_params = day_sql(wt)
 period = f"{day_label(wt)} since {fmt_date(start)}"
 
@@ -372,7 +372,6 @@ with routes_slot, card():
                 "label": "Be early by",
                 "width": "6.6em",
                 "num": True,
-                "hide_on_phone": True,  # no room beside the strip on a phone
                 "help": "How many minutes before the scheduled time to be at the stop to catch "
                 "19 buses in 20 (a route needs 20 arrivals here). On time: the earliest buses "
                 "are no more than 30 seconds early. Sorts the most first.",

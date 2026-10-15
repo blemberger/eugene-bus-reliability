@@ -20,6 +20,7 @@ from common import (
     day_label,
     day_sql,
     days_suffix,
+    filters_again,
     fmt_date,
     fmt_minutes,
     hour_label,
@@ -74,10 +75,10 @@ short = dict(
     zip(routes["route_id"].astype(str), routes["route_short_name"].astype(str), strict=False)
 )
 
-# the first chart, then the period and days filters that everything on the page follows (drawn
-# in that order, though the filters are read first)
-chart_slot = st.container()
+# the period and days filters that everything on the page follows, right under the route and
+# stop choice, then the charts; the filters again above the tables
 start, wt = page_filters()
+chart_slot = st.container()
 period = f"{day_label(wt)} since {fmt_date(start)}"
 PERIOD = period[0].upper() + period[1:]
 
@@ -190,7 +191,7 @@ with card():
             yaxis_tickformat=".0%",
             yaxis_range=[0, 1],
             xaxis_title="",
-            yaxis_title=f"Predictions {ahead} out that were right",
+            yaxis_title="Share of predictions",
             legend={
                 "orientation": "h",
                 "yanchor": "bottom",
@@ -322,6 +323,8 @@ TABLE_HELP = (
     "Lower is better. Rows with at least 50 bus arrivals measured. "
     f"{PERIOD}. Click a column heading to sort; click a row for that report card's predictions."
 )
+
+filters_again()  # the period and days buttons again, for everything below
 
 with card():
     at_stop = f" at {scope.stop_name}" if scope.stop_id else ""

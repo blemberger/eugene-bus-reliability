@@ -616,7 +616,7 @@ def build(database_url: str, target: Path | None = None) -> int:
             "<p><a class='go' href='/'>Open the interactive site →</a></p>"
             "<div class='card'><h2>Every route</h2>"
             + table(["Route", "Typical bus", "8 in 10 buses", "Minutes off"], rrows)
-            + f"</div><div class='card'><h2>Every stop ({len(stop_list):,})</h2>"
+            + f"</div><div class='card'><h2>Every stop</h2>"
             f"<div class='cols'>{links}</div></div>",
             base,
             updated,

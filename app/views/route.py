@@ -47,6 +47,7 @@ from common import (
     service_hour_key,
     service_today,
     show_chart,
+    stop_choices,
     stop_link,
     times_of_day_card,
     trend_card,
@@ -56,12 +57,13 @@ require_db()
 back_button("← All routes", page="views/routes.py")
 title_slot = st.empty()  # filled in once the route is known
 require_marts()
-# Drawn in this order, though the filters are read first: the direction, the chart by time of
-# day, the route's numbers with every stop on it, then the period and days filters that
-# everything on the page follows, then the predictions, the route's own detail and, last, the
-# trend (usually a flat line). Stop report cards are laid out the same way.
-dir_slot, hour_slot, table_slot = st.container(), st.container(), st.container()
-filters_slot, pred_slot = st.container(), st.container()
+# Drawn in this order (the direction is read after the filters, so it gets its own slot): the
+# direction and the period and days filters, which everything on the page follows, right under
+# the title; the chart by time of day; the route's numbers with every stop on it; the
+# predictions; then, under the filters again, the route's own detail and, last, the trend
+# (usually a flat line). Stop report cards are laid out the same way.
+dir_slot, filters_slot, hour_slot = st.container(), st.container(), st.container()
+table_slot, pred_slot = st.container(), st.container()
 with filters_slot:
     start, wt = page_filters()
 FV = str(current_fv())  # schedule version in force today
@@ -138,6 +140,9 @@ if dir_labels:
         )
     if direction is None:  # clicking the selected option clears it; fall back to the first
         direction = next(iter(dir_labels))
+# each stop's number along the route in this direction, the same in the stop list, the table and
+# the chart ('3. Olive & 11th')
+STOP_NO = {str(sid): i + 1 for i, sid in enumerate(stop_choices(route_id, direction)["stop_id"])}
 dir_clause = "and direction_id = %s" if direction is not None else ""
 dir_params: tuple = (direction,) if direction is not None else ()
 
@@ -196,27 +201,28 @@ with table_slot, card():
                 {
                     "href": stop_link(r.stop_id, "").split("#")[0],
                     "hover": f"{r.stop_name}: {int(r.n):,} arrivals measured",
-                    "seq": int(r.stop_sequence),
-                    "stop": r.stop_name,
+                    # numbered in the order the bus reaches them, and sorted that way
+                    "stop": f"{STOP_NO.get(str(r.stop_id), '?')}. {r.stop_name}",
+                    "stop_s": STOP_NO.get(str(r.stop_id), 999),
                     **range_fields(r.p10_s, r.med_s, r.p90_s, lo, hi, r.mean_abs),
                 }
                 for r in along.itertuples()
             ],
             [
                 {
-                    "key": "seq",
-                    "label": "#",
-                    "width": "2.4em",
-                    "num": True,
+                    "key": "stop",
+                    "label": "Stop",
+                    "width": "minmax(10em, 2fr)",
+                    "bold": True,
+                    "help": "In the order the bus reaches them. Sorts that way.",
+                    "sort": "stop_s",
                     "first": "asc",
-                    "help": "Order along the route",
                 },
-                {"key": "stop", "label": "Stop", "width": "minmax(10em, 2fr)", "bold": True},
                 *range_columns(lo, hi),
             ],
             max_height=REPORT_TABLE_HEIGHT,
             key="route_stops",
-            default_sort="seq:asc",
+            default_sort="stop:asc",
         )
 
 # ---- times of day: every stop on the route, or one -----------------------------------------
@@ -248,7 +254,11 @@ with card():
     if along.empty:
         st.caption("Not enough scored arrivals yet.")
     else:
-        along["Stop"] = along["stop_sequence"].astype(str) + ". " + along["stop_name"]
+        # numbered as in the table and the stop list: the order the bus reaches them
+        along["Stop"] = [
+            f"{STOP_NO.get(str(sid), '?')}. {n}"
+            for sid, n in zip(along["stop_id"], along["stop_name"], strict=False)
+        ]
         if is_mobile():  # long stop names would leave little room for the plot on a phone
             along["Stop"] = [
                 t if len(t) <= 20 else t[:19].rstrip() + "…" for t in along["Stop"].astype(str)

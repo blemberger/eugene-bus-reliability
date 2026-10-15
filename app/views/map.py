@@ -620,6 +620,9 @@ with card():
 
 
 # ---- alerts ----------------------------------------------------------------------
+STALE_ALERT_DAYS = 21  # an open-ended alert older than this is marked as possibly out of date
+
+
 def _when(ts: pd.Timestamp) -> str:
     t = ts.tz_convert(LOCAL_TZ)
     return f"{t:%a %b} {t.day}, " + t.strftime("%I:%M %p").lstrip("0").lower()
@@ -651,7 +654,9 @@ with card():
     st.subheader(
         "Service alerts",
         help="From LTD. Times are when LTD says each alert applies or, where it doesn't say, the "
-        "first time this site saw the alert.",
+        "first time this site saw the alert. LTD sometimes leaves an alert listed after it "
+        f"stopped applying; one with no end date that began over {STALE_ALERT_DAYS} days ago is "
+        "marked as possibly out of date and listed last.",
     )
     alerts = q(
         """
@@ -665,10 +670,36 @@ with card():
         from cur
         """
     )
-    if alerts.empty:
+    now = pd.Timestamp.now(tz="UTC")
+
+    def since(payload: dict, first_seen) -> tuple[pd.Timestamp | None, bool]:
+        """(when the alert began: its earliest period start, else when we first saw it; whether
+        it is over: every period LTD gives it has ended)."""
+        periods = payload.get("active_period", []) or []
+        starts = [int(p["start"]) for p in periods if p.get("start")]
+        ends = [p.get("end") for p in periods]
+        over = bool(periods) and all(e and int(e) < now.timestamp() for e in ends)
+        began = (
+            pd.Timestamp(min(starts), unit="s", tz="UTC")
+            if starts
+            else (pd.Timestamp(first_seen) if first_seen is not None else None)
+        )
+        return began, over
+
+    shown = []
+    for payload, first_seen in zip(alerts["payload"], alerts["first_seen"], strict=False):
+        began, over = since(payload, first_seen)
+        if over:
+            continue  # LTD still lists it, but every period it gave has ended
+        # LTD sometimes leaves an alert up long after it applied (a stop closed "today, June
+        # 11" still listed in October): an alert with no end that began weeks ago says so, and
+        # goes after the current ones
+        old = began is not None and (now - began) > pd.Timedelta(days=STALE_ALERT_DAYS)
+        shown.append((old, -(began.timestamp() if began is not None else 0), payload, first_seen))
+    if not shown:
         st.caption("No active alerts.")
     else:
-        for payload, first_seen in zip(alerts["payload"], alerts["first_seen"], strict=False):
+        for old, _, payload, first_seen in sorted(shown, key=lambda t: (t[0], t[1])):
             header = next(
                 (
                     t.get("text")
@@ -686,5 +717,12 @@ with card():
                 "",
             )
             when = alert_times(payload, first_seen)
+            if old:
+                began, _ = since(payload, first_seen)
+                at_least = "" if payload.get("active_period") else "at least "
+                when = (
+                    f"listed by LTD since {at_least}{_when(began).split(',')[0]}; "
+                    "may no longer apply"
+                )
             with st.expander(f"{header}  ·  {when}" if when else header):
                 st.write(desc or "No details given.")

@@ -9,6 +9,7 @@ from common import (
     data_note,
     day_label,
     days_suffix,
+    filters_again,
     fmt_date,
     lateness,
     marts_ready,
@@ -28,9 +29,9 @@ from common import (
 require_db()
 st.title("How reliable is my route?")
 require_marts()
-# Find your route, the table and the times-of-day chart, then the period and days filters they
-# follow (drawn in that order on the page, though the filters are read first), then the trend
-# and the predictions, as on a route's report card
+# Find your route, then the period and days filters right above the first thing they change,
+# the table and the times-of-day chart, then (with the filters again) the predictions and the
+# trend, as on a route's report card
 with card():
     st.subheader("Find your route")
     every = routes_by_service()
@@ -39,8 +40,8 @@ with card():
             _k=every["route_short_name"].astype(str).map(lambda v: (len(v), v))
         ).sort_values("_k")
     )
-table_slot, chart_slot = st.container(), st.container()
 start, wt = page_filters()
+table_slot, chart_slot = st.container(), st.container()
 period = f"{day_label(wt)} since {fmt_date(start)}"
 rank = route_rank(start, wt)
 if rank.empty:
@@ -54,7 +55,7 @@ if rank.empty:
 with table_slot, card():
     st.subheader(
         f"How reliable is each route{days_suffix()}?",
-        help=f"{period[0].upper() + period[1:]}, every stop (the filters below). Click a column "
+        help=f"{period[0].upper() + period[1:]}, every stop. Click a column "
         "heading to sort, again to reverse.",
     )
     route_table(rank, start, key="routes_all")
@@ -62,6 +63,7 @@ with table_slot, card():
 with chart_slot:
     times_of_day_card("routes_tod", start, wt, period)
 
+filters_again()  # the period and days buttons again, for everything below
 predictions_card("routes_pred", start, wt, period)
 trend_card("routes_trend")
 

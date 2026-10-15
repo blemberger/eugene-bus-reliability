@@ -85,6 +85,20 @@ st.html(
     " background: #eaf1f9; }"
     "[class*='st-key-backlink'] p { font-size: 1.12rem !important; font-weight: 700;"
     " color: #1f5f9e; }"
+    # the menu on a narrow screen (Streamlit folds the top links into a side drawer): the usual
+    # three-line menu button at the far left of the bar, before the site's name, opening the
+    # drawer from that side; in the drawer a plain X closes it, and the links are big enough
+    # to tap
+    "div:has(> [data-testid='stExpandSidebarButton']) { order: -1; margin-right: 0.5rem; }"
+    "[data-testid='stExpandSidebarButton'] { width: 2.6rem; height: 2.6rem;"
+    " border: 1px solid #cfd6de; border-radius: 8px;"
+    " background: #ffffff url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M3 6h18M3 12h18M3 18h18' stroke='%231b2533' stroke-width='2.2' stroke-linecap='round'/%3E%3C/svg%3E\") center / 1.4rem no-repeat; }"
+    "[data-testid='stExpandSidebarButton'] > *, [data-testid='stSidebarCollapseButton'] button > *"
+    " { display: none; }"
+    "[data-testid='stSidebarCollapseButton'] button { width: 2.6rem; height: 2.6rem;"
+    " background: url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M6 6l12 12M18 6L6 18' stroke='%231b2533' stroke-width='2.2' stroke-linecap='round'/%3E%3C/svg%3E\") center / 1.3rem no-repeat; }"
+    "[data-testid='stSidebarNavLink'] { min-height: 3rem; }"
+    "[data-testid='stSidebarNavLink'] span { font-size: 1.1rem; }"
     "@media (max-width: 640px) {"
     " .stLogo { height: 1.7rem; margin: 0 0.4rem 0 0.2rem; }"
     " header[data-testid='stHeader'], header [data-testid='stToolbar'] { height: 3.8rem; }"
@@ -94,6 +108,15 @@ st.html(
     " h1 { font-size: 1.75rem !important; line-height: 1.2 !important; }"
     " h2, h3 { font-size: 1.3rem !important; }"
     " [data-testid='stPageLink'] p { white-space: normal; }"
+    # the four headline numbers two by two, not one per row down the screen
+    " [data-testid='stHorizontalBlock']:has([data-testid='stMetric']) { flex-wrap: wrap;"
+    " flex-direction: row; gap: 0.6rem 0.8rem; }"
+    " [data-testid='stHorizontalBlock']:has([data-testid='stMetric']) > [data-testid='stColumn']"
+    " { flex: 1 1 calc(50% - 0.8rem) !important; width: calc(50% - 0.8rem) !important;"
+    " min-width: calc(50% - 0.8rem) !important; }"
+    " [data-testid='stMetricValue'] { font-size: 1.6rem; }"
+    " [data-testid='stMetricLabel'] p, [data-testid='stMetricLabel'] div"
+    " { white-space: normal !important; overflow: visible !important; }"
     " [data-testid='stButtonGroup'] button { font-size: 0.98rem; min-height: 2.4rem;"
     " padding: 0.3rem 0.8rem; }"
     "}"

@@ -854,12 +854,41 @@ def log_page_view(page: str, load_ms: int | None = None) -> None:
 
 
 def fit_phone(fig):
-    """On a phone, move a chart's legend from beside the plot to above it, so the plot keeps the
-    screen's full width."""
-    if is_mobile():
-        fig.update_layout(
-            legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0, "xanchor": "left"}
+    """On a phone, give the plot the screen's width: the legend above it, and the labels along
+    the bottom level and fewer (every few hours, a handful of dates). Left alone, Plotly tilts
+    crowded labels, and a tilted first label ("5 am") needs room to the left of the plot, which
+    showed as a wide blank strip beside the minutes labels. A chart that sets its own label angle
+    (the stops along a route) keeps it."""
+    if not is_mobile():
+        return fig
+    # a smaller legend, so its entries fit side by side on the narrow screen
+    fig.update_layout(
+        legend={
+            "orientation": "h",
+            "yanchor": "bottom",
+            "y": 1.02,
+            "x": 0,
+            "xanchor": "left",
+            "font": {"size": 13},
+            "itemwidth": 30,
+        }
+    )
+    xa = fig.layout.xaxis
+    if xa.tickangle is not None:
+        return fig
+    fig.update_xaxes(tickangle=0)
+    if xa.type == "date":
+        fig.update_xaxes(nticks=4)
+    elif xa.type == "category" or any(
+        isinstance(v, str) for t in fig.data for v in (list(t.x) if t.x is not None else [])[:1]
+    ):
+        n = (
+            len(xa.categoryarray)
+            if xa.categoryarray is not None
+            else len({v for t in fig.data if t.x is not None for v in t.x})
         )
+        if n > 6:
+            fig.update_xaxes(dtick=math.ceil(n / 5))
     return fig
 
 
@@ -1249,6 +1278,11 @@ def _remembered(key: str, param: str, options: list[str], default: str) -> None:
     """Start a filter widget at the visitor's last choice on any page (kept in the session), or
     at the page address's choice (?period=30d, from a link or a bookmark), else the default."""
     if st.session_state.get(key) in options:
+        # Re-assigned on purpose: when the visitor moves to another page, Streamlit drops a
+        # widget's state at the end of that page's first run, so the buttons were drawn with
+        # nothing selected (while the numbers used the default). Setting it here makes the
+        # value the new page's own, so its button shows as chosen.
+        st.session_state[key] = st.session_state[key]
         return
     for v in (st.session_state.get(f"_{key}"), st.query_params.get(param)):
         if v in options:
@@ -1621,7 +1655,6 @@ def route_table(rank: pd.DataFrame, start: date, key: str) -> None:
                 "key": "name",
                 "label": "Name",
                 "width": "minmax(6em, 1.2fr)",
-                "hide_on_phone": True,
             },
             *range_columns(lo, hi),
             {
@@ -1629,7 +1662,6 @@ def route_table(rank: pd.DataFrame, start: date, key: str) -> None:
                 "label": "Latest hour",
                 "width": "10.8em",
                 "num": True,
-                "hide_on_phone": True,
                 "help": "The hour of day when the typical bus on this route runs latest, and how "
                 "late it is then (hours with at least 10 arrivals). Sorts by time of day.",
                 "sort": "worst_s",
@@ -1640,7 +1672,6 @@ def route_table(rank: pd.DataFrame, start: date, key: str) -> None:
                 "label": "Today so far",
                 "width": "6.8em",
                 "num": True,
-                "hide_on_phone": True,
                 "help": "The typical bus today, as of the latest update (every 15 minutes).",
                 "sort": "today_s",
                 "first": "desc",
@@ -2453,14 +2484,13 @@ def every_stop_card(
                 {"key": "stop", "label": "Stop", "width": "minmax(10em, 2fr)", "bold": True},
                 *range_columns(lo, hi),
             ],
-            # the Overview's few rows show whole, without scrolling inside the card
-            max_height=2000 if limit else 520,
+            max_height=520,
             key=key,
             # no sort chosen: the rows stay busiest first, as given
             default_sort=None,
         )
         if limit:
-            st.page_link("views/stops.py", label=f"All {len(enough):,} stops →")
+            st.page_link("views/stops.py", label="See all stops →")
 
 
 # ------------------------------------------------- one route and/or one stop per chart ----
@@ -2514,8 +2544,9 @@ PREDICTIONS_LINK = "More about the predictions →"
 
 
 def stop_choices(route_id: str | None, direction: int | None) -> pd.DataFrame:
-    """The stops a stop list offers: on one route (in one direction) in the order the bus reaches
-    them, labelled '3. Olive & 11th'; else every stop by name, labelled 'Olive & 11th · #1234'."""
+    """The stops a stop list offers: on one route in the order the bus reaches them (in one
+    direction labelled '3. Olive & 11th'); else every stop, busiest first; labelled
+    'Olive & 11th · #1234' unless numbered."""
     fv = current_fv()
     if route_id:
         df = q(
@@ -2535,13 +2566,31 @@ def stop_choices(route_id: str | None, direction: int | None) -> pd.DataFrame:
             df["label"] = [f"{i + 1}. {n}" for i, n in enumerate(df["stop_name"])]
             return df
     else:
+        # every stop, busiest first (most scheduled bus visits in the timetable in force), so the
+        # stops most riders use come first and odd ones last; typing still finds any stop
         df = readable_stop_names(
             q(
-                f"select stop_id, stop_name, stop_code from gtfs.stops "
-                f"where feed_version_id = {fv} and location_type = 0"
+                f"""
+                select s.stop_id, s.stop_name, s.stop_code,
+                       count(st.stop_id) as visits,
+                       (s.stop_name ilike 'approaching %%'
+                        or s.stop_name ilike '%%arrival zone%%') as not_for_riders
+                from gtfs.stops s
+                left join gtfs.stop_times st
+                  on st.stop_id = s.stop_id and st.feed_version_id = s.feed_version_id
+                where s.feed_version_id = {fv} and s.location_type = 0
+                group by 1, 2, 3
+                order by not_for_riders, visits desc, s.stop_name
+                """
             )
         )
-    df = df.sort_values("stop_name")
+        df["label"] = [
+            n + (f" · #{c}" if c else "")
+            for n, c in zip(df["stop_name"], df["stop_code"], strict=False)
+        ]
+        return df
+    # one route, both directions: still roughly in the order the bus reaches them (each stop at
+    # its earliest place on the route), not by name
     df["label"] = [
         n + (f" · #{c}" if c else "")
         for n, c in zip(df["stop_name"], df["stop_code"], strict=False)
@@ -2869,14 +2918,19 @@ a.ebw-r:hover { background: #eaf1f9; }
           border-left: 2px dashed #4b5563; }
 .ebw-x1 { top: 4px; height: 8px; border-radius: 3px; background: #9cc0e0; }
 .ebw-x2 { top: 0; width: 4px; height: 16px; border-radius: 1px; background: #123f6b; }
+/* the first column (the route or stop) stays in place while the rest scroll sideways, on a
+   phone or any window too narrow for the whole table */
+.ebw-r > :first-child { position: sticky; left: 0; z-index: 1; background: #fff;
+                        margin-left: -12px; padding-left: 12px; align-self: stretch;
+                        display: flex; align-items: center; }
+.ebw-h > :first-child { background: #f6f8f9; z-index: 2; }
+.ebw-h > div.ebw-hc:first-child { padding-left: 12px; }
+a.ebw-r:hover > :first-child { background: #eaf1f9; }
+.ebw-r > .ebw-n:first-child { justify-content: center; }
+/* a phone shows the same table as a computer (every column, the numbers beside the strips),
+   scrolled sideways inside its box; only the type is a little smaller */
 @media (max-width: 640px) {
-  .ebw-hide { display: none; } .ebw-t { font-size: 14px; column-gap: 8px;
-  grid-template-columns: var(--cols-phone); } .ebw-go-t { display: none; }
-  .ebw-r { padding: 7px 8px; }
-  /* on a phone the numbers go under the strip, which then takes the column's whole width */
-  .ebw-g { flex-direction: column; align-items: stretch; gap: 2px; }
-  .ebw-g > .ebw-s { flex: none; }
-  .ebw-x0 { top: -4px; height: calc(100% + 6px); }  /* clear of the numbers under the strip */
+  .ebw-t { font-size: 14px; }
 }
 </style>
 """.replace("RANGE_TEXT_PX", str(RANGE_TEXT_PX)).replace("GO;", GO_COLOUR + ";")
@@ -2927,23 +2981,23 @@ def link_table(
     rows: dicts with 'href' (optional; without it the row is not a link), 'hover' (optional
     text shown when the pointer rests on the row), and one entry per column key.
     columns: dicts with 'key', 'label', 'width' (CSS grid track), and optionally 'num'
-    (right-aligned), 'bold', 'hide_on_phone', 'phone_width', 'html' (value is HTML), 'help'
+    (centred, as are 'html' columns), 'bold', 'html' (value is HTML), 'help'
     (header tooltip), 'sort' (the row entry to sort by, if not the shown value; None in the
     column dict means the column doesn't sort) and 'first' ('asc' or 'desc': the direction of
     the first click; numbers default to latest/largest first).
     key: unique per page, so two tables' sort buttons don't interfere. Links carry the page's
     period and days filters along, so the next page opens with the same choice."""
     # rows that open another page end in "Report →" (go_label), in the green of every link to
-    # another page; on a phone just the arrow
+    # another page
     linked = any(r.get("href") for r in rows)
-    tracks = " ".join(c["width"] for c in columns) + (" max-content" if linked else "")
-    # on a phone the hidden columns get no track; flexible columns may shrink to their content
-    phone = " ".join(
-        c.get("phone_width", re.sub(r"minmax\([^,]+,", "minmax(min-content,", c["width"]))
+    # a fixed-width column grows to fit its heading or a longer value rather than spilling
+    # into the next column (flexible ones, minmax/fr, already do)
+    tracks = " ".join(
+        c["width"]
+        if ("fr" in c["width"] or "minmax" in c["width"])
+        else f"minmax(max-content, {c['width']})"
         for c in columns
-        if not c.get("hide_on_phone")
-    ) + (" 1.1em" if linked else "")
-
+    ) + (" max-content" if linked else "")
     go_cell = f"<div class='ebw-go'><span class='ebw-go-t'>{html_escape(go_label)} </span>→</div>"
 
     tid = "ebw-" + re.sub(r"[^a-z0-9]", "", key.lower())
@@ -2955,8 +3009,6 @@ def link_table(
             cls.append("ebw-n")
         if c.get("bold"):
             cls.append("ebw-k")
-        if c.get("hide_on_phone"):
-            cls.append("ebw-hide")
         text = (
             ""
             if value is None or (not isinstance(value, str) and pd.isna(value))
@@ -2980,9 +3032,7 @@ def link_table(
     radios = []
     head = []
     for j, c in enumerate(columns):
-        cls = ("ebw-left " if not (c.get("num") or c.get("html")) else "") + (
-            "ebw-hide" if c.get("hide_on_phone") else ""
-        )
+        cls = "ebw-left" if not (c.get("num") or c.get("html")) else ""
         label = html_escape(c["label"])
         tip = html_escape(c.get("help", ""))
         if j not in ranks:
@@ -3038,7 +3088,7 @@ def link_table(
         + "</style>"
         + "".join(radios)
         + f"<div class='ebw-t' style='max-height:{max_height}px;--cols:{tracks};"
-        + f"--cols-phone:{phone}'>"
+        + "'>"
         + "<div class='ebw-r ebw-h'>"
         + "".join(head)
         + ("<div></div>" if linked else "")
@@ -3106,7 +3156,6 @@ def range_columns(lo: float, hi: float) -> list[dict]:
             "label": "Typical bus",
             "width": "7.2em",
             "num": True,
-            "hide_on_phone": True,
             "help": TYPICAL_HELP + " Sorts latest first.",
             "sort": "typical_s",
             "first": "desc",
@@ -3115,7 +3164,6 @@ def range_columns(lo: float, hi: float) -> list[dict]:
             "key": "range",
             "label": "8 in 10 buses",
             "width": "minmax(13em, 2fr)",
-            "phone_width": "minmax(6.8em, 1fr)",
             "html": True,
             "help": RANGE_HELP + " The dashed line is on time; the dark tick is the typical bus; "
             "the numbers beside it are the range in minutes against the timetable. Sorts the "

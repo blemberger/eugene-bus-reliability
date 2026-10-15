@@ -31,14 +31,7 @@ from common import (
 
 require_db()
 st.title("Data & methods")
-st.caption(
-    "How the numbers on this site are made, and how complete they are. Behind the scenes: the "
-    "Arrivals board shows the live feed processed bus by bus, and Status shows whether data is "
-    "flowing and when the analysis last ran."
-)
-b1, b2 = st.columns(2)
-b1.page_link("views/arrivals.py", label="Arrivals board →")
-b2.page_link("views/status.py", label="Status →")
+st.caption("How the numbers on this site are made, and how complete they are.")
 
 # ---- definitions -------------------------------------------------------------------------
 with card():
@@ -512,3 +505,14 @@ with card():
             height=300,
         )
         show_chart(fig_g)
+
+# ---- behind the scenes: last, for the few who want the raw workings ----------------------
+with card():
+    st.subheader(
+        "Behind the scenes",
+        help="The Arrivals board shows the live feed processed bus by bus; Status shows whether "
+        "data is flowing and when the analysis last ran.",
+    )
+    b1, b2 = st.columns(2)
+    b1.page_link("views/arrivals.py", label="Arrivals board →")
+    b2.page_link("views/status.py", label="Status →")

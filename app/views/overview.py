@@ -40,15 +40,16 @@ require_db()
 st.title("How reliable are Eugene's buses?")
 require_marts()
 
+# the period and days everything on the page follows, under the title (as on every page); they
+# are repeated further down (filters_again)
+start, wt = page_filters()
+period = f"{day_label(wt)} since {fmt_date(start)}"
+
 # ---- when are buses late: any route, any stop -----------------------------------------------
 with card():
     title = st.empty()
     scope = scope_picker("ov", in_address=True)
-    # the chart goes here, right under the route and stop; the period and days filters below it
-    # (it is drawn after them, because it depends on them), then the headline numbers
     chart_slot = st.container()
-    start, wt = page_filters()
-    period = f"{day_label(wt)} since {fmt_date(start)}"
     title.subheader(
         lateness_title(scope),
         help=LATENESS_CHART_NOTE + f" {period[0].upper() + period[1:]}.",
@@ -93,7 +94,7 @@ if marts_ready():
     by_stop = lateness(start, wt, "stop")
     if not by_stop.empty:
         every_stop_card(
-            stops_with_numbers(by_stop), period[0].upper() + period[1:], "ov_stops", limit=15
+            stops_with_numbers(by_stop), period[0].upper() + period[1:], "ov_stops", limit=150
         )
     filters_again()  # the period and days buttons again, for everything below
     predictions_card("ov_pred", start, wt, period)

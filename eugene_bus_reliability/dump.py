@@ -126,6 +126,110 @@ def raw_samples(settings: Settings) -> None:
             print(text_format.MessageToString(msg.entity[0], as_one_line=False).rstrip())
 
 
+def coverage_by_hour(settings: Settings, cur: psycopg.Cursor) -> None:
+    """Hour by hour over the last 4 days (Eugene time): what we fetched and stored, how often
+    a bus went over 4 minutes without a stored report, how many mid-trip stops went unscored,
+    and whether an analysis rebuild or a restart of ours was running then. Lines up a day with
+    low coverage against our own deploys (ours) or not (LTD's), and shows whether the raw
+    archive holds messages the database lacks (then `make replay` recovers them)."""
+    section(
+        "COVERAGE BY HOUR, last 4 days (Eugene time): our side (fetches, restarts, rebuilds) or LTD's?"
+    )
+    print(
+        "fetches = vehicle-position messages stored; archived = files in the raw archive for that\n"
+        "hour (more than fetches: messages the database lacks; `make replay` stores them);\n"
+        "gaps_4min_pct = share of a bus's reports that came over 4 min after its previous one;\n"
+        "unscored_mid_pct = mid-trip stops of trips in the feed left unscored; full_rebuild = an\n"
+        "analysis full rebuild (after a deploy) was running that hour."
+    )
+    tz = "America/Los_Angeles"
+    cur.execute(
+        f"""
+        with f as (
+            select date_trunc('hour', fetched_at at time zone '{tz}') hr, count(*) fetches
+            from rt.fetch
+            where feed = 'vehicle_positions' and fetched_at > now() - interval '4 days'
+            group by 1
+        ),
+        g as (
+            select date_trunc('hour', position_timestamp at time zone '{tz}') hr,
+                   count(*) positions, count(distinct vehicle_id) buses,
+                   round(100.0 * avg((gap > interval '4 minutes')::int), 1) gaps_4min_pct
+            from (
+                select vehicle_id, position_timestamp,
+                       position_timestamp - lag(position_timestamp) over (
+                           partition by vehicle_id order by position_timestamp) gap
+                from rt.vehicle_position
+                where position_timestamp > now() - interval '4 days'
+            ) x
+            where gap is null or gap < interval '1 hour'
+            group by 1
+        ),
+        e as (
+            select date_trunc('hour', scheduled_arrival at time zone '{tz}') hr,
+                   round(100.0 * avg((status is null)::int), 1) unscored_mid_pct
+            from marts.fct_stop_events
+            where service_date >= current_date - 4 and trip_had_realtime
+              and not is_first_stop and not is_last_stop
+              and scheduled_arrival < now() - interval '2 hours'
+            group by 1
+        ),
+        b as (
+            select started_at at time zone '{tz}' s,
+                   coalesce(finished_at, now()) at time zone '{tz}' t
+            from analytics.build_log
+            where full_refresh and started_at > now() - interval '5 days'
+        )
+        select to_char(g.hr, 'Dy MM-DD HH24') hour_, coalesce(f.fetches, 0), g.positions,
+               g.buses, g.gaps_4min_pct, e.unscored_mid_pct,
+               exists (select 1 from b where b.s < g.hr + interval '1 hour' and b.t > g.hr)
+                   full_rebuild,
+               g.hr
+        from g left join f using (hr) left join e using (hr)
+        where extract(hour from g.hr) between 5 and 23
+        order by g.hr
+        """
+    )
+    rows = cur.fetchall()
+    # raw archive files per Eugene hour (the archive is filed by UTC day)
+    archived: dict[datetime, int] = {}
+    root = settings.raw_archive_dir / "vehicle_positions"
+    if root.is_dir() and rows:
+        from zoneinfo import ZoneInfo
+
+        local = ZoneInfo(tz)
+        days_utc = set()
+        for r in rows:
+            h = r[7].replace(tzinfo=local).astimezone(UTC)
+            days_utc.add(h.date())
+        for d in sorted(days_utc):
+            folder = root / f"{d:%Y/%m/%d}"
+            if not folder.is_dir():
+                continue
+            for f in folder.glob("*.pb.gz"):
+                try:
+                    ts = int(f.name.split(".")[0])
+                except ValueError:
+                    continue
+                hr = (
+                    datetime.fromtimestamp(ts, tz=UTC)
+                    .astimezone(local)
+                    .replace(minute=0, second=0, microsecond=0, tzinfo=None)
+                )
+                archived[hr] = archived.get(hr, 0) + 1
+    print(
+        "hour | fetches | archived | positions | buses | gaps_4min_pct | unscored_mid_pct | "
+        "full_rebuild"
+    )
+    for hour_, fetches, positions, buses, gaps, unscored, rebuild, hr in rows:
+        arch = archived.get(hr) if archived else None
+        flag = "  <-- archive has more" if arch and arch > fetches + 2 else ""
+        print(
+            f"{hour_} | {fetches} | {'∅' if arch is None else arch} | {positions} | {buses} | "
+            f"{gaps} | {'∅' if unscored is None else unscored} | {'yes' if rebuild else ''}{flag}"
+        )
+
+
 def main(settings: Settings, raw: bool = False) -> None:
     print("Eugene Bus Watch dump (concise)")
     if raw:
@@ -1224,6 +1328,32 @@ def main(settings: Settings, raw: bool = False) -> None:
         except psycopg.Error as e:
             cur.connection.rollback()
             print(f"(not available: {e})")
+
+        coverage_by_hour(settings, cur)
+
+        section(
+            "SERVICE ALERTS in LTD's feed now: when each says it applies, and when we first saw it"
+        )
+        show(
+            cur,
+            """
+            with cur_alerts as (
+                select alert_id, payload from rt.alert
+                where fetch_id = (select max(fetch_id) from rt.fetch where feed = 'alerts')
+            )
+            select left(c.payload #>> '{header_text,translation,0,text}', 70) header,
+                   (select string_agg(
+                        coalesce(to_char(to_timestamp((p ->> 'start')::bigint)
+                                 at time zone 'America/Los_Angeles', 'Mon DD'), '?') || ' to ' ||
+                        coalesce(to_char(to_timestamp((p ->> 'end')::bigint)
+                                 at time zone 'America/Los_Angeles', 'Mon DD'), 'no end'), '; ')
+                    from jsonb_array_elements(coalesce(c.payload -> 'active_period', '[]'::jsonb)) p)
+                       periods,
+                   (select min(f.fetched_at)::date from rt.alert a join rt.fetch f using (fetch_id)
+                    where a.alert_id = c.alert_id) first_seen
+            from cur_alerts c order by 3
+        """,
+        )
 
         section(
             "DOUBTFUL STOPS left out (int_doubtful_stops): our GPS time over 2 min out of line "
