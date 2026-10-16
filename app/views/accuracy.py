@@ -11,6 +11,7 @@ from common import (
     ALL_ROUTES,
     BRAND,
     PREDICTION_OFF_NOTE,
+    SIGNED_COUNT_SUMS,
     as_name,
     card,
     col_count,
@@ -23,6 +24,7 @@ from common import (
     filters_again,
     fmt_date,
     fmt_minutes,
+    fmt_off,
     hour_label,
     link_table,
     local_times,
@@ -30,12 +32,15 @@ from common import (
     prediction_scope_rows,
     q,
     q_live,
+    range_fields,
+    range_scale,
     readable_stop_names,
     require_db,
     require_marts,
     scope_picker,
     service_hour_key,
     show_chart,
+    signed_percentile,
     table,
 )
 
@@ -216,7 +221,8 @@ def off_by(key: str, where: str, params: tuple, daily: bool) -> pd.DataFrame:
         return q(
             f"""
             select {key} as id, basis, ahead_min, sum(n) as n,
-                   sum(sum_abs_s)::float8 / nullif(sum(n), 0) as mean_abs_s
+                   sum(sum_abs_s)::float8 / nullif(sum(n), 0) as mean_abs_s,
+                   {SIGNED_COUNT_SUMS}
             from marts.{table_name}
             where service_date >= %s {clause} {where}
               and {key} is not null and (basis = 'timetable' or ahead_min in (5, 10, 15))
@@ -228,13 +234,24 @@ def off_by(key: str, where: str, params: tuple, daily: bool) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def fmt_vs(seconds: float, what: str) -> str:
+    """'0.4 min later than predicted', '1.2 min earlier than predicted', 'as predicted'."""
+    m = abs(seconds) / 60
+    if round(m, 1) == 0:
+        return f"as {what}"
+    return f"{m:.1f} min {'later' if seconds > 0 else 'earlier'} than {what}"
+
+
 def prediction_table(
     off: pd.DataFrame, first_cols: list[dict], row_of, key: str, sort: str | None, min_n: int = 50
 ) -> None:
-    """A table of how far off the predictions are, 5 and 10 minutes away, against the printed
-    timetable on the same arrivals, one row per id in `off` (off_by()); row_of(id, n) gives
-    the row's href, hover (which carries the number of arrivals) and first columns' values.
-    With no sort, the rows come busiest first, as the stop tables do."""
+    """A table of how far off the predictions were when they said 5 minutes away, beside the
+    printed timetable on the same arrivals, one row per id in `off` (off_by()), in the columns
+    every reliability table has: minutes off on average and the 8-in-10 strip, for each. The
+    strips share one scale, so a narrow prediction strip beside a wide timetable one shows the
+    prediction doing better. row_of(id, n) gives the row's href, hover (which carries the number
+    of arrivals) and first columns' values. With no sort, the rows come busiest first, as the
+    stop tables do."""
     if off.empty:
         st.caption("Not enough measured bus arrivals yet for this period.")
         return
@@ -248,81 +265,89 @@ def prediction_table(
     if not ids:
         st.caption("Not enough measured bus arrivals yet for this period.")
         return
-
-    def minutes(frame: pd.DataFrame, i: str) -> float | None:
-        if i not in frame.index or pd.isna(frame.loc[i, "mean_abs_s"]):
-            return None
-        return float(frame.loc[i, "mean_abs_s"]) / 60
-
     if sort is None:
         ids.sort(key=lambda i: -int(at[15].loc[i, "n"]))
-    values = {i: (minutes(at[5], i), minutes(at[10], i), minutes(tt, i)) for i in ids}
-    # the two prediction columns share a scale (so 5 and 10 minutes away compare); the
-    # timetable column has its own, so its few very large values don't shrink the rest
-    top_pred = max(v for vs in values.values() for v in vs[:2] if v is not None)
-    top_tt = max((vs[2] for vs in values.values() if vs[2] is not None), default=1.0)
 
-    def bar(v: float | None, colour: str, top: float) -> str:
-        if v is None:
-            return ""
+    def spread(frame: pd.DataFrame, i: str) -> tuple:
+        """(average seconds off, typical, low end, high end of the 8 in 10), signed seconds."""
+        if i not in frame.index:
+            return (None, None, None, None)
+        r = frame.loc[i]
         return (
-            "<span class='ebw-g'><span class='ebw-x'>"
-            f"<span class='ebw-x1' style='left:0;top:4px;width:{v / top * 100:.0f}%;"
-            f"background:{colour}'></span></span>"
-            # a short number, so the bar gets the rest of the column
-            f"<span class='ebw-s' style='flex:0 0 3.6em'>{v:.1f} min</span>"
-            "</span>"
+            None if pd.isna(r["mean_abs_s"]) else float(r["mean_abs_s"]),
+            signed_percentile(r, 0.5),
+            signed_percentile(r, 0.1),
+            signed_percentile(r, 0.9),
         )
+
+    vals = {i: (spread(at[5], i), spread(tt, i)) for i in ids}
+    ends = pd.DataFrame(
+        [(v[2], v[3]) for vs in vals.values() for v in vs], columns=["p10", "p90"]
+    ).dropna()
+    lo, hi = range_scale(ends, "p10", "p90")
 
     rows = []
     for i in ids:
-        c5, c10, t = values[i]
-        n = int(at[15].loc[i, "n"])
+        (p_off, p_med, p_lo, p_hi), (t_off, t_med, t_lo, t_hi) = vals[i]
+        base = row_of(i, int(at[15].loc[i, "n"]))
+        ten = at[10].loc[i, "mean_abs_s"] if i in at[10].index else None
+        if ten is not None and pd.notna(ten):
+            base["hover"] += f"; 10 minutes away, {fmt_off(ten)} off on average"
+        if p_med is not None:
+            base["hover"] += f"; the typical bus came {fmt_vs(p_med, 'predicted')}"
         rows.append(
             {
-                **row_of(i, n),
-                "c5": bar(c5, BRAND, top_pred),
-                "c5_s": c5,
-                "c10": bar(c10, BRAND, top_pred),
-                "c10_s": c10,
-                "tt": bar(t, "#8a8f94", top_tt),
-                "tt_s": t,
+                **base,
+                **{f"p_{k}": v for k, v in range_fields(p_lo, p_med, p_hi, lo, hi, p_off).items()},
+                **{f"t_{k}": v for k, v in range_fields(t_lo, t_med, t_hi, lo, hi, t_off).items()},
             }
         )
     cols = list(first_cols)
-    for k, label, tip in (
-        ("c5", "Prediction, 5 min away", "Average minutes off when the prediction said 5 minutes."),
+    for pre, what, tip in (
         (
-            "c10",
-            "Prediction, 10 min away",
-            "Average minutes off when the prediction said 10 minutes.",
+            "p",
+            "prediction",
+            "Against LTD's prediction when it said the bus was 5 minutes away (the dashed line: "
+            "when it predicted; left of it, earlier than predicted).",
         ),
         (
-            "tt",
-            "Printed timetable",
-            "Average minutes off the printed timetable, same bus arrivals.",
+            "t",
+            "timetable",
+            "Against the printed timetable, for the same bus arrivals (the dashed line: the "
+            "scheduled time; left of it, early).",
         ),
     ):
-        cols.append(
+        cols += [
             {
-                "key": k,
-                "label": label,
-                "width": "minmax(9em, 1fr)",
-                "html": True,
-                "help": tip + " Sorts closest first.",
-                "sort": f"{k}_s",
+                "key": f"{pre}_off",
+                "label": f"Minutes off {what}",
+                "width": "9.4em",
+                "num": True,
+                "help": f"{tip} Average minutes off, early or late alike. Sorts closest first.",
+                "sort": f"{pre}_off_s",
                 "first": "asc",
-            }
-        )
+            },
+            {
+                "key": f"{pre}_range",
+                "label": f"8 in 10 buses vs {what}",
+                "width": "minmax(13em, 2fr)",
+                "html": True,
+                "help": f"{tip} The strip is where 8 in 10 buses came, the dark tick the typical "
+                "bus, the numbers the range in minutes. Sorts the narrowest first.",
+                "sort": f"{pre}_range_s",
+                "first": "asc",
+            },
+        ]
     # a row opens that route's or stop's report card at its predictions, like every other
     # table's rows; the choice at the top of this page is how to see one here
     link_table(rows, cols, max_height=520, key=key, default_sort=sort)
 
 
 TABLE_HELP = (
-    "Average minutes the bus came from the time it was given, early or late alike, on the same "
-    "bus arrivals: the prediction when it said 5 and 10 minutes away, and the printed timetable. "
-    "Lower is better. Rows with at least 50 bus arrivals measured. "
+    "How far from the time it was given the bus came, on the same bus arrivals: LTD's "
+    "prediction when it said 5 minutes away, and the printed timetable. Minutes off: on "
+    "average, early or late alike; lower is better. The strips: where 8 in 10 buses came, "
+    "earlier (left of the dashed line) or later. Rows with at least 50 bus arrivals measured. "
     f"{PERIOD}. Click a column heading to sort; click a row for that report card's predictions."
 )
 

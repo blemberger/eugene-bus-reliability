@@ -18,6 +18,7 @@ from google.protobuf import text_format
 
 from eugene_bus_reliability import rt_parse
 from eugene_bus_reliability.config import Settings
+from eugene_bus_reliability.stop_order import route_stop_order
 
 # Must match the dbt macro horizon_band() and app/common.py HORIZON_BANDS.
 HORIZON_BAND_SQL = (
@@ -228,6 +229,162 @@ def coverage_by_hour(settings: Settings, cur: psycopg.Cursor) -> None:
             f"{hour_} | {fetches} | {'∅' if arch is None else arch} | {positions} | {buses} | "
             f"{gaps} | {'∅' if unscored is None else unscored} | {'yes' if rebuild else ''}{flag}"
         )
+
+
+def route_order_check(conn: psycopg.Connection, cur: psycopg.Cursor) -> None:
+    """Routes whose trips don't all make the same stops, and how the stop order the site uses
+    (stop_order.py) handles them: places in the merged order, stops a trip visits twice (a
+    loop), and how many stops the old order (each stop's smallest stop number) put elsewhere."""
+    section(
+        "ROUTE STOP ORDER: routes whose trips make different stops (short trips, loops), as the "
+        "site orders them"
+    )
+    print(
+        "stop_lists = distinct stop lists among the trips; longest = stops on the longest;\n"
+        "places = places in the merged order (a stop visited twice counts twice);\n"
+        "twice = stops a single trip visits twice (loops); old_order_moved = stops whose place\n"
+        "differs from where ordering by their smallest stop number put them (the old way)."
+    )
+    try:
+        fv = cur.execute("select max(feed_version_id) from gtfs.feed_version").fetchone()[0]
+        rows = cur.execute(
+            """
+            select r.route_id, r.route_short_name, t.direction_id,
+                   count(distinct t.trip_id) as trips
+            from gtfs.trips t
+            join gtfs.routes r on r.route_id = t.route_id and r.feed_version_id = t.feed_version_id
+            where t.feed_version_id = %s and t.direction_id is not null
+            group by 1, 2, 3
+            """,
+            (fv,),
+        ).fetchall()
+        out = []
+        for route_id, short, direction, trips in rows:
+            lists = cur.execute(
+                """
+                select count(distinct pattern), max(n), bool_or(twice)
+                from (
+                    select st.trip_id, string_agg(st.stop_id::text, ',' order by st.stop_sequence)
+                               as pattern,
+                           count(*) as n,
+                           count(*) > count(distinct st.stop_id) as twice
+                    from gtfs.stop_times st
+                    join gtfs.trips t on t.trip_id = st.trip_id
+                     and t.feed_version_id = st.feed_version_id
+                    where st.feed_version_id = %s and t.route_id = %s and t.direction_id = %s
+                    group by 1
+                ) x
+                """,
+                (fv, route_id, direction),
+            ).fetchone()
+            if lists[0] <= 1 and not lists[2]:
+                continue
+            order, _ = route_stop_order(conn, fv, route_id, direction)
+            old = cur.execute(
+                """
+                select st.stop_id::text from gtfs.stop_times st
+                join gtfs.trips t on t.trip_id = st.trip_id and t.feed_version_id = st.feed_version_id
+                where st.feed_version_id = %s and t.route_id = %s and t.direction_id = %s
+                group by 1 order by min(st.stop_sequence), 1
+                """,
+                (fv, route_id, direction),
+            ).fetchall()
+            first: list[str] = []
+            for sid in order:
+                if sid not in first:
+                    first.append(sid)
+            moved = sum(1 for a, (b,) in zip(first, old, strict=False) if a != b)
+            twice = len(order) - len(set(order))
+            out.append((str(short), direction, trips, lists[0], lists[1], len(order), twice, moved))
+        print("route | dir | trips | stop_lists | longest | places | twice | old_order_moved")
+        for r in sorted(out, key=lambda r: (len(r[0]), r[0], r[1])):
+            print(" | ".join(str(v) for v in r))
+        if not out:
+            print("(every route's trips make the same stops)")
+    except Exception as exc:  # noqa: BLE001
+        print(f"!! {str(exc).strip().splitlines()[0][:200]}")
+        conn.rollback()
+
+
+def prediction_strips_check(cur: psycopg.Cursor) -> None:
+    """The Predictions page's 8-in-10 strips come from running counts in the marts
+    (straight-line between thresholds); here they are next to the exact percentiles from the
+    samples, for the busiest routes over the last 30 days."""
+    section(
+        "PREDICTION STRIPS (Predictions page tables): from the marts' running counts vs exact, "
+        "last 30 days, seconds (negative = earlier than told)"
+    )
+    show(
+        cur,
+        """
+        with s as (
+            select route_id, 'sign 5 min' as what, error_s as e
+            from marts.fct_countdown_samples
+            where in_comparison and ahead_min = 5
+              and service_date >= (now() at time zone 'America/Los_Angeles')::date - 29
+            union all
+            select route_id, 'timetable', schedule_error_s
+            from marts.fct_countdown_samples
+            where in_comparison and ahead_min = 15
+              and service_date >= (now() at time zone 'America/Los_Angeles')::date - 29
+        )
+        select r.route_short_name as route, what, count(*) as n,
+               round(percentile_cont(0.1) within group (order by e)::numeric) as p10,
+               round(percentile_cont(0.5) within group (order by e)::numeric) as p50,
+               round(percentile_cont(0.9) within group (order by e)::numeric) as p90,
+               round(avg(abs(e))::numeric) as mean_abs
+        from s
+        join gtfs.routes r on r.route_id = s.route_id
+         and r.feed_version_id = (select max(feed_version_id) from gtfs.feed_version)
+        group by 1, 2 order by count(*) desc, 1, 2 limit 16
+        """,
+    )
+    print("The same from the running counts (n_sle_ columns), as the site reads them:")
+    cols = ", ".join(
+        f"sum(n_sle_{'m' + str(-t) if t < 0 else t}s) as c{i}" for i, t in enumerate(SIGNED)
+    )
+    try:
+        rows = cur.execute(
+            f"""
+            select r.route_short_name, case when basis = 'sign' then 'sign 5 min'
+                                            else 'timetable' end, sum(n), {cols}
+            from marts.mart_prediction_daily m
+            join gtfs.routes r on r.route_id = m.route_id
+             and r.feed_version_id = (select max(feed_version_id) from gtfs.feed_version)
+            where (basis = 'timetable' or ahead_min = 5)
+              and service_date >= (now() at time zone 'America/Los_Angeles')::date - 29
+            group by 1, 2 order by sum(n) desc, 1, 2 limit 16
+            """
+        ).fetchall()
+        print("route | what | n | p10 | p50 | p90")
+        for route, what, n, *counts in rows:
+            print(
+                " | ".join(
+                    [str(route), what, str(n)]
+                    + [str(round(_signed_pct(counts, n, q))) for q in (0.1, 0.5, 0.9)]
+                )
+            )
+    except Exception as exc:  # noqa: BLE001
+        print(f"!! {str(exc).strip().splitlines()[0][:200]}")
+        cur.connection.rollback()
+
+
+# the thresholds of the marts' signed running counts (dbt macros/error_counts.sql)
+SIGNED = [-900, -600, -480, -360, -300, -240, -180, -150, -120, -90, -60, -45, -30, -15, 0,
+          15, 30, 45, 60, 90, 120, 150, 180, 240, 300, 360, 480, 600, 900]  # fmt: skip
+
+
+def _signed_pct(counts: list, n: float, share: float) -> float:
+    want = share * float(n)
+    prev_t = prev_c = None
+    for t, c in zip(SIGNED, counts, strict=True):
+        c = float(c or 0)
+        if c >= want:
+            if prev_t is None or c == prev_c:
+                return float(t)
+            return prev_t + (want - prev_c) / (c - prev_c) * (t - prev_t)
+        prev_t, prev_c = float(t), c
+    return float(SIGNED[-1])
 
 
 def main(settings: Settings, raw: bool = False) -> None:
@@ -1435,6 +1592,9 @@ def main(settings: Settings, raw: bool = False) -> None:
              and n.stop_id = o.stop_id and n.direction_id is not distinct from o.direction_id
         """,
         )
+
+        route_order_check(conn, cur)
+        prediction_strips_check(cur)
 
         section("POSITIONS off the route shape (detours / bad fixes)")
         show(

@@ -76,6 +76,7 @@ from eugene_bus_reliability.names import (  # noqa: E402
     clean_stop_name,
     stop_name_rule,  # noqa: F401 — used by app/selfcheck.py
 )
+from eugene_bus_reliability.stop_order import route_stop_order  # noqa: E402
 
 
 def readable_stop_names(df: pd.DataFrame) -> pd.DataFrame:
@@ -463,7 +464,13 @@ _TILE_CSS = (
     ".ebw-tile { display: flex; align-items: center; gap: 0.5rem; padding: 0.45rem 0.65rem;"
     " border: 1px solid #cfd6de; border-left: 4px solid var(--edge); border-radius: 6px;"
     " background: #fff; color: #262730; text-decoration: none; line-height: 1.25; min-width: 0; }"
-    ".ebw-tile:hover { background: #f1f5f8; border-color: var(--edge); }"
+    ".ebw-tile { transition: background-color 0.12s, box-shadow 0.12s, transform 0.12s; }"
+    ".ebw-tile:hover { background: #f1f5f8; border-color: var(--edge);"
+    " box-shadow: 0 3px 8px rgba(20, 30, 45, 0.14); transform: translateY(-1px); }"
+    ".ebw-tile:active { box-shadow: 0 1px 2px rgba(20, 30, 45, 0.16); transform: translateY(1px); }"
+    ".ebw-tile:focus-visible { outline: 3px solid rgba(31, 95, 158, 0.45); outline-offset: 2px; }"
+    ".ebw-tile .ebw-go { transition: transform 0.12s; }"
+    ".ebw-tile:hover .ebw-go { transform: translateX(3px); }"
     ".ebw-tile b { font-size: 1rem; }"
     ".ebw-tile > span:first-child { min-width: 0; overflow: hidden; }"
     ".ebw-tile small { display: block; color: #666; font-size: 0.85rem; white-space: nowrap;"
@@ -855,10 +862,9 @@ def log_page_view(page: str, load_ms: int | None = None) -> None:
 
 def fit_phone(fig):
     """On a phone, give the plot the screen's width: the legend above it, and the labels along
-    the bottom level and fewer (every few hours, a handful of dates). Left alone, Plotly tilts
-    crowded labels, and a tilted first label ("5 am") needs room to the left of the plot, which
-    showed as a wide blank strip beside the minutes labels. A chart that sets its own label angle
-    (the stops along a route) keeps it."""
+    the bottom level and fewer (every few hours, a handful of dates), as Plotly would otherwise
+    tilt crowded labels. A chart that sets its own label angle (the stops along a route) keeps
+    it."""
     if not is_mobile():
         return fig
     # a smaller legend, so its entries fit side by side on the narrow screen
@@ -1055,6 +1061,64 @@ def next_stops(buses: pd.DataFrame, marker: int | None = None) -> pd.DataFrame:
         return q_fresh(sql, params, marker=marker)
     except Exception:  # noqa: BLE001 — the analysis tables may be rebuilding
         return pd.DataFrame()
+
+
+def live_buses(route_id: str | None = None, direction: int | None = None) -> pd.DataFrame:
+    """Every bus that reported in the last 10 minutes (or those on one route, optionally in one
+    direction): where it is, its trip, LTD's next stop and the one after with their predicted
+    times, and how late LTD's prediction puts it (delay_s). The Live map and a route's report
+    card."""
+    FV = str(current_fv())
+    where = ""
+    params: tuple = ()
+    if route_id is not None:
+        where = "where t.route_id = %s" + (
+            " and t.direction_id = %s" if direction is not None else ""
+        )
+        params = (str(route_id), *(() if direction is None else (int(direction),)))
+    sj, sched = schedule_join("p")
+    return q_fresh(
+        f"""
+        with latest as (
+            select distinct on (vehicle_id) *
+            from rt.vehicle_position
+            where position_timestamp between now() - interval '10 minutes' and now() + interval '5 minutes'
+            order by vehicle_id, position_timestamp desc
+        )
+        select vp.vehicle_id, vp.trip_id, vp.start_date, vp.route_id, r.route_short_name as route,
+               t.trip_headsign as headsign,
+               vp.latitude as lat, vp.longitude as lon, vp.bearing, vp.speed_mps, vp.occupancy_status,
+               vp.position_timestamp,
+               p.stop_sequence as next_seq, p2.stop_sequence as seq2,
+               s.stop_name as next_stop, s.stop_lat as next_lat, s.stop_lon as next_lon,
+               coalesce(p.arrival_time, p.departure_time) as next_time,
+               s2.stop_name as stop2, s2.stop_lat as lat2s, s2.stop_lon as lon2s,
+               coalesce(p2.arrival_time, p2.departure_time) as time2,
+               coalesce(p.arrival_delay, p.departure_delay,
+                        extract(epoch from coalesce(p.arrival_time, p.departure_time) - {sched})::int) as delay_s
+        from latest vp
+        left join gtfs.trips t  on t.trip_id = vp.trip_id and t.feed_version_id = {FV}
+        left join gtfs.routes r on r.route_id = t.route_id and r.feed_version_id = t.feed_version_id
+        left join lateral (
+            select * from rt.prediction_current x
+            where x.trip_id = vp.trip_id and x.start_date = vp.start_date
+              and coalesce(x.arrival_time, x.departure_time) >= vp.position_timestamp - interval '30 seconds'
+            order by x.stop_sequence limit 1
+        ) p on true
+        left join gtfs.stops s  on s.stop_id = p.stop_id and s.feed_version_id = t.feed_version_id
+        left join lateral (
+            select * from rt.prediction_current x
+            where x.trip_id = vp.trip_id and x.start_date = vp.start_date and x.stop_sequence > p.stop_sequence
+            order by x.stop_sequence limit 1
+        ) p2 on true
+        left join gtfs.stops s2 on s2.stop_id = p2.stop_id and s2.feed_version_id = t.feed_version_id
+        {sj}
+        {where}
+        order by vp.vehicle_id
+    """,
+        params,
+        marker=live_marker()["fid"],
+    )
 
 
 def arrow_safe(df: pd.DataFrame) -> pd.DataFrame:
@@ -1716,6 +1780,41 @@ ERROR_THRESHOLDS = [15, 30, 45, 60, 90, 120, 150, 180, 240, 300, 360, 480, 600, 
 ERROR_COUNT_SUMS = ", ".join(f"sum(n_le_{t}s) as n_le_{t}s" for t in ERROR_THRESHOLDS)
 
 
+# the signed running counts (dbt macros/error_counts.sql signed_error_counts): n_sle_m900s
+# (arrivals 15 minutes or more earlier than told) ... n_sle_0s ... n_sle_900s
+SIGNED_THRESHOLDS = [
+    -900, -600, -480, -360, -300, -240, -180, -150, -120, -90, -60, -45, -30, -15,
+    0, 15, 30, 45, 60, 90, 120, 150, 180, 240, 300, 360, 480, 600, 900,
+]  # fmt: skip
+
+
+def signed_col(t: int) -> str:
+    return f"n_sle_{'m' + str(-t) if t < 0 else t}s"
+
+
+SIGNED_COUNT_SUMS = ", ".join(f"sum({signed_col(t)}) as {signed_col(t)}" for t in SIGNED_THRESHOLDS)
+
+
+def signed_percentile(row, share: float) -> float | None:
+    """Seconds (signed: negative = earlier than told) below which `share` of the arrivals in
+    a row with the signed running counts came (straight-line between thresholds); clamped to
+    15 minutes either way. None without the counts."""
+    n = row.get("n")
+    first = signed_col(SIGNED_THRESHOLDS[0])
+    if n is None or pd.isna(n) or not n or first not in row or pd.isna(row.get(first)):
+        return None
+    want = share * float(n)
+    prev_t = prev_c = None
+    for t in SIGNED_THRESHOLDS:
+        c = float(row.get(signed_col(t)))
+        if c >= want:
+            if prev_t is None or c == prev_c:
+                return float(t)
+            return prev_t + (want - prev_c) / (c - prev_c) * (t - prev_t)
+        prev_t, prev_c = float(t), c
+    return float(SIGNED_THRESHOLDS[-1])
+
+
 def off_percentile(row, share: float) -> float | None:
     """Minutes off (in minutes) that `share` of the arrivals in a prediction_off() row came
     within, read off its running counts (straight-line between thresholds). None without the
@@ -2008,6 +2107,18 @@ def show_chart(fig: go.Figure) -> None:
     if fig.layout.xaxis.showgrid is None:  # no vertical grid lines unless a chart asks for them
         fig.update_xaxes(showgrid=False)
     fig.update_yaxes(**axis)
+
+    # An axis title of "" is not no title: Plotly still keeps room for it beside the tick
+    # labels (about 25 px), which on a phone was a wide empty strip left of the minutes. Only
+    # an absent title takes no room, so empty ones are removed.
+    def _no_empty_title(ax) -> None:
+        if ax.title.text is not None and not str(ax.title.text).strip():
+            ax.title.text = None
+
+    fig.for_each_xaxis(_no_empty_title)
+    fig.for_each_yaxis(_no_empty_title)
+    if fig.layout.legend.title.text is not None and not str(fig.layout.legend.title.text).strip():
+        fig.layout.legend.title.text = None
     st.plotly_chart(
         fit_phone(fig),
         width="stretch",
@@ -2548,6 +2659,48 @@ ALL_CHOICE = "__all__"
 PREDICTIONS_LINK = "More about the predictions →"
 
 
+@st.cache_data(ttl=3600, show_spinner=False, max_entries=200)
+def route_order(
+    route_id: str, direction: int, fv: int
+) -> tuple[list[str], dict[tuple[str, int], int]]:
+    """The order the bus reaches one route's stops in one direction (a stop visited twice on a
+    trip, as on a loop, has two places), and each (stop_id, stop_sequence)'s place in it
+    (eugene_bus_reliability/stop_order.py)."""
+    conn = _connection()
+    try:
+        with conn.transaction():
+            order, place_of = route_stop_order(conn, fv, str(route_id), int(direction))
+    except BaseException:
+        conn.close()
+        raise
+    _release(conn)
+    return order, place_of
+
+
+def place_join(route_id: str, direction: int, alias: str = "e") -> tuple[str, tuple]:
+    """SQL giving each arrival on a route, in one direction, its place along the route
+    (route_order) as `place`: a join, and its parameters. An arrival whose stop number the
+    timetable doesn't have (an older timetable) takes its stop's first place."""
+    order, place_of = route_order(route_id, direction, current_fv())
+    first: dict[str, int] = {}
+    for i, sid in enumerate(order):
+        first.setdefault(sid, i)
+    keys = sorted(place_of)
+    sql = f"""
+        left join unnest(%s::text[], %s::int[], %s::int[]) as pl(stop_id, seq, place)
+          on pl.stop_id = {alias}.stop_id::text and pl.seq = {alias}.stop_sequence
+        left join unnest(%s::text[], %s::int[]) as pf(stop_id, place)
+          on pf.stop_id = {alias}.stop_id::text"""
+    params = (
+        [k[0] for k in keys],
+        [k[1] for k in keys],
+        [place_of[k] for k in keys],
+        list(first),
+        list(first.values()),
+    )
+    return sql, params
+
+
 def stop_choices(route_id: str | None, direction: int | None) -> pd.DataFrame:
     """The stops a stop list offers: on one route in the order the bus reaches them (in one
     direction labelled '3. Olive & 11th'); else every stop, busiest first; labelled
@@ -2568,7 +2721,16 @@ def stop_choices(route_id: str | None, direction: int | None) -> pd.DataFrame:
         )
         df = readable_stop_names(df)
         if direction is not None:
-            df["label"] = [f"{i + 1}. {n}" for i, n in enumerate(df["stop_name"])]
+            # in the order the bus reaches them, numbered by their place along the route as in
+            # the route's table and chart (on a loop the first stop's second visit, at the end,
+            # has a number of its own there but is one choice here)
+            order, _ = route_order(route_id, direction, fv)
+            first: dict[str, int] = {}
+            for i, sid in enumerate(order):
+                first.setdefault(sid, i + 1)
+            df["no"] = [first.get(str(s), 9999) for s in df["stop_id"]]
+            df = df.sort_values(["no", "seq"]).reset_index(drop=True)
+            df["label"] = [f"{no}. {n}" for no, n in zip(df["no"], df["stop_name"], strict=False)]
             return df
     else:
         # every stop, busiest first (most scheduled bus visits in the timetable in force), so the
@@ -2892,7 +3054,13 @@ _TABLE_CSS = """
 .ebw-r { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; align-items: center;
          padding: 7px 12px; border-bottom: 1px solid #eef0f2; color: #262730;
          text-decoration: none; }
+a.ebw-r { transition: background-color 0.12s; }
 a.ebw-r:hover { background: #eaf1f9; }
+/* pressed (on a phone, the only feedback a tap gets): a shade darker */
+a.ebw-r:active, a.ebw-r:active > :first-child { background: #d9e6f3; }
+a.ebw-r:focus-visible { outline: 3px solid rgba(31, 95, 158, 0.45); outline-offset: -3px; }
+a.ebw-r .ebw-go { transition: transform 0.12s; }
+a.ebw-r:hover .ebw-go { transform: translateX(3px); }
 .ebw-h { position: sticky; top: 0; order: -1; background: #f6f8f9; font-weight: 600;
          align-items: stretch; font-size: 13px; color: #555; z-index: 1; padding: 0 12px; }
 /* a heading on one line, centred over its column (names, left, over theirs); the whole

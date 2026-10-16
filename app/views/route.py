@@ -11,17 +11,23 @@ import plotly.graph_objects as go
 import streamlit as st
 from common import (
     BRAND,
+    COL_TOWARD_NARROW,
     LINE_MAIN,
+    LIVE_CHECK_SECONDS,
     MARKER_MAIN,
     REPORT_TABLE_HEIGHT,
     back_button,
     card,
     clean_headsign,
+    clean_headsigns,
+    col_ago,
+    col_clock,
     current_fv,
     data_note,
     day_label,
     day_sql,
     days_suffix,
+    empty_message,
     filters_again,
     fmt_date,
     fmt_delay,
@@ -29,11 +35,18 @@ from common import (
     headline_metrics,
     hour_label,
     is_mobile,
+    late_minutes,
     lateness,
     link_table,
+    live_buses,
+    live_marker,
+    live_status_line,
+    local_times,
     minutes_axis,
+    next_stops,
     on_time_line,
     page_filters,
+    place_join,
     predictions_card,
     q,
     range_columns,
@@ -42,6 +55,7 @@ from common import (
     recomputing_note,
     require_db,
     require_marts,
+    route_order,
     route_rank,
     route_tiles,
     service_hour_key,
@@ -49,6 +63,7 @@ from common import (
     show_chart,
     stop_choices,
     stop_link,
+    table,
     times_of_day_card,
     trend_card,
 )
@@ -139,9 +154,17 @@ if dir_labels:
         )
     if direction is None:  # clicking the selected option clears it; fall back to the first
         direction = next(iter(dir_labels))
-# each stop's number along the route in this direction, the same in the stop list, the table and
-# the chart ('3. Olive & 11th')
-STOP_NO = {str(sid): i + 1 for i, sid in enumerate(stop_choices(route_id, direction)["stop_id"])}
+# each stop's place along the route in this direction, the same in the stop list, the table and
+# the chart ('3. Olive & 11th'). Trips don't all make the same stops (some start or end part way,
+# and a loop passes its first stop again at the end), so the order comes from fitting every
+# trip's stops together (route_order), and each arrival is placed by its own trip's stop number
+# (place_join): on a loop, leaving the first stop and arriving back there are two places.
+if direction is not None:
+    PLACE_SQL, PLACE_PARAMS = place_join(route_id, direction)
+    PLACE = "coalesce(pl.place, pf.place, 9999)"
+else:  # a route the timetable gives no directions: each stop once, at its earliest place
+    PLACE_SQL, PLACE_PARAMS = "", ()
+    PLACE = "min(e.stop_sequence) over (partition by e.stop_id)"
 dir_clause = "and direction_id = %s" if direction is not None else ""
 dir_params: tuple = (direction,) if direction is not None else ()
 
@@ -168,20 +191,34 @@ today = q(
 )
 along = q(
     f"""
-    select e.stop_sequence, s.stop_name, bool_or(e.is_timepoint) as is_timepoint, e.stop_id,
-           count(*) as n, avg(abs(e.delay_s)) as mean_abs,
-           percentile_cont(0.5) within group (order by e.delay_s) as median_delay,
-           percentile_cont(0.1) within group (order by e.delay_s) as p10,
-           percentile_cont(0.9) within group (order by e.delay_s) as p90
-    from marts.fct_stop_events e
-    join gtfs.stops s on s.stop_id = e.stop_id and s.feed_version_id = {FV}
-    where e.route_id = %s and e.service_date >= %s and e.status is not null
-      {day_sql(wt, "e.service_date", "e.weekday_type")[0]}
-      {dir_clause.replace("direction_id", "e.direction_id")}
-    group by 1, 2, 4 having count(*) >= 5 order by 1
+    select place, min(stop_id) as stop_id, bool_or(is_timepoint) as is_timepoint,
+           count(*) as n, avg(abs(delay_s)) as mean_abs,
+           percentile_cont(0.5) within group (order by delay_s) as median_delay,
+           percentile_cont(0.1) within group (order by delay_s) as p10,
+           percentile_cont(0.9) within group (order by delay_s) as p90
+    from (
+        select e.stop_id::text as stop_id, e.is_timepoint, e.delay_s, {PLACE} as place
+        from marts.fct_stop_events e {PLACE_SQL}
+        where e.route_id = %s and e.service_date >= %s and e.status is not null
+          {day_sql(wt, "e.service_date", "e.weekday_type")[0]}
+          {dir_clause.replace("direction_id", "e.direction_id")}
+    ) x
+    group by place having count(*) >= 5 order by place
     """,
-    (route_id, start, *wt_params, *dir_params),
+    (*PLACE_PARAMS, route_id, start, *wt_params, *dir_params),
 )
+if not along.empty:
+    stop_names = q(
+        f"select stop_id::text as stop_id, stop_name from gtfs.stops where feed_version_id = {FV}"
+    )
+    along = along.merge(stop_names, on="stop_id", how="left")
+    along["stop_name"] = along["stop_name"].fillna("Stop")
+    if direction is not None:
+        along["no"] = along["place"].astype(int) + 1
+    else:  # numbered by the stop list
+        _no = {str(s): i + 1 for i, s in enumerate(stop_choices(route_id, None)["stop_id"])}
+        along["no"] = [_no.get(str(s), 0) for s in along["stop_id"]]
+    along["Stop"] = [f"{no}. {n}" for no, n in zip(along["no"], along["stop_name"], strict=False)]
 with table_slot, card():
     st.subheader(
         f"Each stop on route {route_name}{days_suffix()}",
@@ -201,8 +238,8 @@ with table_slot, card():
                     "href": stop_link(r.stop_id, "").split("#")[0],
                     "hover": f"{r.stop_name}: {int(r.n):,} arrivals measured",
                     # numbered in the order the bus reaches them, and sorted that way
-                    "stop": f"{STOP_NO.get(str(r.stop_id), '?')}. {r.stop_name}",
-                    "stop_s": STOP_NO.get(str(r.stop_id), 999),
+                    "stop": r.Stop,
+                    "stop_s": int(r.no),
                     **range_fields(r.p10_s, r.med_s, r.p90_s, lo, hi, r.mean_abs),
                 }
                 for r in along.itertuples()
@@ -253,18 +290,14 @@ with card():
     if along.empty:
         st.caption("Not enough scored arrivals yet.")
     else:
-        # numbered as in the table and the stop list: the order the bus reaches them
-        along["Stop"] = [
-            f"{STOP_NO.get(str(sid), '?')}. {n}"
-            for sid, n in zip(along["stop_id"], along["stop_name"], strict=False)
+        # long stop names would leave little room for the plot (less still on a phone)
+        cut = 20 if is_mobile() else 30
+        along["label"] = [
+            t if len(t) <= cut else t[: cut - 1].rstrip() + "…" for t in along["Stop"].astype(str)
         ]
-        if is_mobile():  # long stop names would leave little room for the plot on a phone
-            along["Stop"] = [
-                t if len(t) <= 20 else t[:19].rstrip() + "…" for t in along["Stop"].astype(str)
-            ]
         for c in ("median_delay", "p10", "p90"):
             along[c] = along[c].astype(float) / 60
-        stops_order = along["Stop"].tolist()
+        stops_order = along["label"].tolist()
         fig = go.Figure()
         on_time_line(fig)
         fig.add_trace(
@@ -311,7 +344,9 @@ with card():
                 "type": "category",
                 "categoryorder": "array",
                 "categoryarray": stops_order,
-                "tickangle": -45,
+                # straight up: slanted, the first stop's name would reach out left of the plot
+                # and push it away from the minutes labels, leaving a wide blank strip
+                "tickangle": -90,
                 "title": "",
                 "showgrid": True,
                 "gridcolor": "#e9ecee",
@@ -433,6 +468,88 @@ with pred_slot:
         help_extra=IN_DIRECTION,
     )
 trend_card("route_trend", fixed_route=ON_ROUTE, direction=direction, help_extra=IN_DIRECTION + ".")
+
+
+# ---- right now: the buses on the route in this direction, in the order they come ------------
+@st.fragment(run_every=f"{LIVE_CHECK_SECONDS}s")
+def route_right_now() -> None:
+    live_status_line()
+    buses = live_buses(route_id, direction)
+    if buses.empty:
+        st.caption(
+            empty_message(
+                f"No route {route_name} bus in this direction has reported in the last 10 minutes."
+            )
+        )
+    else:
+        # the next stop from where the bus actually is on its route (as on the Live map), else
+        # LTD's
+        geo = next_stops(buses, marker=live_marker()["fid"])
+        if len(geo):
+            g = geo.set_index(geo["vehicle_id"].astype(str))
+            vid = buses["vehicle_id"].astype(str)
+            placed = vid.isin(g.index)
+            for to, frm in (("next_seq", "seq1"), ("next_stop", "name1"), ("next_time", "time1")):
+                buses[to] = buses[to].astype(object).where(~placed, vid.map(g[frm]))
+            buses["next_id"] = vid.map(g["stop_id1"])
+        else:
+            buses["next_id"] = None
+        place = {}
+        if direction is not None:
+            place = route_order(route_id, direction, current_fv())[1]
+        buses["place"] = [
+            place.get((str(sid), int(seq))) if pd.notna(sid) and pd.notna(seq) else None
+            for sid, seq in zip(buses["next_id"], buses["next_seq"], strict=False)
+        ]
+        buses = buses.sort_values("place", na_position="last")
+        table(
+            pd.DataFrame(
+                {
+                    "Bus": buses["vehicle_id"].astype(str),
+                    "Toward": clean_headsigns(buses),
+                    "Next stop": [
+                        "—" if pd.isna(n) else (f"{int(pl) + 1}. {n}" if pd.notna(pl) else str(n))
+                        for n, pl in zip(buses["next_stop"], buses["place"], strict=False)
+                    ],
+                    "Arrives": local_times(buses["next_time"]),
+                    # text, so a bus LTD gives no time for shows blank rather than "None"
+                    "Min late": [
+                        "" if v is None or pd.isna(v) else f"{float(v):.1f}"
+                        for v in late_minutes(buses["delay_s"])
+                    ],
+                    "Reported": local_times(buses["position_timestamp"]),
+                }
+            ),
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "Bus": st.column_config.TextColumn("Bus", width=60),
+                "Toward": COL_TOWARD_NARROW,
+                "Next stop": st.column_config.TextColumn(
+                    "Next stop", help="Numbered as in the table of stops above."
+                ),
+                "Arrives": col_clock("Arrives", buses["next_time"]),
+                "Min late": st.column_config.TextColumn(
+                    "Min late",
+                    help="How late LTD's prediction for its next stop puts the bus, in minutes; "
+                    "negative = early.",
+                ),
+                "Reported": col_ago("Reported"),
+            },
+        )
+    st.page_link(
+        "views/map.py", label="See them on the live map →", query_params={"route": route_id}
+    )
+
+
+with card():
+    st.subheader(
+        f"Right now on route {route_name}",
+        help="Every bus on this route, in the direction chosen above, that reported in the last 10 "
+        "minutes, in the order they come along the route: its next stop, when LTD predicts it "
+        "there, and how late that puts it against the timetable (negative = early).",
+    )
+    route_right_now()
 
 # ---- the other routes --------------------------------------------------------------------
 with card():

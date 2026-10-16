@@ -32,15 +32,14 @@ from common import (
     hex_to_rgb,
     is_mobile,
     late_minutes,
+    live_buses,
     live_marker,
     live_status_line,
     local_times,
     next_stops,
     q,
-    q_fresh,
     require_db,
     route_picker,
-    schedule_join,
     show_coming,
     status_from_delay,
     stop_buses,
@@ -124,55 +123,11 @@ def dashed(path: list, zoom: float, on_px: float = 9, off_px: float = 6) -> list
     return [d for d in out if len(d) >= 2]
 
 
-def load_live() -> pd.DataFrame:
-    sj, sched = schedule_join("p")
-    return q_fresh(
-        f"""
-        with latest as (
-            select distinct on (vehicle_id) *
-            from rt.vehicle_position
-            where position_timestamp between now() - interval '10 minutes' and now() + interval '5 minutes'
-            order by vehicle_id, position_timestamp desc
-        )
-        select vp.vehicle_id, vp.trip_id, vp.start_date, vp.route_id, r.route_short_name as route,
-               t.trip_headsign as headsign,
-               vp.latitude as lat, vp.longitude as lon, vp.bearing, vp.speed_mps, vp.occupancy_status,
-               vp.position_timestamp,
-               p.stop_sequence as next_seq, p2.stop_sequence as seq2,
-               s.stop_name as next_stop, s.stop_lat as next_lat, s.stop_lon as next_lon,
-               coalesce(p.arrival_time, p.departure_time) as next_time,
-               s2.stop_name as stop2, s2.stop_lat as lat2s, s2.stop_lon as lon2s,
-               coalesce(p2.arrival_time, p2.departure_time) as time2,
-               coalesce(p.arrival_delay, p.departure_delay,
-                        extract(epoch from coalesce(p.arrival_time, p.departure_time) - {sched})::int) as delay_s
-        from latest vp
-        left join gtfs.trips t  on t.trip_id = vp.trip_id and t.feed_version_id = {FV}
-        left join gtfs.routes r on r.route_id = t.route_id and r.feed_version_id = t.feed_version_id
-        left join lateral (
-            select * from rt.prediction_current x
-            where x.trip_id = vp.trip_id and x.start_date = vp.start_date
-              and coalesce(x.arrival_time, x.departure_time) >= vp.position_timestamp - interval '30 seconds'
-            order by x.stop_sequence limit 1
-        ) p on true
-        left join gtfs.stops s  on s.stop_id = p.stop_id and s.feed_version_id = t.feed_version_id
-        left join lateral (
-            select * from rt.prediction_current x
-            where x.trip_id = vp.trip_id and x.start_date = vp.start_date and x.stop_sequence > p.stop_sequence
-            order by x.stop_sequence limit 1
-        ) p2 on true
-        left join gtfs.stops s2 on s2.stop_id = p2.stop_id and s2.feed_version_id = t.feed_version_id
-        {sj}
-        order by vp.vehicle_id
-    """,
-        marker=live_marker()["fid"],
-    )
-
-
 @st.fragment(run_every=f"{LIVE_CHECK_SECONDS}s")
 def live_map() -> None:
     live_status_line()
     map_h = 420 if is_mobile() else 560
-    live = load_live()
+    live = live_buses()
     if live.empty:
         st.info(
             empty_message(

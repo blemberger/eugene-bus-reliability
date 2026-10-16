@@ -13,7 +13,6 @@ from common import (
     LIVE_CHECK_SECONDS,
     REPORT_TABLE_HEIGHT,
     STOP_ROWS_PER_ROUTE,
-    TYPICAL_HELP,
     back_button,
     busy_stops,
     card,
@@ -401,12 +400,14 @@ trend_card("stop_trend", fixed_stop=(stop_id, SNAME))
 
 
 # ---- each scheduled bus ---------------------------------------------------------------------
+MIN_DEPARTURE_DAYS = 5  # fewer days than this make a poor "8 in 10"
 with card():
     st.subheader(
         f"Each scheduled departure from {SNAME}{days_suffix()}",
-        help="How each scheduled bus of this route usually runs here against the timetable "
-        "(negative = early), and the earliest and latest it came. A departure shows once it has "
-        f"been measured on 3 days; hover a row for how many. {period[0].upper() + period[1:]}.",
+        help="How each scheduled bus of this route runs here against the timetable, day after "
+        "day: minutes off on average, the typical day, and the range 8 days in 10 fell in. A "
+        f"departure shows once it has been measured on {MIN_DEPARTURE_DAYS} days; hover a row "
+        f"for how many. {period[0].upper() + period[1:]}.",
     )
     pairs = list(zip(tbl["route"], tbl["direction_id"], strict=False))
     usual_key = st.selectbox(
@@ -418,13 +419,14 @@ with card():
     usual = q(
         f"""
         select to_char(scheduled_arrival at time zone 'America/Los_Angeles', 'HH24:MI') as sched,
-               weekday_type, count(*) as n,
+               weekday_type, count(*) as n, avg(abs(delay_s)) as mean_abs,
                percentile_cont(0.5) within group (order by delay_s) as median_delay,
-               min(delay_s) as earliest, max(delay_s) as latest
+               percentile_cont(0.1) within group (order by delay_s) as p10,
+               percentile_cont(0.9) within group (order by delay_s) as p90
         from marts.fct_stop_events
         where stop_id = %s and route_short_name = %s and direction_id is not distinct from %s
           and status is not null and service_date >= %s {wt_clause}
-        group by 1, 2 having count(*) >= 3
+        group by 1, 2 having count(*) >= {MIN_DEPARTURE_DAYS}
         """,
         (
             stop_id,
@@ -436,8 +438,8 @@ with card():
     )
     if usual.empty:
         st.caption(
-            "Not enough days yet: a scheduled bus shows once it has been measured on 3 days "
-            f"({period})."
+            "Not enough days yet: a scheduled bus shows once it has been measured on "
+            f"{MIN_DEPARTURE_DAYS} days ({period})."
         )
     else:
         hhmm = usual["sched"].str.split(":", expand=True).astype(int)
@@ -445,6 +447,9 @@ with card():
         # service-day order: 4 am first, after-midnight trips last
         usual["service_min"] = (usual["minute"] - 240) % 1440
         usual = usual.sort_values("service_min")
+        for c in ("median_delay", "p10", "p90", "mean_abs"):
+            usual[c] = usual[c].astype(float)
+        u_lo, u_hi = range_scale(usual, "p10", "p90")
         days_word = {"weekday": "Weekdays", "saturday": "Saturdays", "sunday": "Sundays"}
         cols = [
             {
@@ -455,28 +460,7 @@ with card():
                 "sort": "sched_s",
                 "first": "asc",
             },
-            {
-                "key": "typical",
-                "label": "Typical bus",
-                "width": "minmax(7em, 1fr)",
-                "help": TYPICAL_HELP,
-                "sort": "typical_s",
-            },
-            {
-                "key": "earliest",
-                "label": "Earliest",
-                "width": "minmax(6em, 1fr)",
-                "help": "The earliest this bus came on any day measured.",
-                "sort": "earliest_s",
-                "first": "asc",
-            },
-            {
-                "key": "latest",
-                "label": "Latest",
-                "width": "minmax(6em, 1fr)",
-                "help": "The latest this bus came on any day measured.",
-                "sort": "latest_s",
-            },
+            *range_columns(u_lo, u_hi),
         ]
         if wt is None:  # all days: weekday and weekend timetables differ, so say which
             cols.insert(1, {"key": "runs", "label": "Runs", "width": "minmax(5.5em, 0.8fr)"})
@@ -490,12 +474,7 @@ with card():
                     .lower(),
                     "sched_s": int(r.service_min),
                     "runs": days_word.get(r.weekday_type, ""),
-                    "typical": fmt_delay(r.median_delay),
-                    "typical_s": float(r.median_delay),
-                    "earliest": fmt_delay(r.earliest),
-                    "earliest_s": float(r.earliest),
-                    "latest": fmt_delay(r.latest),
-                    "latest_s": float(r.latest),
+                    **range_fields(r.p10, r.median_delay, r.p90, u_lo, u_hi, r.mean_abs),
                 }
                 for r in usual.itertuples()
             ],

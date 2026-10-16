@@ -24,6 +24,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from eugene_bus_reliability.names import clean_stop_name
+from eugene_bus_reliability.stop_order import route_stop_order
 
 log = logging.getLogger(__name__)
 
@@ -341,8 +342,22 @@ def load(conn: psycopg.Connection) -> dict:
         group by 1
         """
     ).fetchall()
+    # each route's stops in the order the bus reaches them: one direction, then any stops only
+    # the other direction makes, in its order (stop_order.py)
+    place: dict[str, dict[str, int]] = {}
+    dirs = cur.execute(
+        "select distinct route_id, direction_id from gtfs.trips "
+        "where feed_version_id = %s and direction_id is not null order by 1, 2",
+        (fv,),
+    ).fetchall()
+    for r in dirs:
+        order, _ = route_stop_order(conn, fv, r["route_id"], r["direction_id"])
+        seen = place.setdefault(str(r["route_id"]), {})
+        for sid in order:
+            seen.setdefault(str(sid), len(seen))
     return {
         "routes": routes,
+        "place": place,
         "stops": stops,
         "lat": lat,
         "pairs": pairs,
@@ -459,7 +474,10 @@ def build(database_url: str, target: Path | None = None) -> int:
         )
         stops_here = sorted(
             (p for p in on_route.get(rid, []) if p["stop_id"] in stop_by_id),
-            key=lambda p: (p["seq"], stop_by_id[p["stop_id"]]["name"]),
+            key=lambda p: (
+                d["place"].get(str(rid), {}).get(str(p["stop_id"]), 10_000 + p["seq"]),
+                stop_by_id[p["stop_id"]]["name"],
+            ),
         )
         rows = [
             [

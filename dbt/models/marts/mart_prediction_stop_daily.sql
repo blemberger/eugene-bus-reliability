@@ -44,6 +44,9 @@ select
     count(*)                  as n,
     sum(abs(error_s))::bigint as sum_abs_s,
     -- running counts for the "8 in 10 buses" range of minutes off (macros/error_counts.sql)
-    {{ abs_error_counts('error_s') }}
+    {{ abs_error_counts('error_s') }},
+    -- signed running counts, for the prediction 5 minutes away and the timetable: where 8 in
+    -- 10 buses came against what they were told, earlier or later (macros/error_counts.sql)
+    {{ signed_error_counts('error_s', "basis = 'timetable' or ahead_min = 5") }}
 from told
 group by 1, 2, 3, 4, 5, 6, 7
