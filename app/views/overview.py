@@ -40,13 +40,16 @@ require_db()
 st.title("How reliable are Eugene's buses?")
 require_marts()
 
-# the period and days everything on the page follows, under the title (as on every page); they
-# are repeated further down (filters_again)
-start, wt = page_filters()
+# The first chart, then the period and days buttons everything on the page follows, right under
+# it (drawn in that order, though the buttons are read first), as on every page; they come again
+# further down, after the predictions (filters_again).
+first_slot, filters_slot = st.container(), st.container()
+with filters_slot:
+    start, wt = page_filters()
 period = f"{day_label(wt)} since {fmt_date(start)}"
 
 # ---- when are buses late: any route, any stop -----------------------------------------------
-with card():
+with first_slot, card():
     title = st.empty()
     scope = scope_picker("ov", in_address=True)
     chart_slot = st.container()
@@ -86,7 +89,7 @@ if marts_ready():
     if not per.empty:
         with card():
             st.subheader(
-                f"How reliable is each route{days_suffix()}?",
+                f"Every route{days_suffix()}",
                 help=f"{period[0].upper() + period[1:]}, every stop. Click a column heading to "
                 "sort, again to reverse.",
             )
@@ -96,8 +99,8 @@ if marts_ready():
         every_stop_card(
             stops_with_numbers(by_stop), period[0].upper() + period[1:], "ov_stops", limit=150
         )
-    filters_again()  # the period and days buttons again, for everything below
     predictions_card("ov_pred", start, wt, period)
+    filters_again()  # the period and days buttons again, between the two lower charts
     trend_card("ov_trend")
 
 n_now = q("""

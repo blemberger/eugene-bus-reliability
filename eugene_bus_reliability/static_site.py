@@ -480,13 +480,13 @@ def build(database_url: str, target: Path | None = None) -> int:
             + numbers(r, " vs timetable")
             + "</div>"
             + (
-                f"<div class='card'><h2>How late are the buses on route {escape(short)}, by "
-                f"hour?</h2>{chart}</div>"
+                f"<div class='card'><h2>Lateness by time of day on route {escape(short)}</h2>"
+                f"{chart}</div>"
                 if chart
                 else ""
             )
             + (
-                f"<div class='card'><h2>How reliable is each stop on route {escape(short)}?</h2>"
+                f"<div class='card'><h2>Each stop on route {escape(short)}</h2>"
                 + table(["Stop", "Typical bus", "8 in 10 buses", "Minutes off"], rows)
                 + "</div>"
                 if rows
@@ -548,13 +548,12 @@ def build(database_url: str, target: Path | None = None) -> int:
             + numbers(r, " here vs timetable")
             + "</div>"
             + (
-                f"<div class='card'><h2>How late are the buses at {escape(name)}, by hour?</h2>"
-                f"{chart}</div>"
+                f"<div class='card'><h2>Lateness by time of day at {escape(name)}</h2>{chart}</div>"
                 if chart
                 else ""
             )
             + (
-                f"<div class='card'><h2>How reliable is each route at {escape(name)}?</h2>"
+                f"<div class='card'><h2>Each route at {escape(name)}</h2>"
                 + table(["Route", "Typical bus", "8 in 10 buses", "Minutes off"], rows)
                 + "</div>"
                 if rows

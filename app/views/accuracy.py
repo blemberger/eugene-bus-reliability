@@ -75,17 +75,19 @@ short = dict(
     zip(routes["route_id"].astype(str), routes["route_short_name"].astype(str), strict=False)
 )
 
-# the period and days filters that everything on the page follows, right under the route and
-# stop choice, then the charts; the filters again above the tables
-start, wt = page_filters()
-chart_slot = st.container()
+# the first chart, then right under it the period and days buttons everything on the page
+# follows (drawn in that order, though the buttons are read first); the chart by time of day and
+# the routes table; the buttons again; the stops table
+chart_slot, filters_slot = st.container(), st.container()
+with filters_slot:
+    start, wt = page_filters()
 period = f"{day_label(wt)} since {fmt_date(start)}"
 PERIOD = period[0].upper() + period[1:]
 
 # ---- how far off: the prediction at each distance, and the timetable ----------------------
 with chart_slot, card():
     st.subheader(
-        f"How far off are the predictions{SUFFIX}{days_suffix()}?",
+        f"Prediction accuracy{SUFFIX}{days_suffix()}",
         help=PREDICTION_OFF_NOTE + f" {PERIOD}.",
     )
     rows = prediction_scope_rows(start, wt, scope)
@@ -105,7 +107,7 @@ with chart_slot, card():
 # ---- by time of day ---------------------------------------------------------------------
 with card():
     st.subheader(
-        f"Does accuracy depend on the time of day{SUFFIX}{days_suffix()}?",
+        f"Prediction accuracy by time of day{SUFFIX}{days_suffix()}",
         help="Predictions made about this far ahead, by the hour they were on show. Each bar "
         "builds up: the dark part is the share right to within 2 minutes; add the middle part "
         "for within 3 minutes; the whole bar is within 5 minutes. The space above is how often "
@@ -324,13 +326,9 @@ TABLE_HELP = (
     f"{PERIOD}. Click a column heading to sort; click a row for that report card's predictions."
 )
 
-filters_again()  # the period and days buttons again, for everything below
-
 with card():
     at_stop = f" at {scope.stop_name}" if scope.stop_id else ""
-    st.subheader(
-        f"Which routes have the best predictions{at_stop}{days_suffix()}?", help=TABLE_HELP
-    )
+    st.subheader(f"Prediction accuracy by route{at_stop}{days_suffix()}", help=TABLE_HELP)
     if scope.stop_id:
         by_route = off_by("route_id", "and stop_id = %s", (scope.stop_id,), daily=False)
     else:
@@ -348,11 +346,11 @@ with card():
         min_n=50 if not scope.stop_id else 20,
     )
 
+filters_again()  # the period and days buttons again, between the two tables
+
 with card():
     on_route = f" on route {scope.route_name}" if scope.route_id else ""
-    st.subheader(
-        f"Which stops have the best predictions{on_route}{days_suffix()}?", help=TABLE_HELP
-    )
+    st.subheader(f"Prediction accuracy by stop{on_route}{days_suffix()}", help=TABLE_HELP)
     by_stop = off_by(
         "stop_id",
         "and route_id = %s" if scope.route_id else "",
@@ -382,7 +380,7 @@ with card():
 if scope.stop_id:
     with card():
         st.subheader(
-            f"Right now at {scope.stop_name}: how has each coming bus's prediction changed?",
+            f"Predictions for the buses coming to {scope.stop_name} now",
             help="Each line is a bus on its way here: when LTD said it (across) and the arrival it "
             "predicted then (up). A flat line is a prediction that held; a line that keeps "
             "stepping later is the prediction being optimistic and correcting itself as the bus "
@@ -473,7 +471,7 @@ if scope.stop_id:
 # ---- revisions --------------------------------------------------------------------------
 with card():
     st.subheader(
-        "How often does LTD change a prediction?",
+        "How often LTD changes a prediction",
         help="Every route and stop, last 7 days. Every revision is kept; that's what lets a "
         "prediction be scored at the distance it was made, not just the last value shown.",
     )

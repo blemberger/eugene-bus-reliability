@@ -1358,6 +1358,7 @@ def page_filters() -> tuple[date, str | None]:
     st.session_state["_f_period"], st.session_state["_f_days"] = period, day
     st.session_state["_f_dow"] = one or "all"
     st.session_state["_f_wt"] = wt  # for the titles (days_suffix)
+    st.session_state["_f_start"] = start  # for charts drawn without it (the trend)
     for param, value, default in (
         ("period", period, DEFAULT_PERIOD),
         ("days", day, "all"),
@@ -1371,18 +1372,23 @@ def page_filters() -> tuple[date, str | None]:
 
 
 def days_suffix() -> str:
-    """The days the page's numbers cover, for a title: ' on Saturdays', ' on weekdays',
-    ' on Mondays'; nothing for all days (the default). Every title whose chart or table follows
+    """The days the page's numbers cover, for a title: ', Saturdays', ', weekdays',
+    ', Mondays'; nothing for all days (the default). Every title whose chart or table follows
     the days filter ends with it, so what is shown is always said where it is shown."""
     wt = st.session_state.get("_f_wt")
     if not wt:
         return ""
-    return f" on {day_label(wt)}"
+    return f", {day_label(wt)}"
 
 
 def current_days() -> str | None:
     """The page's days filter (as page_filters() returned it), for charts drawn without it."""
     return st.session_state.get("_f_wt")
+
+
+def current_start() -> date | None:
+    """The first day of the page's period (as page_filters() returned it)."""
+    return st.session_state.get("_f_start")
 
 
 def _mirror(name: str) -> None:
@@ -2308,14 +2314,14 @@ def _weighted_median(values: pd.Series, weights: pd.Series) -> float:
     return float(values.loc[order][cum >= cum.iloc[-1] / 2].iloc[0])
 
 
-def trend_chart(scope_where: dict, wt: str | None = None) -> None:
+def trend_chart(scope_where: dict, wt: str | None = None, start: date | None = None) -> None:
     """The typical bus over time for one choice of route, direction and stop, with the band 8 in
     10 buses fell in, as on the chart by time of day: one point per day from
     marts.mart_trend_daily (all days, all data); per week once there are more than
     TREND_MAX_POINTS days, per month after that many weeks (then each point is the typical
     day's: the median of the days' typical buses, and the average of their ranges, weighted by
-    arrivals). scope_where: route_id, direction_id, stop_id (None = all); wt: the page's days
-    filter (all data, but only those days)."""
+    arrivals). scope_where: route_id, direction_id, stop_id (None = all); wt and start: the
+    page's days and period, which it follows like everything else on the page."""
     conds, params = [], []
     for col, flag in (
         ("route_id", "by_route"),
@@ -2339,8 +2345,8 @@ def trend_chart(scope_where: dict, wt: str | None = None) -> None:
             "select service_date as d, n, median_delay_s as median_delay, p10_delay_s as p10, "
             "p90_delay_s as p90 "
             f"from marts.mart_trend_daily where {' and '.join(conds)} and n >= 5 {day_clause} "
-            "order by 1",
-            (*params, *day_params),
+            "and service_date >= %s order by 1",
+            (*params, *day_params, start or date(2000, 1, 1)),
         )
     except Exception:  # noqa: BLE001 — the table is being rebuilt
         daily = pd.DataFrame()
@@ -2452,7 +2458,7 @@ def stops_with_numbers(per: pd.DataFrame) -> pd.DataFrame:
 def every_stop_card(
     enough: pd.DataFrame, period: str, key: str = "every_stop", limit: int | None = None
 ) -> None:
-    """'How reliable is each stop?': every stop (stops_with_numbers()) in a sortable table, each
+    """'Every stop': every stop (stops_with_numbers()) in a sortable table, each
     row opening the stop's report card, busiest first (the stops most riders use). With a
     limit (the Overview), just that many of the busiest, and a link to all of them."""
     rows_df = enough.sort_values("n", ascending=False)
@@ -2461,8 +2467,7 @@ def every_stop_card(
     lo, hi = range_scale(rows_df)
     with card():
         st.subheader(
-            ("How reliable are the busiest stops" if limit else "How reliable is each stop")
-            + f"{days_suffix()}?",
+            ("Busiest stops" if limit else "Every stop") + days_suffix(),
             help=f"{period}, stops with at least 20 measured arrivals, busiest first. Click a "
             "column heading to sort, again to reverse.",
         )
@@ -2680,7 +2685,7 @@ def scope_picker(
 def lateness_title(scope: Scope) -> str:
     """The title of every 'when are the buses late' chart (Overview, report cards), naming the
     route and stop chosen: the chart shows both the typical bus and the spread."""
-    return f"How late are the buses{scope.suffix()}{days_suffix()}?"
+    return f"Lateness by time of day{scope.suffix()}{days_suffix()}"
 
 
 def scoped_lateness(
@@ -2711,7 +2716,7 @@ def times_of_day_card(
     direction: int | None = None,
     help_extra: str = "",
 ) -> None:
-    """'How late are the buses …?': the typical bus and the 8-in-10 band by the hour it
+    """'Lateness by time of day …': the typical bus and the 8-in-10 band by the hour it
     was scheduled, for one choice of route and stop (scope_picker), named in the title."""
     with card():
         title = st.empty()
@@ -2738,17 +2743,18 @@ def trend_card(
     direction: int | None = None,
     help_extra: str = "",
 ) -> None:
-    """'Is it getting better …?': the typical bus over time for one choice of route and stop."""
+    """'Lateness over time …': the typical bus over time for one choice of route and stop."""
     with card():
         title = st.empty()
         scope = scope_picker(key, fixed_route, fixed_stop, direction)
         title.subheader(
-            f"Is lateness getting better or worse{scope.suffix()}{days_suffix()}?",
+            f"Lateness over time{scope.suffix()}{days_suffix()}",
             help=TREND_HELP + help_extra,
         )
         trend_chart(
             {"route_id": scope.route_id, "direction_id": direction, "stop_id": scope.stop_id},
             current_days(),
+            current_start(),
         )
 
 
@@ -2795,13 +2801,13 @@ def predictions_card(
     help_extra: str = "",
     link: bool = True,
 ) -> None:
-    """'How far off are the predictions …?' for one choice of route and stop: the prediction by
+    """'Prediction accuracy …' for one choice of route and stop: the prediction by
     how many minutes away it said, and the printed timetable on the same arrivals."""
     with card():
         title = st.empty()
         scope = scope_picker(key, fixed_route, fixed_stop, direction)
         title.subheader(
-            f"How far off are the predictions{scope.suffix()}{days_suffix()}?",
+            f"Prediction accuracy{scope.suffix()}{days_suffix()}",
             # links from the Predictions page's tables open a report card here (#predictions)
             anchor="predictions",
             help=PREDICTION_OFF_NOTE + f" {period[0].upper() + period[1:]}{help_extra}.",
@@ -2835,7 +2841,7 @@ def predictions_card(
             st.page_link("views/accuracy.py", label=PREDICTIONS_LINK, query_params=params)
 
 
-# One point per day in "Is it getting better?"; per week once there's more than this many days
+# One point per day in "Lateness over time"; per week once there's more than this many days
 # of data, per month once there's more than this many weeks, so the chart stays readable.
 TREND_MAX_POINTS = 120
 TREND_HELP = (
@@ -2843,8 +2849,8 @@ TREND_HELP = (
     "all days, one point per day: per week once there "
     f"are more than {TREND_MAX_POINTS} days of data, per month after {TREND_MAX_POINTS} weeks "
     "(then each point is the typical day's). "
-    "Points with fewer than 5 arrivals are left out. All data, so this chart doesn't follow the "
-    "period filter; it does follow the days filter."
+    "Points with fewer than 5 arrivals are left out. Follows the period and days buttons, like "
+    "everything else on the page; choose All data for the longest view."
 )
 
 

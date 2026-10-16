@@ -57,12 +57,11 @@ require_db()
 back_button("← All routes", page="views/routes.py")
 title_slot = st.empty()  # filled in once the route is known
 require_marts()
-# Drawn in this order (the direction is read after the filters, so it gets its own slot): the
-# direction and the period and days filters, which everything on the page follows, right under
-# the title; the chart by time of day; the route's numbers with every stop on it; the
-# predictions; then, under the filters again, the route's own detail and, last, the trend
-# (usually a flat line). Stop report cards are laid out the same way.
-dir_slot, filters_slot, hour_slot = st.container(), st.container(), st.container()
+# Drawn in this order, though the buttons are read first: the direction (which the whole page
+# follows); the chart by time of day, then right under it the period and days buttons; the
+# route's numbers with every stop on it; the predictions; the buttons again; the route's own
+# detail and, last, the trend (usually a flat line). Stop report cards are laid out the same way.
+dir_slot, hour_slot, filters_slot = st.container(), st.container(), st.container()
 table_slot, pred_slot = st.container(), st.container()
 with filters_slot:
     start, wt = page_filters()
@@ -185,7 +184,7 @@ along = q(
 )
 with table_slot, card():
     st.subheader(
-        f"How reliable is each stop on route {route_name}{days_suffix()}?",
+        f"Each stop on route {route_name}{days_suffix()}",
         help=f"{period[0].upper() + period[1:]}, in the direction chosen above, in the order the "
         "bus reaches them. Click a column heading to sort.",
     )
@@ -245,7 +244,7 @@ filters_again()
 # ---- along the route ------------------------------------------------------------------------
 with card():
     st.subheader(
-        f"Where along route {route_name} does the delay build up{days_suffix()}?",
+        f"Lateness along route {route_name}{days_suffix()}",
         help="Lateness against the timetable at each stop, in the order the bus reaches them (left "
         "to right). The line is the typical bus; the shaded band is where 8 in 10 buses fell. A "
         "line climbing means the bus loses time against the timetable there; falling means the "
@@ -278,6 +277,7 @@ with card():
                 line_width=0,
                 hoverinfo="skip",
                 name="8 in 10 buses",
+                legendrank=2,  # listed after the line, as on every chart
             )
         )
         fig.add_trace(
@@ -286,6 +286,7 @@ with card():
                 y=along["median_delay"],
                 mode="lines+markers",
                 name="Typical bus",
+                legendrank=1,
                 line={"color": BRAND, "width": LINE_MAIN},
                 marker={"size": MARKER_MAIN},
                 hovertext=[
@@ -353,7 +354,7 @@ if not head.empty:
     with card():
         head = head.assign(_k=head["hour_local"].map(service_hour_key)).sort_values("_k")
         st.subheader(
-            f"Do route {route_name}'s buses come evenly, or bunch up{days_suffix()}?",
+            f"Gaps between buses on route {route_name}{days_suffix()}",
             help="On routes scheduled every 20 minutes or better, riders don't check a timetable; "
             "what matters is the gap between buses. Bunched = arrived less than half the "
             "scheduled gap after the previous bus. Big gap = more than 1.5 times the scheduled "

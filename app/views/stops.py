@@ -94,7 +94,7 @@ def every_stop(start, wt, table_slot, map_slot) -> None:
 
     with map_slot, card():
         st.subheader(
-            f"Where do buses run late{days_suffix()}?",
+            f"Every stop on the map{days_suffix()}",
             help="Each dot is a stop, coloured by how late its typical bus is against the "
             "timetable. " + f"{period}; stops with at least 20 arrivals.",
         )
@@ -192,17 +192,20 @@ if not stop_id:
     with card():
         st.subheader("Find your stop")
         stop_finder()
-    # the period and days filters right above the first thing they change, then every stop in a
-    # table and on a map, every stop together hour by hour, and (with the filters again) the
-    # predictions and the trend, as on the Routes page
-    start, wt = page_filters()
-    every_slot, map_slot, chart_slot = st.container(), st.container(), st.container()
+    # every stop in a table, then right under it the period and days buttons everything below
+    # follows (drawn in that order, though the buttons are read first); every stop on a map,
+    # all stops together by time of day and the predictions; the buttons again; the trend. The
+    # same order as the Routes page.
+    every_slot, filters_slot = st.container(), st.container()
+    map_slot, chart_slot = st.container(), st.container()
+    with filters_slot:
+        start, wt = page_filters()
     every_stop(start, wt, every_slot, map_slot)
     period = f"{day_label(wt)} since {fmt_date(start)}"
     with chart_slot:
         times_of_day_card("stops_tod", start, wt, period)
-    filters_again()  # the period and days buttons again, for everything below
     predictions_card("stops_pred", start, wt, period)
+    filters_again()  # the period and days buttons again, between the two lower charts
     trend_card("stops_trend")
     st.divider()
     data_note(start)
@@ -250,10 +253,12 @@ def stop_right_now() -> None:
     show_left(left, f"No bus has left this stop in the last {JUST_LEFT_MINUTES} minutes.")
 
 
-# ---- reliability: the period and days filters everything on the page follows, right under the
-# title, then the chart by time of day and the routes table
-start, wt = page_filters()
-hour_slot, routes_slot = st.container(), st.container()
+# ---- reliability: the chart by time of day, then right under it the period and days buttons
+# everything on the page follows (drawn in that order, though the buttons are read first), then
+# the routes table; the buttons come again after the predictions
+hour_slot, filters_slot, routes_slot = st.container(), st.container(), st.container()
+with filters_slot:
+    start, wt = page_filters()
 wt_clause, wt_params = day_sql(wt)
 period = f"{day_label(wt)} since {fmt_date(start)}"
 
@@ -344,7 +349,7 @@ def early_fields(p05, n) -> dict:
 
 with routes_slot, card():
     st.subheader(
-        f"How reliable is each route at {SNAME}{days_suffix()}?",
+        f"Each route at {SNAME}{days_suffix()}",
         help=f"{period[0].upper() + period[1:]}. Click a column heading to sort.",
     )
     headline_metrics(here, today_lateness(stop_id=stop_id), start, " here vs timetable")
@@ -391,11 +396,9 @@ with hour_slot:
 
 # ---- the predictions, then the trend: every route here, or one ------------------------------
 predictions_card("stop_pred", start, wt, period, fixed_stop=(stop_id, SNAME))
+filters_again()  # the period and days buttons again, for everything below
 trend_card("stop_trend", fixed_stop=(stop_id, SNAME))
 
-
-# ---- the period and days buttons again, for everything below -------------------------------
-filters_again()
 
 # ---- each scheduled bus ---------------------------------------------------------------------
 with card():

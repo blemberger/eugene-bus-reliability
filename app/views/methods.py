@@ -90,7 +90,7 @@ cancellation flag, realtime trip ids that don't match the schedule. See the sect
 
 # ---- coverage & quality ----------------------------------------------------------------------
 with card():
-    st.subheader("How much of the service did we measure?")
+    st.subheader("How much of the service we measured")
     if not marts_ready():
         st.info("Coverage tables appear once the analysis has run; it refreshes every 15 minutes.")
     else:
@@ -264,7 +264,7 @@ with card():
 
 # ---- cross-check ------------------------------------------------------------------------------
 with card():
-    st.subheader("Do two ways of timing arrivals agree?")
+    st.subheader("Two ways of timing arrivals, compared")
     st.caption(
         "Every arrival time on this site is worked out from the bus's GPS reports: when its "
         "position along the route passes the stop. LTD's feed also keeps a time for stops a bus "
@@ -390,7 +390,7 @@ GAP_DAYS = 14
 
 # ---- right now --------------------------------------------------------------------------------
 with card():
-    st.subheader("Is the live data coming in?")
+    st.subheader("Live data, right now")
     qual = q("""
         select
           (select count(distinct p.trip_id) from rt.prediction_current p
