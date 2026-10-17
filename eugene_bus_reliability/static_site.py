@@ -12,6 +12,7 @@ eugene_bus_reliability static-site` writes them by hand. Numbers: the last 30 da
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from datetime import date, datetime
@@ -23,7 +24,9 @@ from zoneinfo import ZoneInfo
 import psycopg
 from psycopg.rows import dict_row
 
+from eugene_bus_reliability.faq import questions
 from eugene_bus_reliability.names import clean_stop_name
+from eugene_bus_reliability.signed import SIGNED_THRESHOLDS, signed_col, signed_percentile
 from eugene_bus_reliability.stop_order import route_stop_order
 
 log = logging.getLogger(__name__)
@@ -225,7 +228,15 @@ LOGO = (
 )
 
 
-def page(title: str, description: str, path: str, body: str, base: str | None, updated: str) -> str:
+def page(
+    title: str,
+    description: str,
+    path: str,
+    body: str,
+    base: str | None,
+    updated: str,
+    head_extra: str = "",
+) -> str:
     canonical = f"{base}{path}" if base else path
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -238,12 +249,13 @@ def page(title: str, description: str, path: str, body: str, base: str | None, u
 <meta property="og:type" content="website"><meta property="og:site_name" content="Eugene Bus Watch">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;600;700&display=swap">
-<style>{CSS}</style></head>
+<style>{CSS}</style>{head_extra}</head>
 <body><header><a href="/">{LOGO}Eugene Bus Watch</a></header>
 <main>{body}</main>
 <footer><p>Last 30 days, all days, updated {escape(updated)}. Eugene Bus Watch measures when Lane
 Transit District's buses actually reach each stop, from LTD's public schedule and live bus
 positions; independent, not affiliated with LTD. <a href="/methods">How it's measured</a> ·
+<a href="/reports/faq/">Questions and answers</a> ·
 <a href="/reports/">Every route and stop</a> · <a href="/">The interactive site</a></p></footer>
 </body></html>
 """
@@ -262,10 +274,18 @@ def numbers(r: dict, what: str) -> str:
 def prediction_sentence(p: dict | None) -> str:
     if not p or p.get("pred_s") is None or p.get("tt_s") is None:
         return ""
+    med = signed_percentile(p, 0.5)
+    typical = ""
+    if med is not None:
+        typical = ", and the typical bus came " + (
+            "as predicted"
+            if round(abs(med) / 60, 1) == 0
+            else f"{abs(med) / 60:.1f} min {'later' if med > 0 else 'earlier'} than predicted"
+        )
     return (
         " When LTD's real-time prediction (what apps like Transit show) said the bus was 5 "
         f"minutes away, it was {off_words(p['pred_s'])} off on average, against "
-        f"{off_words(p['tt_s'])} for the printed timetable on the same buses."
+        f"{off_words(p['tt_s'])} for the printed timetable on the same buses{typical}."
     )
 
 
@@ -319,15 +339,28 @@ def load(conn: psycopg.Connection) -> dict:
         """
     ).fetchall()
     since = "(now() at time zone 'America/Los_Angeles')::date - 29"
+    # the signed running counts at 5 minutes away (eugene_bus_reliability/signed.py), with
+    # their n, so the typical bus against the prediction can be read off them
+    SIGNED_5 = ", ".join(
+        [
+            "sum(n) filter (where basis = 'sign' and ahead_min = 5) as n",
+            *(
+                f"sum({signed_col(t)}) filter (where basis = 'sign' and ahead_min = 5) "
+                f"as {signed_col(t)}"
+                for t in SIGNED_THRESHOLDS
+            ),
+        ]
+    )
     pred_routes = cur.execute(
         f"""
         select route_id,
                sum(sum_abs_s) filter (where basis = 'sign' and ahead_min = 5)::float8
                    / nullif(sum(n) filter (where basis = 'sign' and ahead_min = 5), 0) as pred_s,
                sum(sum_abs_s) filter (where basis = 'timetable')::float8
-                   / nullif(sum(n) filter (where basis = 'timetable'), 0) as tt_s
+                   / nullif(sum(n) filter (where basis = 'timetable'), 0) as tt_s,
+               {SIGNED_5}
         from marts.mart_prediction_daily where service_date >= {since}
-        group by 1
+        group by grouping sets ((route_id), ())
         """
     ).fetchall()
     pred_stops = cur.execute(
@@ -337,7 +370,8 @@ def load(conn: psycopg.Connection) -> dict:
                    / nullif(sum(n) filter (where basis = 'sign' and ahead_min = 5), 0) as pred_s,
                sum(sum_abs_s) filter (where basis = 'timetable')::float8
                    / nullif(sum(n) filter (where basis = 'timetable'), 0) as tt_s,
-               sum(n) filter (where basis = 'timetable') as n
+               sum(n) filter (where basis = 'timetable') as n_tt,
+               {SIGNED_5}
         from marts.mart_prediction_stop_daily where service_date >= {since}
         group by 1
         """
@@ -361,8 +395,9 @@ def load(conn: psycopg.Connection) -> dict:
         "stops": stops,
         "lat": lat,
         "pairs": pairs,
-        "pred_routes": {r["route_id"]: r for r in pred_routes},
-        "pred_stops": {r["stop_id"]: r for r in pred_stops if (r["n"] or 0) >= MIN_ARRIVALS},
+        "pred_routes": {r["route_id"]: r for r in pred_routes if r["route_id"] is not None},
+        "pred_all": next((r for r in pred_routes if r["route_id"] is None), None),
+        "pred_stops": {r["stop_id"]: r for r in pred_stops if (r["n_tt"] or 0) >= MIN_ARRIVALS},
     }
 
 
@@ -640,10 +675,61 @@ def build(database_url: str, target: Path | None = None) -> int:
         ),
     )
 
+    # questions and answers (faq.py), with the latest numbers, marked up as an FAQ for search
+    # engines (schema.org FAQPage)
+    stats: dict = {}
+    if overall:
+        stats["overall"] = {
+            "median": overall["median_delay_s"],
+            "p10": overall["p10_delay_s"],
+            "p90": overall["p90_delay_s"],
+            "mean_abs": overall["mean_abs_delay_s"],
+        }
+    pa = d["pred_all"]
+    if pa and pa.get("pred_s") is not None and pa.get("tt_s") is not None:
+        p50, p10, p90 = (signed_percentile(pa, q) for q in (0.5, 0.1, 0.9))
+        if None not in (p50, p10, p90):
+            stats["pred"] = {
+                "median": p50,
+                "p10": p10,
+                "p90": p90,
+                "mean_abs": pa["pred_s"],
+                "tt_mean_abs": pa["tt_s"],
+            }
+    qa = questions(stats)
+    ld = {
+        "@context": "https://schema.org",
+        "@type": "FAQPage",
+        "mainEntity": [
+            {"@type": "Question", "name": q, "acceptedAnswer": {"@type": "Answer", "text": a}}
+            for q, a in qa
+        ],
+    }
+    write(
+        "/reports/faq/",
+        page(
+            "Questions about Eugene's bus reliability · Eugene Bus Watch",
+            "How late Lane Transit District buses run in Eugene and Springfield, how accurate "
+            "LTD's real-time predictions are, and how Eugene Bus Watch measures them.",
+            "/reports/faq/",
+            "<h1>Questions and answers</h1>"
+            + "".join(
+                f"<div class='card'><h2>{escape(q)}</h2><p>{escape(a)}</p></div>" for q, a in qa
+            )
+            + "<p><a class='go' href='/'>Open the interactive site →</a></p>",
+            base,
+            updated,
+            head_extra='<script type="application/ld+json">'
+            + json.dumps(ld).replace("</", "<\\/")
+            + "</script>",
+        ),
+    )
+
     # sitemap and robots.txt (absolute addresses need the site's name)
     if base:
         today = date.today().isoformat()
         pages = ["/", "/routes", "/stops", "/accuracy", "/map", "/methods", "/reports/"]
+        pages += ["/reports/faq/"]
         pages += [route_href(rid) for rid in route_list] + [stop_href(sid) for sid in stop_list]
         write(
             "sitemap.xml",

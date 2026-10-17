@@ -76,6 +76,10 @@ from eugene_bus_reliability.names import (  # noqa: E402
     clean_stop_name,
     stop_name_rule,  # noqa: F401 — used by app/selfcheck.py
 )
+from eugene_bus_reliability.signed import (  # noqa: E402
+    SIGNED_COUNT_SUMS,
+    signed_percentile,
+)
 from eugene_bus_reliability.stop_order import route_stop_order  # noqa: E402
 
 
@@ -1761,13 +1765,15 @@ def route_table(rank: pd.DataFrame, start: date, key: str) -> None:
 NOT_ENOUGH_HOURLY = "Not enough arrivals yet for this chart (needs {n} in an hour)."
 
 PREDICTION_OFF_NOTE = (
-    "How many minutes, on average, the bus came from the time it was given, early or late "
-    "alike; lower is better. Line with dots: LTD's real-time predictions (what apps like "
-    "Transit show), by how many minutes away the prediction said the bus was; the shading is "
-    "the range 8 buses in 10 were off by. Dashed line: the printed timetable for the same bus "
-    "arrivals (flat, because the timetable doesn't change as the bus gets nearer). Minutes away is what the prediction said at the time, not when the "
-    "bus actually came. Measured on bus arrivals that had a prediction 15 minutes out, each "
-    "counted once at each distance; points with fewer than 20 are left out."
+    "How much later or earlier than LTD's real-time prediction (what apps like Transit show) "
+    "the bus came, by how many minutes away the prediction said the bus was: the line is the "
+    "typical bus, the shading where 8 buses in 10 came, and the dashed line is when it was "
+    "predicted. In grey behind, the printed timetable for the same bus arrivals: its typical "
+    "bus and its 8 in 10 (flat, because the timetable doesn't change as the bus gets nearer). "
+    "The narrower the blue shading against the grey, the more the prediction helps. Minutes "
+    "away is what the prediction said at the time, not when the bus actually came. Measured on "
+    "bus arrivals that had a prediction 15 minutes out, each counted once at each distance; "
+    "points with fewer than 20 are left out."
 )
 
 # the key for "every route together" in prediction_off() and countdown_off_chart()
@@ -1778,41 +1784,6 @@ ALL_ROUTES = ""
 # ...): the same list as dbt/macros/error_counts.sql.
 ERROR_THRESHOLDS = [15, 30, 45, 60, 90, 120, 150, 180, 240, 300, 360, 480, 600, 900]
 ERROR_COUNT_SUMS = ", ".join(f"sum(n_le_{t}s) as n_le_{t}s" for t in ERROR_THRESHOLDS)
-
-
-# the signed running counts (dbt macros/error_counts.sql signed_error_counts): n_sle_m900s
-# (arrivals 15 minutes or more earlier than told) ... n_sle_0s ... n_sle_900s
-SIGNED_THRESHOLDS = [
-    -900, -600, -480, -360, -300, -240, -180, -150, -120, -90, -60, -45, -30, -15,
-    0, 15, 30, 45, 60, 90, 120, 150, 180, 240, 300, 360, 480, 600, 900,
-]  # fmt: skip
-
-
-def signed_col(t: int) -> str:
-    return f"n_sle_{'m' + str(-t) if t < 0 else t}s"
-
-
-SIGNED_COUNT_SUMS = ", ".join(f"sum({signed_col(t)}) as {signed_col(t)}" for t in SIGNED_THRESHOLDS)
-
-
-def signed_percentile(row, share: float) -> float | None:
-    """Seconds (signed: negative = earlier than told) below which `share` of the arrivals in
-    a row with the signed running counts came (straight-line between thresholds); clamped to
-    15 minutes either way. None without the counts."""
-    n = row.get("n")
-    first = signed_col(SIGNED_THRESHOLDS[0])
-    if n is None or pd.isna(n) or not n or first not in row or pd.isna(row.get(first)):
-        return None
-    want = share * float(n)
-    prev_t = prev_c = None
-    for t in SIGNED_THRESHOLDS:
-        c = float(row.get(signed_col(t)))
-        if c >= want:
-            if prev_t is None or c == prev_c:
-                return float(t)
-            return prev_t + (want - prev_c) / (c - prev_c) * (t - prev_t)
-        prev_t, prev_c = float(t), c
-    return float(SIGNED_THRESHOLDS[-1])
 
 
 def off_percentile(row, share: float) -> float | None:
@@ -1848,7 +1819,7 @@ def prediction_off(start: date, wt: str | None) -> pd.DataFrame:
             select basis, ahead_min,
                    case when grouping(route_id) = 0 then route_id end as route_id,
                    sum(n) as n, sum(sum_abs_s)::float8 / nullif(sum(n), 0) as mean_abs_s,
-                   {ERROR_COUNT_SUMS}
+                   {ERROR_COUNT_SUMS}, {SIGNED_COUNT_SUMS}
             from marts.mart_prediction_daily
             where service_date >= %s {clause}
             group by grouping sets ((basis, ahead_min), (basis, ahead_min, route_id))
@@ -1873,7 +1844,7 @@ def _prediction_stop_rows(
             f"""
             select basis, ahead_min, case when grouping({key}) = 0 then {key} end as route_id,
                    sum(n) as n, sum(sum_abs_s)::float8 / nullif(sum(n), 0) as mean_abs_s,
-                   {ERROR_COUNT_SUMS}
+                   {ERROR_COUNT_SUMS}, {SIGNED_COUNT_SUMS}
             from marts.mart_prediction_stop_daily
             where {where} and service_date >= %s {clause}
             group by grouping sets ((basis, ahead_min), (basis, ahead_min, {key}))
@@ -1942,111 +1913,133 @@ def countdown_off_chart(
     min_n: int = 20,
     colors: dict[str, str] | None = None,
 ) -> go.Figure | None:
-    """Average minutes off against how many minutes away the prediction said the bus was, for
-    each selected key (ALL_ROUTES or a route id): the prediction (thick, with dots), with the
-    band 8 in 10 buses fell in when one key is shown (as on the lateness charts), and the
-    printed timetable for the same arrivals (a dashed grey reference line, as the on-time line
-    is on the lateness charts). None when nothing selected has two points to draw."""
+    """How much later or earlier than predicted the bus came, against how many minutes away the
+    prediction said it was, drawn as the lateness charts are: the typical bus (the line with
+    dots), the band 8 in 10 buses fell in, and the dashed on-time line, here meaning "when it
+    was predicted". Behind them in grey, the printed timetable for the same arrivals: its typical
+    bus and its 8 in 10 (flat, because the timetable doesn't change as the bus gets nearer), so
+    a blue band narrower than the grey one is the prediction doing better. One choice at a time
+    (`selected`'s first key: ALL_ROUTES or a route id). None when it has fewer than two
+    points."""
     if df.empty or not selected:
         return None
+    key = selected[0]
     df = df.assign(
-        _r=df["route_id"].astype(object).where(df["route_id"].notna(), ALL_ROUTES).astype(str),
-        off=df["mean_abs_s"].astype(float) / 60,
+        _r=df["route_id"].astype(object).where(df["route_id"].notna(), ALL_ROUTES).astype(str)
     )
-    sign = df[(df["basis"] == "sign") & df["ahead_min"].between(1, 15) & (df["n"] >= min_n)]
-    sign = sign.sort_values("ahead_min")
-    tt_rows = df[(df["basis"] == "timetable") & (df["n"] >= min_n)]
-    tt = dict(zip(tt_rows["_r"], tt_rows["off"], strict=False))
-    colors = (
-        line_colours("countdown", selected) if colors is None else colors
-    )  # callers pass theirs
-    one = len(selected) == 1
+    g = df[
+        (df["basis"] == "sign")
+        & df["ahead_min"].between(1, 15)
+        & (df["n"] >= min_n)
+        & (df["_r"] == key)
+    ].sort_values("ahead_min")
+    if len(g) < 2:
+        return None
+    recs = g.to_dict("records")
+
+    def mins(r, share):
+        v = signed_percentile(r, share)
+        return None if v is None else v / 60
+
+    med = [mins(r, 0.5) for r in recs]
+    lows = [mins(r, 0.1) for r in recs]
+    highs = [mins(r, 0.9) for r in recs]
+    if any(v is None for v in med + lows + highs):
+        return None
+    tt_rows = df[(df["basis"] == "timetable") & (df["_r"] == key) & (df["n"] >= min_n)]
+    tt = tt_rows.to_dict("records")[0] if len(tt_rows) else None
+    t_med = mins(tt, 0.5) if tt else None
+    t_lo = mins(tt, 0.1) if tt else None
+    t_hi = mins(tt, 0.9) if tt else None
+    has_tt = None not in (t_med, t_lo, t_hi)
+    label = all_label if key == ALL_ROUTES else names.get(key, key)
+    colour = (colors or {}).get(key, BRAND)
+    x = [int(m) for m in g["ahead_min"]]
+
+    def words(v: float) -> str:
+        return fmt_delay(v * 60).replace("late", "later").replace("early", "earlier")
+
     fig = go.Figure()
-    drawn = 0
-    for rank, key in enumerate(selected):
-        g = sign[sign["_r"] == key]
-        if len(g) < 2:
-            continue
-        drawn += 1
-        label = all_label if key == ALL_ROUTES else names.get(key, key)
-        colour = colors.get(key, BRAND if key == ALL_ROUTES else "#777777")
-        t = tt.get(key)
-        lows = [off_percentile(r, 0.1) for r in g.to_dict("records")]
-        highs = [off_percentile(r, 0.9) for r in g.to_dict("records")]
-        has_band = one and all(v is not None for v in lows + highs)
-        if has_band:
-            x = list(g["ahead_min"])
-            fig.add_trace(
-                go.Scatter(
-                    x=x + x[::-1],
-                    y=highs + lows[::-1],
-                    fill="toself",
-                    fillcolor=colour,
-                    opacity=0.18,
-                    mode="lines",
-                    line_width=0,
-                    hoverinfo="skip",
-                    name="8 in 10 buses",
-                    legendrank=2,
-                )
-            )
+    if has_tt:
+        # the timetable, behind: a pale grey band across the chart with its typical bus
         fig.add_trace(
             go.Scatter(
-                x=g["ahead_min"],
-                y=g["off"],
-                mode="lines+markers",
-                # one choice per chart, named in the chart's title: the legend says which line is
-                # which
-                name="Predictions",
-                # paired in the legend only when several choices are drawn
-                legendgroup=None if one else key or "all",
-                legendrank=1 if one else 3 * rank,
-                line={"color": colour, "width": LINE_MAIN},
-                marker={"size": MARKER_MAIN},
-                hovertext=[
-                    f"<b>{label}</b><br>predicted {int(m)} min away: {o:.1f} min off on average"
-                    + (
-                        f"<br>8 in 10 buses: {lo:.1f} to {hi:.1f} min off"
-                        if has_band and lo is not None and hi is not None
-                        else ""
-                    )
-                    + (f"<br>printed timetable: {t:.1f} min off" if t is not None else "")
-                    + f"<br>{int(n):,} bus arrivals"
-                    for m, o, n, lo, hi in zip(
-                        g["ahead_min"], g["off"], g["n"], lows, highs, strict=False
-                    )
-                ],
-                hoverinfo="text",
+                x=[0.5, 15.5, 15.5, 0.5],
+                y=[t_hi, t_hi, t_lo, t_lo],
+                fill="toself",
+                fillcolor="rgba(75, 85, 99, 0.10)",
+                mode="lines",
+                line={"width": 1, "color": REF_GREY, "dash": "dot"},
+                hoverinfo="skip",
+                legendgroup="timetable",
+                showlegend=False,
             )
         )
-        if t is not None:
-            fig.add_trace(
-                go.Scatter(
-                    x=[1, 15],
-                    y=[t, t],
-                    mode="lines",
-                    name="Printed timetable",
-                    legendgroup=None if one else key or "all",
-                    legendrank=3 if one else 3 * rank + 1,
-                    line={"color": TIMETABLE_LINE if one else colour, "width": 2.6, "dash": "dash"},
-                    hovertemplate=f"<b>Printed timetable ({in_parens(label)})</b><br>{t:.1f} min off on "
-                    "average, for the same bus arrivals<extra></extra>",
-                )
+        fig.add_trace(
+            go.Scatter(
+                x=[0.5, 15.5],
+                y=[t_med, t_med],
+                mode="lines",
+                name="Printed timetable",
+                legendgroup="timetable",
+                legendrank=3,
+                line={"color": REF_GREY, "width": LINE_REF},
+                hovertemplate=f"<b>Printed timetable ({in_parens(label)})</b><br>typical bus "
+                f"{fmt_delay(t_med * 60)}<br>8 in 10 buses: {fmt_range(t_lo * 60, t_hi * 60)}"
+                "<br>for the same bus arrivals<extra></extra>",
             )
-    if not drawn:
-        return None
+        )
+    fig.add_trace(
+        go.Scatter(
+            x=x + x[::-1],
+            y=highs + lows[::-1],
+            fill="toself",
+            fillcolor=colour,
+            opacity=0.18,
+            mode="lines",
+            line_width=0,
+            hoverinfo="skip",
+            name="8 in 10 buses",
+            legendrank=2,
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=x,
+            y=med,
+            mode="lines+markers",
+            name="Typical bus",
+            legendrank=1,
+            line={"color": colour, "width": LINE_MAIN},
+            marker={"size": MARKER_MAIN},
+            hovertext=[
+                f"<b>{label}</b><br>predicted {m} min away: the typical bus came "
+                + ("as predicted" if round(abs(v) * 60) < 6 else f"{words(v)} than predicted")
+                + f"<br>8 in 10 buses: {fmt_range(lo * 60, hi * 60)} against the prediction"
+                + f"<br>{float(r['mean_abs_s']) / 60:.1f} min off on average"
+                + (f"<br>printed timetable: typical bus {fmt_delay(t_med * 60)}" if has_tt else "")
+                + f"<br>{int(r['n']):,} bus arrivals"
+                for m, v, lo, hi, r in zip(x, med, lows, highs, recs, strict=False)
+            ],
+            hoverinfo="text",
+        )
+    )
+    on_time_line(fig)
     fig.update_layout(
-        xaxis={"title": "Minutes away", "range": [0, 15.5], "dtick": 5, "zeroline": False},
-        # from zero once the band is drawn (it starts near 0); fitted to the lines otherwise
-        yaxis={"title": "Average minutes off", "zeroline": False, "rangemode": "tozero"},
-        # the entries side by side in one row above the plot (they wrap when there are many)
+        xaxis={
+            "title": "Minutes away",
+            "range": [0.5, 15.5],
+            "tickvals": [1, 5, 10, 15],
+            "zeroline": False,
+        },
+        yaxis=minutes_axis(lows + highs + ([t_lo, t_hi] if has_tt else []), pad=0.3),
         legend={
             "orientation": "h",
             "yanchor": "bottom",
             "y": 1.02,
             "x": 0,
             "xanchor": "left",
-            "traceorder": "normal" if one else "grouped",
+            "traceorder": "normal",
         },
         hovermode="closest",
         height=440,
@@ -2152,7 +2145,6 @@ def minutes_axis(values, pad: float = 0.5) -> dict:
         "tickvals": ticks,
         "ticktext": [word(t) for t in ticks],
         "zeroline": False,
-        "title": "",
     }
 
 
@@ -2941,7 +2933,7 @@ def prediction_scope_rows(
             f"""
             select basis, ahead_min, null::text as route_id, sum(n) as n,
                    sum(sum_abs_s)::float8 / nullif(sum(n), 0) as mean_abs_s,
-                   {ERROR_COUNT_SUMS}
+                   {ERROR_COUNT_SUMS}, {SIGNED_COUNT_SUMS}
             from marts.mart_prediction_stop_daily
             where service_date >= %s {where} {clause}
             group by 1, 2

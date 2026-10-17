@@ -29,6 +29,8 @@ from common import (
     table,
 )
 
+from eugene_bus_reliability.faq import questions
+
 require_db()
 st.title("Data & methods")
 st.caption("How the numbers on this site are made, and how complete they are.")
@@ -59,8 +61,9 @@ low end and one in ten later than the high end. Its width is how much you need t
 
 **Prediction accuracy.** Every real-time arrival prediction LTD publishes is kept, with when it was shown.
 "5 minutes away" means the prediction said 5:00 to 5:59. Each bus arrival counts once at each distance (the
-prediction on show at that moment), and the timetable is measured on the same arrivals. Minutes off = how far the
-actual arrival was from the predicted one, early or late alike; the charts average it.
+prediction on show at that moment), and the timetable is measured on the same arrivals. As with lateness, the
+charts show the typical bus and the range 8 in 10 buses came in against the predicted time, later or earlier; the
+tables also give minutes off, how far the actual arrival was from the predicted one, early or late alike, averaged.
 
 **Observed arrival.** LTD's vehicle positions carry no stop information, so arrivals are derived geometrically: each
 position is placed along the route's shape as a fraction of the way along it (walked in time order, each position on
@@ -505,6 +508,13 @@ with card():
             height=300,
         )
         show_chart(fig_g)
+
+# ---- questions and answers (the same as the plain page /reports/faq/, for search engines) ----
+with card():
+    st.subheader("Questions and answers")
+    for question, answer in questions():
+        with st.expander(question):
+            st.markdown(answer)
 
 # ---- behind the scenes: last, for the few who want the raw workings ----------------------
 with card():

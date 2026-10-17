@@ -67,13 +67,13 @@ st.html(
     # only feedback a tap gets), and the keyboard's focus shows as a clear ring. No movement
     # for visitors who ask their system for less motion.
     "[data-testid='stPageLink'] a, [class*='st-key-backlink'] a,"
-    " [class*='st-key-backlink'] button, [data-testid^='stBaseButton'] {"
+    " [class*='st-key-backlink'] button, [data-testid='stBaseButton-secondary'], [data-testid='stBaseButton-primary'] {"
     " transition: background-color 0.12s, box-shadow 0.12s, transform 0.12s; }"
     "[data-testid='stPageLink'] a:hover, [class*='st-key-backlink'] a:hover,"
-    " [class*='st-key-backlink'] button:hover, [data-testid^='stBaseButton']:hover {"
+    " [class*='st-key-backlink'] button:hover, [data-testid='stBaseButton-secondary']:hover, [data-testid='stBaseButton-primary']:hover {"
     " box-shadow: 0 3px 8px rgba(20, 30, 45, 0.16); transform: translateY(-1px); }"
     "[data-testid='stPageLink'] a:active, [class*='st-key-backlink'] a:active,"
-    " [class*='st-key-backlink'] button:active, [data-testid^='stBaseButton']:active {"
+    " [class*='st-key-backlink'] button:active, [data-testid='stBaseButton-secondary']:active, [data-testid='stBaseButton-primary']:active {"
     " box-shadow: 0 1px 2px rgba(20, 30, 45, 0.18); transform: translateY(1px); }"
     "[data-testid='stPageLink'] a:focus-visible, [class*='st-key-backlink'] a:focus-visible {"
     " outline: 3px solid rgba(31, 95, 158, 0.45); outline-offset: 2px; }"
@@ -83,7 +83,7 @@ st.html(
     "[data-testid='stButtonGroup'] button:active { box-shadow: inset 0 2px 4px rgba(20, 30, 45, 0.2); }"
     "@media (prefers-reduced-motion: reduce) {"
     " [data-testid='stPageLink'] a, [class*='st-key-backlink'] a,"
-    " [class*='st-key-backlink'] button, [data-testid^='stBaseButton'], .ebw-tile, a.ebw-r"
+    " [class*='st-key-backlink'] button, [data-testid='stBaseButton-secondary'], [data-testid='stBaseButton-primary'], .ebw-tile, a.ebw-r"
     " { transition: none !important; transform: none !important; } }"
     "[data-testid='stPageLink'] p { font-size: 1.05rem; font-weight: 650; color: #1d6b48; }"
     # Streamlit's link-to-this-heading icon (a chain link shown on hover): headings change with

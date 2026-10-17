@@ -290,11 +290,9 @@ with card():
     if along.empty:
         st.caption("Not enough scored arrivals yet.")
     else:
-        # long stop names would leave little room for the plot (less still on a phone)
-        cut = 20 if is_mobile() else 30
-        along["label"] = [
-            t if len(t) <= cut else t[: cut - 1].rstrip() + "…" for t in along["Stop"].astype(str)
-        ]
+        along["label"] = along["Stop"].astype(str)
+        if is_mobile():  # long stop names would leave little room for the plot on a phone
+            along["label"] = [t if len(t) <= 20 else t[:19].rstrip() + "…" for t in along["label"]]
         for c in ("median_delay", "p10", "p90"):
             along[c] = along[c].astype(float) / 60
         stops_order = along["label"].tolist()
@@ -344,9 +342,7 @@ with card():
                 "type": "category",
                 "categoryorder": "array",
                 "categoryarray": stops_order,
-                # straight up: slanted, the first stop's name would reach out left of the plot
-                # and push it away from the minutes labels, leaving a wide blank strip
-                "tickangle": -90,
+                "tickangle": -45,
                 "title": "",
                 "showgrid": True,
                 "gridcolor": "#e9ecee",

@@ -11,7 +11,6 @@ from common import (
     ALL_ROUTES,
     BRAND,
     PREDICTION_OFF_NOTE,
-    SIGNED_COUNT_SUMS,
     as_name,
     card,
     col_count,
@@ -40,9 +39,10 @@ from common import (
     scope_picker,
     service_hour_key,
     show_chart,
-    signed_percentile,
     table,
 )
+
+from eugene_bus_reliability.signed import SIGNED_COUNT_SUMS, signed_percentile
 
 require_db()
 title_slot = st.empty()  # names the route and/or stop chosen just below it
@@ -246,8 +246,8 @@ def prediction_table(
     off: pd.DataFrame, first_cols: list[dict], row_of, key: str, sort: str | None, min_n: int = 50
 ) -> None:
     """A table of how far off the predictions were when they said 5 minutes away, beside the
-    printed timetable on the same arrivals, one row per id in `off` (off_by()), in the columns
-    every reliability table has: minutes off on average and the 8-in-10 strip, for each. The
+    printed timetable on the same arrivals, one row per id in `off` (off_by()): minutes off on
+    average and the 8-in-10 strip for each (10 minutes away is in the row's hover text). The
     strips share one scale, so a narrow prediction strip beside a wide timetable one shows the
     prediction doing better. row_of(id, n) gives the row's href, hover (which carries the number
     of arrivals) and first columns' values. With no sort, the rows come busiest first, as the
@@ -291,10 +291,12 @@ def prediction_table(
         (p_off, p_med, p_lo, p_hi), (t_off, t_med, t_lo, t_hi) = vals[i]
         base = row_of(i, int(at[15].loc[i, "n"]))
         ten = at[10].loc[i, "mean_abs_s"] if i in at[10].index else None
-        if ten is not None and pd.notna(ten):
-            base["hover"] += f"; 10 minutes away, {fmt_off(ten)} off on average"
+        ten = None if ten is None or pd.isna(ten) else float(ten)
         if p_med is not None:
-            base["hover"] += f"; the typical bus came {fmt_vs(p_med, 'predicted')}"
+            base["hover"] += f"; 5 minutes away, the typical bus came {fmt_vs(p_med, 'predicted')}"
+        # 10 minutes away: here, as the chart above shows every distance
+        if ten is not None:
+            base["hover"] += f"; 10 minutes away, {fmt_off(ten)} off on average"
         rows.append(
             {
                 **base,
@@ -302,42 +304,52 @@ def prediction_table(
                 **{f"t_{k}": v for k, v in range_fields(t_lo, t_med, t_hi, lo, hi, t_off).items()},
             }
         )
-    cols = list(first_cols)
-    for pre, what, tip in (
-        (
-            "p",
-            "prediction",
-            "Against LTD's prediction when it said the bus was 5 minutes away (the dashed line: "
-            "when it predicted; left of it, earlier than predicted).",
-        ),
-        (
-            "t",
-            "timetable",
-            "Against the printed timetable, for the same bus arrivals (the dashed line: the "
-            "scheduled time; left of it, early).",
-        ),
-    ):
-        cols += [
-            {
-                "key": f"{pre}_off",
-                "label": f"Minutes off {what}",
-                "width": "9.4em",
-                "num": True,
-                "help": f"{tip} Average minutes off, early or late alike. Sorts closest first.",
-                "sort": f"{pre}_off_s",
-                "first": "asc",
-            },
-            {
-                "key": f"{pre}_range",
-                "label": f"8 in 10 buses vs {what}",
-                "width": "minmax(13em, 2fr)",
-                "html": True,
-                "help": f"{tip} The strip is where 8 in 10 buses came, the dark tick the typical "
-                "bus, the numbers the range in minutes. Sorts the narrowest first.",
-                "sort": f"{pre}_range_s",
-                "first": "asc",
-            },
-        ]
+    OFF = "Average minutes off, early or late alike; lower is better. Sorts closest first."
+    STRIP = (
+        "The strip is where 8 in 10 buses came, the dark tick the typical bus, the numbers the "
+        "range in minutes. Sorts the narrowest first."
+    )
+    cols = [
+        *first_cols,
+        {
+            "key": "p_off",
+            "label": "Prediction, 5 min away",
+            "width": "9.6em",
+            "num": True,
+            "help": "When LTD's prediction said the bus was 5 minutes away. " + OFF,
+            "sort": "p_off_s",
+            "first": "asc",
+        },
+        {
+            "key": "p_range",
+            "label": "8 in 10 buses vs prediction",
+            "width": "minmax(13em, 2fr)",
+            "html": True,
+            "help": "Against the prediction when it said 5 minutes away (the dashed line: the "
+            "predicted time; left of it, earlier than predicted). " + STRIP,
+            "sort": "p_range_s",
+            "first": "asc",
+        },
+        {
+            "key": "t_off",
+            "label": "Printed timetable",
+            "width": "8.4em",
+            "num": True,
+            "help": "The printed timetable, for the same bus arrivals. " + OFF,
+            "sort": "t_off_s",
+            "first": "asc",
+        },
+        {
+            "key": "t_range",
+            "label": "8 in 10 buses vs timetable",
+            "width": "minmax(13em, 2fr)",
+            "html": True,
+            "help": "Against the printed timetable, for the same bus arrivals (the dashed line: "
+            "the scheduled time; left of it, early). " + STRIP,
+            "sort": "t_range_s",
+            "first": "asc",
+        },
+    ]
     # a row opens that route's or stop's report card at its predictions, like every other
     # table's rows; the choice at the top of this page is how to see one here
     link_table(rows, cols, max_height=520, key=key, default_sort=sort)
@@ -345,9 +357,11 @@ def prediction_table(
 
 TABLE_HELP = (
     "How far from the time it was given the bus came, on the same bus arrivals: LTD's "
-    "prediction when it said 5 minutes away, and the printed timetable. Minutes off: on "
-    "average, early or late alike; lower is better. The strips: where 8 in 10 buses came, "
-    "earlier (left of the dashed line) or later. Rows with at least 50 bus arrivals measured. "
+    "prediction when it said 5 minutes away (hover a row for 10 minutes), and the printed "
+    "timetable. The numbers: "
+    "minutes off on average, early or late alike; lower is better. The strips: where 8 in 10 "
+    "buses came, earlier (left of the dashed line) or later. Rows with at least 50 bus arrivals "
+    "measured. "
     f"{PERIOD}. Click a column heading to sort; click a row for that report card's predictions."
 )
 
@@ -389,7 +403,7 @@ with card():
     code_of = dict(zip(names["stop_id"].astype(str), names["stop_code"], strict=False))
     prediction_table(
         by_stop,
-        [{"key": "stop", "label": "Stop", "width": "minmax(10em, 2fr)", "bold": True}],
+        [{"key": "stop", "label": "Stop", "width": "minmax(12em, 2fr)", "bold": True}],
         lambda i, n: {
             "href": f"/stops?stop={i}#predictions",
             "hover": f"{name_of.get(i, i)}: measured on {n:,} bus arrivals",

@@ -18,6 +18,7 @@ from google.protobuf import text_format
 
 from eugene_bus_reliability import rt_parse
 from eugene_bus_reliability.config import Settings
+from eugene_bus_reliability.signed import SIGNED_COUNT_SUMS, signed_percentile
 from eugene_bus_reliability.stop_order import route_stop_order
 
 # Must match the dbt macro horizon_band() and app/common.py HORIZON_BANDS.
@@ -340,14 +341,13 @@ def prediction_strips_check(cur: psycopg.Cursor) -> None:
         """,
     )
     print("The same from the running counts (n_sle_ columns), as the site reads them:")
-    cols = ", ".join(
-        f"sum(n_sle_{'m' + str(-t) if t < 0 else t}s) as c{i}" for i, t in enumerate(SIGNED)
-    )
+    cols = SIGNED_COUNT_SUMS
     try:
         rows = cur.execute(
             f"""
-            select r.route_short_name, case when basis = 'sign' then 'sign 5 min'
-                                            else 'timetable' end, sum(n), {cols}
+            select r.route_short_name as route,
+                   case when basis = 'sign' then 'sign 5 min' else 'timetable' end as what,
+                   sum(n) as n, {cols}
             from marts.mart_prediction_daily m
             join gtfs.routes r on r.route_id = m.route_id
              and r.feed_version_id = (select max(feed_version_id) from gtfs.feed_version)
@@ -356,35 +356,19 @@ def prediction_strips_check(cur: psycopg.Cursor) -> None:
             group by 1, 2 order by sum(n) desc, 1, 2 limit 16
             """
         ).fetchall()
+        names = [d.name for d in cur.description]
         print("route | what | n | p10 | p50 | p90")
-        for route, what, n, *counts in rows:
+        for values in rows:
+            r = dict(zip(names, values, strict=True))
             print(
                 " | ".join(
-                    [str(route), what, str(n)]
-                    + [str(round(_signed_pct(counts, n, q))) for q in (0.1, 0.5, 0.9)]
+                    [str(r["route"]), r["what"], str(r["n"])]
+                    + [str(round(signed_percentile(r, q))) for q in (0.1, 0.5, 0.9)]
                 )
             )
     except Exception as exc:  # noqa: BLE001
         print(f"!! {str(exc).strip().splitlines()[0][:200]}")
         cur.connection.rollback()
-
-
-# the thresholds of the marts' signed running counts (dbt macros/error_counts.sql)
-SIGNED = [-900, -600, -480, -360, -300, -240, -180, -150, -120, -90, -60, -45, -30, -15, 0,
-          15, 30, 45, 60, 90, 120, 150, 180, 240, 300, 360, 480, 600, 900]  # fmt: skip
-
-
-def _signed_pct(counts: list, n: float, share: float) -> float:
-    want = share * float(n)
-    prev_t = prev_c = None
-    for t, c in zip(SIGNED, counts, strict=True):
-        c = float(c or 0)
-        if c >= want:
-            if prev_t is None or c == prev_c:
-                return float(t)
-            return prev_t + (want - prev_c) / (c - prev_c) * (t - prev_t)
-        prev_t, prev_c = float(t), c
-    return float(SIGNED[-1])
 
 
 def main(settings: Settings, raw: bool = False) -> None:
