@@ -58,6 +58,7 @@ from common import (
     route_order,
     route_rank,
     route_tiles,
+    route_timetable,
     service_hour_key,
     service_today,
     show_chart,
@@ -65,6 +66,7 @@ from common import (
     stop_link,
     table,
     times_of_day_card,
+    timetable_card,
     trend_card,
 )
 
@@ -546,6 +548,18 @@ with card():
         "there, and how late that puts it against the timetable (negative = early).",
     )
     route_right_now()
+
+# ---- the plain timetable, folded away: for reference --------------------------------------
+if direction is not None:
+    _way = dir_labels.get(direction, "")
+    timetable_card(
+        f"Timetable for route {route_name}" + (f", {_way[:1].lower()}{_way[1:]}" if _way else ""),
+        f"tt_route_{route_id}",
+        lambda day: route_timetable(route_id, direction, day),
+        note="One row per bus. The columns are the route's timepoints: the main stops with an "
+        "exact time in the timetable, numbered as in the table of stops above; the bus passes "
+        "the stops between them in between.",
+    )
 
 # ---- the other routes --------------------------------------------------------------------
 with card():

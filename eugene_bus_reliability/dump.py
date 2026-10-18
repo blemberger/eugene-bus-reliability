@@ -894,6 +894,35 @@ def main(settings: Settings, raw: bool = False) -> None:
         """,
         )
 
+        section(
+            "TIMEPOINTS: LTD's recorded departure against our GPS time for the same bus (last 7 days)"
+        )
+        print(
+            "At timepoints the site uses LTD's recorded departure where it has one (time_source\n"
+            "ltd_departure). ltd_minus_gps = that minus our GPS time for the same bus; the two\n"
+            "lateness columns are the typical lateness each way. If ltd_minus_gps is well below 0,\n"
+            "LTD records the departure earlier than the bus is seen leaving, and the timepoints read\n"
+            "less late than the stops around them (the +48 s bump above)."
+        )
+        show(
+            cur,
+            """
+            select time_source, count(*) as n,
+                   round(percentile_cont(0.5) within group (order by methods_diff_s)) as ltd_minus_gps_s,
+                   round(percentile_cont(0.25) within group (order by methods_diff_s)) as p25_s,
+                   round(percentile_cont(0.75) within group (order by methods_diff_s)) as p75_s,
+                   round(percentile_cont(0.5) within group (order by delay_s)) as lateness_used_s,
+                   round(percentile_cont(0.5) within group (order by
+                       case when time_source = 'ltd_departure' then delay_s - methods_diff_s
+                            else delay_s end)) as lateness_by_gps_s
+            from marts.fct_stop_events
+            where is_timepoint and status is not null and methods_diff_s is not null
+              and not is_first_stop
+              and service_date >= (now() at time zone 'America/Los_Angeles')::date - 6
+            group by 1 order by 1
+        """,
+        )
+
         section("METHOD AGREEMENT (feed settled − geometric): timepoints are the fair test")
         show(
             cur,

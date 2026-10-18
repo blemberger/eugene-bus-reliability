@@ -46,8 +46,10 @@ from common import (
     show_left,
     stop_buses,
     stop_tiles,
+    stop_timetable,
     stops_with_numbers,
     times_of_day_card,
+    timetable_card,
     today_lateness,
     trend_card,
 )
@@ -497,6 +499,14 @@ with card():
         "negative = early.",
     )
     stop_right_now()
+
+# ---- the plain timetable, folded away: for reference --------------------------------------
+timetable_card(
+    f"Timetable at {SNAME}, every route",
+    f"tt_stop_{stop_id}",
+    lambda day: stop_timetable(stop_id, day),
+    note="Each row is an hour; the numbers are the minutes past it when each bus is due here.",
+)
 
 
 # ---- nearby stops: across the street, the next one along ------------------------------------

@@ -575,9 +575,6 @@ with card():
 
 
 # ---- alerts ----------------------------------------------------------------------
-STALE_ALERT_DAYS = 21  # an open-ended alert older than this is marked as possibly out of date
-
-
 def _when(ts: pd.Timestamp) -> str:
     t = ts.tz_convert(LOCAL_TZ)
     return f"{t:%a %b} {t.day}, " + t.strftime("%I:%M %p").lstrip("0").lower()
@@ -608,10 +605,9 @@ def alert_times(payload: dict, first_seen: pd.Timestamp | None) -> str:
 with card():
     st.subheader(
         "Service alerts",
-        help="From LTD. Times are when LTD says each alert applies or, where it doesn't say, the "
-        "first time this site saw the alert. Newest first. LTD sometimes leaves an alert listed "
-        f"after it stopped applying; those with no end date that began over {STALE_ALERT_DAYS} "
-        "days ago are gathered, closed, at the bottom.",
+        help="Every alert LTD has up now, newest first: LTD decides when each comes down. Times "
+        "are when LTD says each alert applies or, where it doesn't say, the first time this site "
+        "saw the alert. An alert whose own dates have all passed is left out.",
     )
     alerts = q(
         """
@@ -646,11 +642,7 @@ with card():
         began, over = since(payload, first_seen)
         if over:
             continue  # LTD still lists it, but every period it gave has ended
-        # LTD sometimes leaves an alert up long after it applied (a stop closed "today, June
-        # 11" still listed in October): an alert with no end that began weeks ago says so, and
-        # goes after the current ones
-        old = began is not None and (now - began) > pd.Timedelta(days=STALE_ALERT_DAYS)
-        shown.append((old, -(began.timestamp() if began is not None else 0), payload, first_seen))
+        shown.append((-(began.timestamp() if began is not None else 0), payload, first_seen))
 
     def texts(payload: dict) -> tuple[str, str]:
         def first(field: str) -> str:
@@ -665,25 +657,12 @@ with card():
 
         return first("header_text") or "Alert", first("description_text")
 
-    current = sorted((t for t in shown if not t[0]), key=lambda t: t[1])
-    older = sorted((t for t in shown if t[0]), key=lambda t: t[1])
-    if not current:
+    # every alert LTD still has up, newest first: LTD decides when an alert comes down, and one
+    # posted months ago can still apply (a repaving project running August to October)
+    if not shown:
         st.caption("No current alerts.")
-    for _, _, payload, first_seen in current:
+    for _, payload, first_seen in sorted(shown, key=lambda t: t[0]):
         header, desc = texts(payload)
         when = alert_times(payload, first_seen)
         with st.expander(f"{header}  ·  {when}" if when else header):
             st.write(desc or "No details given.")
-    # LTD leaves some alerts listed long after they applied (a stop closed "today, June 11",
-    # still in the feed in October): kept out of the way, in one closed section, newest first
-    if older:
-        n = len(older)
-        with st.expander(
-            f"{n} older alert{'s' if n > 1 else ''} LTD still lists (may no longer apply)"
-        ):
-            for _, _, payload, first_seen in older:
-                header, desc = texts(payload)
-                began, _ = since(payload, first_seen)
-                at_least = "" if payload.get("active_period") else "at least "
-                st.markdown(f"**{header}** · listed since {at_least}{_when(began).split(',')[0]}")
-                st.write(desc or "No details given.")

@@ -1784,7 +1784,7 @@ NOT_ENOUGH_HOURLY = "Not enough arrivals yet for this chart (needs {n} in an hou
 PREDICTION_OFF_NOTE = (
     "How much later or earlier than LTD's real-time prediction (what apps like Transit show) "
     "the bus came, by how many minutes away the prediction said the bus was: the line is the "
-    "typical bus, the shading where 8 buses in 10 came, and the dashed line is when it was "
+    "typical bus, the shading where 8 buses in 10 came, and 'on time' is when it was "
     "predicted. The thin grey line is the printed timetable's typical bus for the same bus "
     "arrivals (flat, because the timetable doesn't change as the bus gets nearer); hover for "
     "its 8 in 10. Minutes away is what the prediction said at the time, not when the bus "
@@ -1931,8 +1931,8 @@ def countdown_off_chart(
 ) -> go.Figure | None:
     """How much later or earlier than predicted the bus came, against how many minutes away the
     prediction said it was, drawn as the lateness charts are: the typical bus (the line with
-    dots), the band 8 in 10 buses fell in, and the dashed on-time line, here meaning "when it
-    was predicted". A thin grey line: the printed timetable's typical bus for the same arrivals
+    dots) and the band 8 in 10 buses fell in; 'on time' (when it was predicted) is a plain grid
+    line, not marked as on the lateness charts. A thin grey line: the printed timetable's typical bus for the same arrivals
     (flat, because the timetable doesn't change as the bus gets nearer); its 8 in 10 is in the
     hover text. One choice at a time (`selected`'s first key: ALL_ROUTES or a route id). None
     when it has fewer than two points."""
@@ -2031,7 +2031,8 @@ def countdown_off_chart(
             hoverinfo="text",
         )
     )
-    on_time_line(fig)
+    # "on time" (when it was predicted) is a plain grid line here, as on any other minute: with
+    # the timetable's grey line on the chart too, a marked line at 0 read as a third series
     fig.update_layout(
         xaxis={
             "title": "Minutes away",
@@ -2039,7 +2040,7 @@ def countdown_off_chart(
             "tickvals": [1, 5, 10, 15],
             "zeroline": False,
         },
-        yaxis=minutes_axis(lows + highs + ([t_med] if has_tt else []), pad=0.3),
+        yaxis=minutes_axis(lows + highs + ([t_med] if has_tt else []), pad=0.3, bold_zero=False),
         legend={
             "orientation": "h",
             "yanchor": "bottom",
@@ -2133,9 +2134,11 @@ def on_time_line(fig: go.Figure) -> None:
     fig.add_hline(y=0, line_width=1.6, line_dash="dash", line_color=ON_TIME_LINE, layer="above")
 
 
-def minutes_axis(values, pad: float = 0.5) -> dict:
+def minutes_axis(values, pad: float = 0.5, bold_zero: bool = True) -> dict:
     """A minutes-against-the-timetable axis fitted to the values (and 0), labelled in words:
-    'on time' at 0, then '2 min late', '1 min early' (no signs to decode)."""
+    'on time' at 0, then '2 min late', '1 min early' (no signs to decode). 'on time' is in bold
+    where the chart marks it with a line (on_time_line); bold_zero=False leaves it a plain
+    grid line, for a chart with another reference line beside it."""
     vals = [float(v) for v in values if v is not None and not pd.isna(v)] + [0.0]
     lo, hi = min(vals) - pad, max(vals) + pad
     span = hi - lo
@@ -2144,7 +2147,7 @@ def minutes_axis(values, pad: float = 0.5) -> dict:
 
     def word(t: int) -> str:
         if t == 0:
-            return "<b>on time</b>"
+            return "<b>on time</b>" if bold_zero else "on time"
         return f"{abs(t)} min {'late' if t > 0 else 'early'}"
 
     return {
@@ -3826,3 +3829,187 @@ def show_left(left: pd.DataFrame, empty: str) -> None:
             "Ago": col_ago(),
         },
     )
+
+
+# ------------------------------------------------------------ the timetable itself ----
+# Plain schedule information, for reference beside the reliability numbers: which buses are
+# due at a stop, hour by hour, and a route's timetable at its timepoints, as LTD publishes them.
+TIMETABLE_DAYS = {"weekday": "Weekdays", "saturday": "Saturdays", "sunday": "Sundays"}
+
+
+def timetable_services() -> dict[str, tuple[date | None, list[str]]]:
+    """For weekdays, Saturdays and Sundays: a date in the next two weeks that stands for them
+    (for weekdays, the one with the most service; a holiday has less) and the schedule's
+    service ids that run that day. The timetable in force today, with its exceptions."""
+    fv = current_fv()
+    df = q(
+        f"""
+        with d as (
+            select g::date as day
+            from generate_series(((now() at time zone '{LOCAL_TZ}') - interval '3 hours')::date,
+                                 ((now() at time zone '{LOCAL_TZ}') - interval '3 hours')::date + 13,
+                                 interval '1 day') g
+        ),
+        runs as (
+            select d.day, c.service_id
+            from d join gtfs.calendar c
+              on c.feed_version_id = {fv} and d.day between c.start_date and c.end_date
+             and case extract(isodow from d.day)::int
+                   when 1 then c.monday when 2 then c.tuesday when 3 then c.wednesday
+                   when 4 then c.thursday when 5 then c.friday when 6 then c.saturday
+                   else c.sunday end
+            where not exists (
+                select 1 from gtfs.calendar_dates x
+                where x.feed_version_id = {fv} and x.service_id = c.service_id
+                  and x.date = d.day and x.exception_type = 2)
+            union
+            select x.date, x.service_id from gtfs.calendar_dates x join d on d.day = x.date
+            where x.feed_version_id = {fv} and x.exception_type = 1
+        )
+        select d.day, extract(isodow from d.day)::int as dow,
+               array_remove(array_agg(r.service_id), null) as ids,
+               (select count(*) from gtfs.trips t
+                where t.feed_version_id = {fv} and t.service_id = any(array_agg(r.service_id)))
+                   as trips
+        from d left join runs r using (day)
+        group by 1, 2 order by 1
+        """
+    )
+    out: dict[str, tuple[date | None, list[str]]] = {}
+    for kind, dows in (("weekday", range(1, 6)), ("saturday", (6,)), ("sunday", (7,))):
+        rows = df[df["dow"].isin(list(dows))]
+        if kind == "weekday":
+            rows = rows.sort_values(["trips", "day"], ascending=[False, True])
+        pick = rows.iloc[0] if len(rows) else None
+        out[kind] = (pick["day"], list(pick["ids"] or [])) if pick is not None else (None, [])
+    return out
+
+
+def timetable_day_picker(key: str) -> str:
+    """Weekdays / Saturdays / Sundays, starting on today's."""
+    today = {6: "saturday", 7: "sunday"}.get(service_today().isoweekday(), "weekday")
+    choice = st.segmented_control(
+        "Days",
+        list(TIMETABLE_DAYS),
+        format_func=lambda k: TIMETABLE_DAYS[k],
+        default=today,
+        key=key,
+    )
+    return choice or today
+
+
+def clock(seconds) -> str:
+    """Seconds after the service day's start -> '6:05 am' (after-midnight trips: '12:20 am')."""
+    s = int(seconds)
+    return dtime(s // 3600 % 24, s // 60 % 60).strftime("%I:%M %p").lstrip("0").lower()
+
+
+def stop_timetable(stop_id: str, day: str) -> pd.DataFrame:
+    """The buses due at a stop on a day of `day`'s kind, hour by hour: one row per hour, one
+    column per route and direction ('11 → Thurston'), the minutes past the hour in each cell,
+    as a stop's posted schedule shows them. Buses that only drop off here are left out."""
+    fv = current_fv()
+    _, ids = timetable_services()[day]
+    if not ids:
+        return pd.DataFrame()
+    df = q(
+        f"""
+        select r.route_short_name as route, t.direction_id, t.trip_headsign as headsign,
+               coalesce(st.departure_seconds, st.arrival_seconds) as s
+        from gtfs.stop_times st
+        join gtfs.trips t on t.trip_id = st.trip_id and t.feed_version_id = st.feed_version_id
+        join gtfs.routes r on r.route_id = t.route_id and r.feed_version_id = t.feed_version_id
+        where st.feed_version_id = {fv} and st.stop_id = %s and t.service_id = any(%s)
+          and coalesce(st.pickup_type, 0) <> 1
+          and coalesce(st.departure_seconds, st.arrival_seconds) is not null
+          -- not the end of the trip: nobody boards there
+          and st.stop_sequence < (select max(x.stop_sequence) from gtfs.stop_times x
+                                  where x.feed_version_id = st.feed_version_id
+                                    and x.trip_id = st.trip_id)
+        """,
+        (stop_id, ids),
+    )
+    if df.empty:
+        return df
+    df["toward"] = clean_headsigns(df)
+    df["col"] = [
+        f"{r} → {h}" if h else str(r) for r, h in zip(df["route"], df["toward"], strict=False)
+    ]
+    df["hour"] = (df["s"].astype(int) // 3600).astype(int)  # 24+ = after midnight
+    df["minute"] = (df["s"].astype(int) // 60 % 60).astype(int)
+    cols = sorted(
+        df["col"].unique(),
+        key=lambda c: (len(c.split(" ")[0]), c.split(" ")[0], c),
+    )
+    hours = sorted(df["hour"].unique())
+    table_rows = []
+    for h in hours:
+        row = {"Hour": hour_label(h)}
+        for c in cols:
+            mins = sorted(df[(df["hour"] == h) & (df["col"] == c)]["minute"])
+            row[c] = " ".join(f"{m:02d}" for m in mins)
+        table_rows.append(row)
+    return pd.DataFrame(table_rows, columns=["Hour", *cols])
+
+
+def route_timetable(route_id: str, direction: int, day: str) -> pd.DataFrame:
+    """A route's timetable in one direction on a day of `day`'s kind, as LTD prints it: one row
+    per trip, one column per timepoint (numbered as on the route's report card), in the order
+    the bus reaches them; blank where a trip doesn't serve that timepoint."""
+    fv = current_fv()
+    _, ids = timetable_services()[day]
+    if not ids:
+        return pd.DataFrame()
+    df = q(
+        f"""
+        select st.trip_id, st.stop_id::text as stop_id, st.stop_sequence, s.stop_name,
+               coalesce(st.departure_seconds, st.arrival_seconds) as sec
+        from gtfs.stop_times st
+        join gtfs.trips t on t.trip_id = st.trip_id and t.feed_version_id = st.feed_version_id
+        join gtfs.stops s on s.stop_id = st.stop_id and s.feed_version_id = st.feed_version_id
+        where st.feed_version_id = {fv} and t.route_id = %s and t.direction_id = %s
+          and t.service_id = any(%s) and coalesce(st.timepoint, 1) = 1
+          and coalesce(st.departure_seconds, st.arrival_seconds) is not null
+        """,
+        (str(route_id), int(direction), ids),
+    )
+    if df.empty:
+        return df
+    _, place_of = route_order(str(route_id), int(direction), fv)
+    df["place"] = [
+        place_of.get((str(s), int(q_)))
+        for s, q_ in zip(df["stop_id"], df["stop_sequence"], strict=False)
+    ]
+    df = df.dropna(subset=["place"])
+    df["place"] = df["place"].astype(int)
+    names = (
+        df.groupby("place")["stop_name"].first().sort_index()
+    )  # one name per timepoint, in route order
+    cols = {p: f"{p + 1}. {n}" for p, n in names.items()}
+    first = df.groupby("trip_id")["sec"].min().sort_values()
+    rows = []
+    for trip in first.index:
+        t = df[df["trip_id"] == trip].sort_values("sec")
+        row = {cols[p]: "" for p in names.index}
+        for p, sec in zip(t["place"], t["sec"], strict=False):
+            row[cols[p]] = clock(sec)
+        rows.append(row)
+    return pd.DataFrame(rows, columns=list(cols.values()))
+
+
+def timetable_card(title: str, key: str, build, note: str = "") -> None:
+    """A folded section with the plain timetable (build(day) -> DataFrame), the days to show
+    chosen inside it; `note` says how to read it."""
+    with card(), st.expander(title):
+        day = timetable_day_picker(key)
+        when, _ = timetable_services()[day]
+        tt = build(day)
+        if tt.empty:
+            st.caption(f"No buses scheduled here on {TIMETABLE_DAYS[day]}.")
+            return
+        table(tt, hide_index=True, width="stretch", height=min(560, 38 + 35 * len(tt)))
+        st.caption(
+            (note + " " if note else "")
+            + f"From LTD's published schedule ({TIMETABLE_DAYS[day].lower()}, as on "
+            f"{fmt_date(when)}); holidays and detours can change it."
+        )

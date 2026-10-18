@@ -9,10 +9,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from common import (
-    BRAND,
-    LINE_COLOURS,
     LINE_MAIN,
-    LOCAL_TZ,
     MARKER_MAIN,
     arrow_safe,
     card,
@@ -45,9 +42,12 @@ polled every 30 seconds since {fmt_date(start) if start else "—"}. LTD is the 
 this project is independent and not affiliated with LTD.
 
 **Lateness.** For every bus at every stop: the time it actually arrived minus the time the printed timetable gives for
-that stop. Positive is late, negative is early. Every stop counts, not only the timepoints the schedule guarantees,
-because riders wait at every stop; between timepoints the timetable's times are LTD's own estimates, spread between
-the timepoints' times.
+that stop. Positive is late, negative is early. Every stop counts, not only the timepoints, because riders wait at
+every stop.
+
+**Timepoints.** On each route, a few main stops have an exact time in LTD's timetable (the times printed in its
+schedules); a bus that gets to one early waits there until its time. Every other stop's time is LTD's own estimate
+between them.
 
 **Typical bus.** The median lateness: half the buses were later than this, half earlier.
 
@@ -273,11 +273,12 @@ with card():
 with card():
     st.subheader("Two ways of timing arrivals, compared")
     st.caption(
-        "Every arrival time on this site is worked out from the bus's GPS reports: when its "
-        "position along the route passes the stop. LTD's feed also keeps a time for stops a bus "
-        "has passed, but LTD only records actual times at timepoints (the stops its timetable "
-        "is built around); between them its time is its last prediction, not an observation. "
-        "So the two are compared at timepoints, where both are real measurements."
+        "Most arrival times on this site come from the bus's GPS reports: the moment its "
+        "position along the route passes the stop. LTD's feed keeps its own time for each stop "
+        "a bus has passed, but that is a real measurement only at timepoints (the few main stops "
+        "on each route with an exact time in the timetable, explained above). At every other "
+        "stop LTD's time is just its last estimate. So the two are compared at timepoints, "
+        "where both really measured the bus."
     )
     if not marts_ready():
         st.caption("Appears once the analysis has run.")
@@ -307,9 +308,9 @@ with card():
                 "LTD's time between timepoints",
                 f"{abs(float(agree['med_all'])):.0f} s earlier",
                 help="Typically, at the stops between timepoints, where LTD's time is a "
-                "prediction rather than a measurement. The gap is LTD's: our times at those "
-                "stops line up with the timepoints either side, where the two agree, so no "
-                "correction is made for it.",
+                "estimate rather than a measurement. Our GPS times at those stops line up with "
+                "our GPS times at the timepoints either side, so the gap is in LTD's estimates "
+                "and no correction is made for it.",
             )
             # how far apart the two are, timepoints against the other stops (last 30 days)
             diffs = q(
@@ -354,91 +355,6 @@ with card():
                     height=340,
                 )
                 show_chart(fig)
-
-GAP_DAYS = 14
-
-# ---- gaps in the live data ---------------------------------------------------------------------
-with card():
-    st.subheader(
-        f"Minutes without live data, last {GAP_DAYS} days",
-        help="LTD's feed is read every 30 seconds, day and night. Not collected: minutes when "
-        "this site's collector got nothing (a server restart, or LTD's servers not answering). "
-        "LTD's feed empty: minutes while buses were scheduled when LTD's feed answered but had "
-        "no buses in it. Arrivals in those minutes can't be timed, so they're left out.",
-    )
-    # Minutes without live data, per day: a steady feed is two messages a minute, so a flat
-    # message count says nothing; what matters is when there was none, and whose doing that was.
-    TODAY = f"(now() at time zone '{LOCAL_TZ}')::date"  # Eugene's date, not the server's
-    gaps = q(
-        f"""
-        with days as (
-            select d::date as day
-            from generate_series({TODAY} - {GAP_DAYS}, {TODAY} - 1, interval '1 day') d
-        ),
-        got as (
-            select (fetched_at at time zone '{LOCAL_TZ}')::date as day, count(*) as n
-            from rt.fetch
-            where feed = 'vehicle_positions'
-              and fetched_at >= ({TODAY} - {GAP_DAYS})::timestamp at time zone '{LOCAL_TZ}'
-              and fetched_at < {TODAY}::timestamp at time zone '{LOCAL_TZ}'
-            group by 1
-        ),
-        service as (
-            select service_date as day, min(scheduled_arrival) as s0, max(scheduled_arrival) as s1
-            from marts.fct_stop_events
-            where service_date >= {TODAY} - {GAP_DAYS} and service_date < {TODAY}
-            group by 1
-        ),
-        empty as (
-            select s.day, count(*) as n
-            from service s
-            join rt.fetch f on f.feed = 'vehicle_positions' and f.entity_count = 0
-             and f.fetched_at between s.s0 and s.s1
-            group by 1
-        )
-        select d.day,
-               -- two a minute through the day (a clock-change day is 23 or 25 hours long)
-               greatest(0, extract(epoch from ((d.day + 1)::timestamp at time zone '{LOCAL_TZ}')
-                                   - (d.day::timestamp at time zone '{LOCAL_TZ}')) / 30
-                           - coalesce(g.n, 0)) / 2.0 as missed_min,
-               coalesce(e.n, 0) / 2.0 as empty_min
-        from days d left join got g using (day) left join empty e using (day)
-        -- whole days since collection began
-        where d.day > (select min(fetched_at at time zone '{LOCAL_TZ}')::date from rt.fetch)
-        order by 1
-        """
-    )
-    if gaps.empty or (gaps["missed_min"].sum() + gaps["empty_min"].sum()) < 1:
-        st.caption(f"None in the last {GAP_DAYS} days.")
-    else:
-        fig_g = go.Figure()
-        for col, name, colour in (
-            ("missed_min", "Not collected", BRAND),
-            ("empty_min", "LTD's feed empty", LINE_COLOURS[0]),
-        ):
-            fig_g.add_trace(
-                go.Bar(
-                    x=pd.to_datetime(gaps["day"]),
-                    y=gaps[col],
-                    name=name,
-                    marker_color=colour,
-                    hovertemplate=name + ", %{x|%a %b %-d}: %{y:.0f} min<extra></extra>",
-                )
-            )
-        fig_g.update_layout(
-            barmode="stack",
-            yaxis={"title": "Minutes", "rangemode": "tozero"},
-            xaxis={"title": "", "tickformat": "%a %b %-d", "dtick": 86400000},
-            legend={
-                "orientation": "h",
-                "yanchor": "bottom",
-                "y": 1.02,
-                "x": 0,
-                "traceorder": "normal",
-            },
-            height=300,
-        )
-        show_chart(fig_g)
 
 # ---- questions and answers (the same as the plain page /reports/faq/, for search engines) ----
 with card():

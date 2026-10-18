@@ -60,8 +60,9 @@ def questions(stats: dict | None = None) -> list[tuple[str, str]]:
             "For every bus at every stop: the time it actually got there minus the time the "
             "printed timetable gives for that stop. LTD's live bus positions don't say when a bus "
             "is at a stop, so the time is worked out from where the bus's GPS places it along "
-            "its route; at timepoints and at a trip's first stop, where buses wait for their "
-            "time, LTD's own recorded departure is used. Every stop counts, not only the "
+            "its route. At timepoints (the few main stops on each route with an exact time in "
+            "LTD's printed timetable, where an early bus waits for its time) and at a trip's "
+            "first stop, LTD's own recorded departure is used. Every stop counts, not only the "
             "timepoints, because riders wait at every stop.",
         ),
         (
