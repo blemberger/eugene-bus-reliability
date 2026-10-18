@@ -7,6 +7,7 @@ numbers (the last 30 days)."""
 from __future__ import annotations
 
 GITHUB = "https://github.com/blemberger/eugene-bus-reliability"
+CONTACT_EMAIL = "contact@benlemberger.com"
 
 
 def _minutes(seconds: float) -> str:
@@ -128,7 +129,7 @@ def questions(stats: dict | None = None) -> list[tuple[str, str]]:
         (
             "Who makes Eugene Bus Watch?",
             "It is an independent project, not affiliated with Lane Transit District. The source "
-            f"code is public: {GITHUB}",
+            f"code is public: {GITHUB}. Questions, corrections or ideas: {CONTACT_EMAIL}",
         ),
     ]
     return qa

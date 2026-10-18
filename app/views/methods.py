@@ -14,6 +14,7 @@ from common import (
     LINE_MAIN,
     LOCAL_TZ,
     MARKER_MAIN,
+    arrow_safe,
     card,
     col_count,
     col_date,
@@ -26,7 +27,6 @@ from common import (
     q,
     require_db,
     show_chart,
-    table,
 )
 
 from eugene_bus_reliability.faq import questions
@@ -46,8 +46,8 @@ this project is independent and not affiliated with LTD.
 
 **Lateness.** For every bus at every stop: the time it actually arrived minus the time the printed timetable gives for
 that stop. Positive is late, negative is early. Every stop counts, not only the timepoints the schedule guarantees,
-because riders wait at every stop; between timepoints the timetable's times are interpolated by LTD, and our check
-shows lateness grows smoothly between them (a typical extra 2 seconds), so the minor stops don't distort the picture.
+because riders wait at every stop; between timepoints the timetable's times are LTD's own estimates, spread between
+the timepoints' times.
 
 **Typical bus.** The median lateness: half the buses were later than this, half earlier.
 
@@ -184,22 +184,26 @@ with card():
                 "have nothing to measure, so they aren't counted anywhere else on the site. A "
                 "gap in our own collection would show here too: see Feed gaps in the table."
             )
-            table(
-                pd.DataFrame(
-                    {
-                        "Date": pd.to_datetime(cov["service_date"]).dt.date,
-                        "Buses seen": cov["vehicles_reporting"],
-                        "Trips scheduled": cov["trips_scheduled"],
-                        "Trips in live feed": cov["trips_seen"],
-                        "Mid-trip stops due": cov["mid_stops_due"],
-                        "Timed": cov["mid_stops_timed"],
-                        "Stop events scheduled": cov["stop_events_scheduled"],
-                        "Observed": cov["stop_events_observed"],
-                        "Implausible": cov["stop_events_implausible"],
-                        "Doubtful stop": cov["stop_events_doubtful"],
-                        "Imprecise": cov["stop_events_imprecise"],
-                        "Feed gaps": pd.to_numeric(cov["gap_minutes"]).fillna(0).astype(float),
-                    }
+            # every day's counts, for anyone checking: folded away by default
+            day_by_day = st.expander("Day by day, in numbers")
+            day_by_day.dataframe(
+                arrow_safe(
+                    pd.DataFrame(
+                        {
+                            "Date": pd.to_datetime(cov["service_date"]).dt.date,
+                            "Buses seen": cov["vehicles_reporting"],
+                            "Trips scheduled": cov["trips_scheduled"],
+                            "Trips in live feed": cov["trips_seen"],
+                            "Mid-trip stops due": cov["mid_stops_due"],
+                            "Timed": cov["mid_stops_timed"],
+                            "Stop events scheduled": cov["stop_events_scheduled"],
+                            "Observed": cov["stop_events_observed"],
+                            "Implausible": cov["stop_events_implausible"],
+                            "Doubtful stop": cov["stop_events_doubtful"],
+                            "Imprecise": cov["stop_events_imprecise"],
+                            "Feed gaps": pd.to_numeric(cov["gap_minutes"]).fillna(0).astype(float),
+                        }
+                    )
                 ),
                 hide_index=True,
                 width="stretch",
@@ -263,7 +267,7 @@ with card():
                     ),
                 },
             )
-            st.caption("Hover a column heading for what it counts.")
+            day_by_day.caption("Hover a column heading for what it counts.")
 
 # ---- cross-check ------------------------------------------------------------------------------
 with card():
@@ -350,83 +354,17 @@ with card():
                     height=340,
                 )
                 show_chart(fig)
-            per_route = q(
-                """
-                select route_short_name as route, sum(n_both_timepoints) as n,
-                       sum(n_within_2min_timepoints)::float8 / nullif(sum(n_both_timepoints), 0)
-                           as share
-                from marts.mart_method_agreement
-                group by 1 having sum(n_both_timepoints) >= 50
-                order by share
-                """
-            )
-            if not per_route.empty:
-                st.markdown("##### Agreement at timepoints, route by route")
-                fig_r = go.Figure(
-                    go.Bar(
-                        y=per_route["route"].astype(str),
-                        x=per_route["share"],
-                        orientation="h",
-                        marker={"color": "#1f5f9e"},
-                        customdata=per_route["n"],
-                        hovertemplate="Route %{y}: %{x:.0%} within 2 min, of %{customdata:,} "
-                        "comparisons<extra></extra>",
-                    )
-                )
-                fig_r.update_layout(
-                    xaxis={
-                        "title": "Within 2 minutes of LTD's time",
-                        "tickformat": ".0%",
-                        "range": [0, 1],
-                    },
-                    yaxis={"type": "category", "title": ""},
-                    height=max(260, 22 * len(per_route) + 80),
-                    showlegend=False,
-                )
-                show_chart(fig_r)
-                st.caption(
-                    "Routes near the top are where our GPS method has the most trouble, usually "
-                    "long rural routes where the bus covers a lot of road between reports."
-                )
 
 GAP_DAYS = 14
 
-# ---- right now --------------------------------------------------------------------------------
+# ---- gaps in the live data ---------------------------------------------------------------------
 with card():
-    st.subheader("Live data, right now")
-    qual = q("""
-        select
-          (select count(distinct p.trip_id) from rt.prediction_current p
-            where p.start_date >= current_date - 1
-              and not exists (select 1 from gtfs.trips t where t.trip_id = p.trip_id)) as unmatched_trips,
-          (select count(*) from (
-              select distinct on (vehicle_id) vehicle_id, position_timestamp, fetch_id
-              from rt.vehicle_position where position_timestamp > now() - interval '1 hour'
-              order by vehicle_id, position_timestamp desc) v
-            join rt.fetch f on f.fetch_id = v.fetch_id
-            where f.fetched_at > now() - interval '10 minutes'
-              and v.position_timestamp < f.header_timestamp - interval '3 minutes') as stale_gps,
-          (select count(*) from rt.fetch where fetched_at > now() - interval '24 hours') as fetches_24h
-    """)
-    r = qual.iloc[0]
-    c1, c2, c3 = st.columns(3)
-    c1.metric(
-        "Live trips not in the timetable",
-        int(r["unmatched_trips"]),
-        help="Trips in LTD's live feed (today and yesterday) that aren't in its published "
-        "timetable: usually a few added or replacement trips. Dozens would mean the timetable "
-        "is out of date.",
-    )
-    c2.metric(
-        "Buses with stale GPS now",
-        int(r["stale_gps"]),
-        help="Reporting a position more than 3 minutes older than the feed itself.",
-    )
-    c3.metric(
-        "Messages received, last 24 h",
-        f"{int(r['fetches_24h']):,}",
-        help="About 6,000 when everything runs: bus positions and predictions twice a minute "
-        "each, plus alerts every 5 minutes.",
+    st.subheader(
+        f"Minutes without live data, last {GAP_DAYS} days",
+        help="LTD's feed is read every 30 seconds, day and night. Not collected: minutes when "
+        "this site's collector got nothing (a server restart, or LTD's servers not answering). "
+        "LTD's feed empty: minutes while buses were scheduled when LTD's feed answered but had "
+        "no buses in it. Arrivals in those minutes can't be timed, so they're left out.",
     )
     # Minutes without live data, per day: a steady feed is two messages a minute, so a flat
     # message count says nothing; what matters is when there was none, and whose doing that was.
@@ -469,13 +407,6 @@ with card():
         where d.day > (select min(fetched_at at time zone '{LOCAL_TZ}')::date from rt.fetch)
         order by 1
         """
-    )
-    st.markdown(
-        f"##### Minutes without live data, last {GAP_DAYS} days",
-        help="LTD's feed is read every 30 seconds, day and night. Not collected: minutes when "
-        "this site's collector got nothing (a server restart, or LTD's servers not answering). "
-        "LTD's feed empty: minutes while buses were scheduled when LTD's feed answered but had "
-        "no buses in it. Arrivals in those minutes can't be timed, so they're left out.",
     )
     if gaps.empty or (gaps["missed_min"].sum() + gaps["empty_min"].sum()) < 1:
         st.caption(f"None in the last {GAP_DAYS} days.")

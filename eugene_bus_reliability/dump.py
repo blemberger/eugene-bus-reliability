@@ -824,6 +824,75 @@ def main(settings: Settings, raw: bool = False) -> None:
             where not is_timepoint and up > 0 and down > 0
         """,
         )
+        print(
+            "The same, by how the timepoints either side were timed (ltd_departure = LTD's own\n"
+            "recorded departure, gps = ours). If the bump is near 0 between GPS-timed timepoints and\n"
+            "large between LTD-timed ones, the two ways of timing catch different moments (the bus\n"
+            "passing or pulling away, against LTD's departure), not the bus running late."
+        )
+        show(
+            cur,
+            """
+            with e as (
+                select service_date, trip_id, stop_sequence, is_timepoint, delay_s, time_source
+                from marts.fct_stop_events
+                where service_date >= current_date - 3 and status is not null
+            ),
+            g as (
+                select *,
+                       count(*) filter (where is_timepoint) over (
+                           partition by service_date, trip_id order by stop_sequence) as up,
+                       count(*) filter (where is_timepoint) over (
+                           partition by service_date, trip_id order by stop_sequence desc) as down
+                from e
+            ),
+            a as (
+                select *,
+                       first_value(delay_s) over w_up as prev_tp,
+                       first_value(time_source) over w_up as prev_src,
+                       first_value(delay_s) over w_down as next_tp,
+                       first_value(time_source) over w_down as next_src
+                from g
+                window w_up as (partition by service_date, trip_id, up order by stop_sequence),
+                       w_down as (partition by service_date, trip_id, down order by stop_sequence desc)
+            )
+            select prev_src, next_src, count(*) minor_stops,
+                   round(percentile_cont(0.5) within group (order by delay_s - (prev_tp + next_tp) / 2.0)) median_bump_s,
+                   round(percentile_cont(0.25) within group (order by delay_s - (prev_tp + next_tp) / 2.0)) p25_s,
+                   round(percentile_cont(0.75) within group (order by delay_s - (prev_tp + next_tp) / 2.0)) p75_s
+            from a
+            where not is_timepoint and up > 0 and down > 0
+            group by 1, 2 order by 3 desc
+        """,
+        )
+
+        section(
+            "PREDICTIONS AGAINST HOW THE ARRIVAL WAS TIMED (5 minutes away, last 30 days): is the "
+            "bus later than predicted, or do we time a later moment?"
+        )
+        print(
+            "LTD predicts when the bus arrives. At timepoints we use LTD's recorded departure; at\n"
+            "other stops our GPS time, when the bus passes or pulls away. If 'later than predicted'\n"
+            "is much bigger at other stops than at timepoints, part of it is the moment we time\n"
+            "(the stop's dwell), not the bus. signed = median of (our time − predicted), seconds."
+        )
+        show(
+            cur,
+            """
+            select e.is_timepoint, e.time_source, count(*) as n,
+                   round(percentile_cont(0.5) within group (order by c.error_s)) as signed_median_s,
+                   round(percentile_cont(0.1) within group (order by c.error_s)) as p10_s,
+                   round(percentile_cont(0.9) within group (order by c.error_s)) as p90_s,
+                   round(100.0 * avg((c.error_s > 0)::int)) as pct_bus_later
+            from marts.fct_countdown_samples c
+            join marts.fct_stop_events e
+              on e.service_date = c.service_date and e.trip_id = c.trip_id
+             and e.stop_sequence = c.stop_sequence
+            where c.in_comparison and c.ahead_min = 5
+              and c.service_date >= (now() at time zone 'America/Los_Angeles')::date - 29
+            group by 1, 2 order by 1, 2
+        """,
+        )
 
         section("METHOD AGREEMENT (feed settled − geometric): timepoints are the fair test")
         show(

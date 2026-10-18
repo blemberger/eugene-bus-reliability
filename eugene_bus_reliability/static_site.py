@@ -24,7 +24,7 @@ from zoneinfo import ZoneInfo
 import psycopg
 from psycopg.rows import dict_row
 
-from eugene_bus_reliability.faq import questions
+from eugene_bus_reliability.faq import CONTACT_EMAIL, questions
 from eugene_bus_reliability.names import clean_stop_name
 from eugene_bus_reliability.signed import SIGNED_THRESHOLDS, signed_col, signed_percentile
 from eugene_bus_reliability.stop_order import route_stop_order
@@ -256,7 +256,8 @@ def page(
 Transit District's buses actually reach each stop, from LTD's public schedule and live bus
 positions; independent, not affiliated with LTD. <a href="/methods">How it's measured</a> ·
 <a href="/reports/faq/">Questions and answers</a> ·
-<a href="/reports/">Every route and stop</a> · <a href="/">The interactive site</a></p></footer>
+<a href="/reports/">Every route and stop</a> · <a href="/">The interactive site</a> ·
+Contact: <a href="mailto:{CONTACT_EMAIL}">{CONTACT_EMAIL}</a></p></footer>
 </body></html>
 """
 

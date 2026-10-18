@@ -42,7 +42,7 @@ from common import (
     table,
 )
 
-from eugene_bus_reliability.signed import SIGNED_COUNT_SUMS, signed_percentile
+from eugene_bus_reliability.signed import SIGNED_THRESHOLDS, signed_col, signed_percentile
 
 require_db()
 title_slot = st.empty()  # names the route and/or stop chosen just below it
@@ -212,6 +212,14 @@ with card():
 
 
 # ---- tables: each route, each stop -------------------------------------------------------
+# the signed running counts only where the tables use them (5 minutes away and the timetable):
+# adding up the others too made the stops table's query twice as slow
+SIGNED_5 = ", ".join(
+    f"sum({signed_col(t)}) filter (where basis = 'timetable' or ahead_min = 5) as {signed_col(t)}"
+    for t in SIGNED_THRESHOLDS
+)
+
+
 def off_by(key: str, where: str, params: tuple, daily: bool) -> pd.DataFrame:
     """Average minutes off per `key` (route_id or stop_id) at 5, 10 and 15 minutes away and for
     the timetable, for the page's period and days."""
@@ -222,7 +230,7 @@ def off_by(key: str, where: str, params: tuple, daily: bool) -> pd.DataFrame:
             f"""
             select {key} as id, basis, ahead_min, sum(n) as n,
                    sum(sum_abs_s)::float8 / nullif(sum(n), 0) as mean_abs_s,
-                   {SIGNED_COUNT_SUMS}
+                   {SIGNED_5}
             from marts.{table_name}
             where service_date >= %s {clause} {where}
               and {key} is not null and (basis = 'timetable' or ahead_min in (5, 10, 15))

@@ -1,8 +1,14 @@
 # Run `make` on its own for the list of commands. `make setup` first; laptop commands
-# (load-static, poll-once, report, app, test, lint, format, dbt-*) need the venv:
-# source .venv/bin/activate. Commands marked "from the laptop" reach the server over ssh.
+# (load-static, poll-once, report, app, test, lint, format, dbt-*) use the venv it makes, with
+# no need to activate it. Commands marked "from the laptop" reach the server over ssh.
 -include .env
 export
+
+# the project's venv, where there is one (the laptop), comes first, so `make test` and the like
+# find ruff, pytest and dbt whether or not it is activated
+ifneq ($(wildcard .venv/bin),)
+export PATH := $(CURDIR)/.venv/bin:$(PATH)
+endif
 
 .DEFAULT_GOAL := help
 
@@ -127,14 +133,16 @@ server-drop-before: ## on the server: DELETE everything collected before BEFORE=
 	docker compose exec -T db psql -U $(POSTGRES_USER) -d $(POSTGRES_DB) -v before=$(BEFORE) -f - < sql/maintenance/drop_before.sql
 	@echo; echo "waiting for the analysis to be rebuilt without those days..."; $(MAKE) -s server-wait-ready
 
-server-visitors:  ## on the server: the site's visitors (per day, pages, stops looked up) and where they came from
-	@docker compose exec -T db psql -U $(POSTGRES_USER) -d $(POSTGRES_DB) -q -P pager=off -f - < sql/reports/visitors.sql
-	@echo; docker compose --profile web exec -T caddy sh -c 'for f in /data/access*.log*; do [ -e "$$f" ] || continue; case "$$f" in *.gz) gunzip -c "$$f";; *) cat "$$f";; esac; done' \
-	  | docker compose exec -T poller python -m eugene_bus_reliability referrers
+server-visitors:  ## on the server: the visitor report, laid out like WordPress stats (text here; the page with the charts in visitors.html)
+	@docker compose --profile web exec -T caddy sh -c 'for f in /data/access*.log*; do [ -e "$$f" ] || continue; case "$$f" in *.gz) gunzip -c "$$f";; *) cat "$$f";; esac; done' \
+	  | docker compose exec -T poller python -m eugene_bus_reliability visitors --log --html /tmp/visitors.html
+	@docker compose cp poller:/tmp/visitors.html visitors.html >/dev/null
 
-visitors:         ## from the laptop: the server's visitor report (needs VPS_HOST in .env)
+visitors:         ## from the laptop: the visitor report, laid out like WordPress stats; its charts in visitors.html here (needs VPS_HOST in .env)
 	@test -n "$(VPS_HOST)" || { echo "add VPS_HOST=root@<server ip> to .env first"; exit 1; }
 	@ssh $(VPS_HOST) 'cd $(VPS_DIR) && make -s server-visitors'
+	@scp -q $(VPS_HOST):$(VPS_DIR)/visitors.html visitors.html
+	@echo; echo "charts: visitors.html here (on Windows: explorer.exe visitors.html)"
 
 deploy:           ## from the laptop: bring the server up to date with GitHub, apply migrations, restart what changed, delete replaced images and old build cache, then wait until the analysis is rebuilt (needs VPS_HOST in .env)
 	@test -n "$(VPS_HOST)" || { echo "add VPS_HOST=root@<server ip> to .env first"; exit 1; }

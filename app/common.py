@@ -71,6 +71,7 @@ def require_db() -> None:
 
 
 # stop names as people read them (shared with the plain report pages)
+from eugene_bus_reliability.faq import CONTACT_EMAIL  # noqa: E402
 from eugene_bus_reliability.names import (  # noqa: E402
     STOP_NAME_COLUMNS,
     clean_stop_name,
@@ -824,14 +825,20 @@ def not_counted() -> bool:
 
 def log_page_view(page: str, load_ms: int | None = None) -> None:
     """Count a page view in site.page_view: the time, the page (with the stop or route
-    chosen on it), phone or computer, and a random id for this browser tab's session, so
-    visits can be counted. No IP address, cookie or anything identifying is stored. Logged
-    once per page and choice, not on every rerun; never interrupts the page. Not at all for a
-    browser that asked not to be counted (not_counted())."""
+    chosen on it), phone or computer, a random id for this browser tab's session (visits), and
+    a visitor code that stays the same for this browser all day (visitors per day, as WordPress
+    stats count them): the browser's internet address and type mixed with a random value that
+    changes daily (site.visitor_salt) and is deleted the next day. The address itself is never
+    stored. Logged once per page and choice, not on every rerun; never interrupts the page. Not
+    at all for a browser that asked not to be counted (not_counted())."""
     if not_counted():
         return
     try:
-        ua = st.context.headers.get("User-Agent", "") or ""
+        headers = st.context.headers
+        ua = headers.get("User-Agent", "") or ""
+        # Caddy, in front of the app, passes on the browser's address
+        ip = (headers.get("X-Forwarded-For", "") or "").split(",")[0].strip()
+        ip = ip or str(getattr(st.context, "ip_address", "") or "")
     except Exception:  # noqa: BLE001 — no browser (tests, scripts)
         return
     if not ua or not DATABASE_URL:
@@ -846,16 +853,26 @@ def log_page_view(page: str, load_ms: int | None = None) -> None:
         if BOT_AGENTS.search(ua)
         else ("phone" if "Mobi" in ua or "Android" in ua else "computer")
     )
+    today = f"(now() at time zone '{LOCAL_TZ}')::date"
 
     def insert() -> None:
         try:
             with psycopg.connect(DATABASE_URL, connect_timeout=3) as conn:
-                # the site's login is read-only by default; this table takes inserts
+                # the site's login is read-only by default; these tables take writes
                 conn.read_only = False
+                conn.execute(f"delete from site.visitor_salt where day < {today}")
                 conn.execute(
-                    "insert into site.page_view (session_id, page, detail, device, load_ms) "
-                    "values (%s, %s, %s, %s, %s)",
-                    (session_id, page, detail, device, load_ms),
+                    f"""
+                    with salt as (
+                        insert into site.visitor_salt (day) values ({today})
+                        on conflict (day) do update set day = excluded.day
+                        returning salt
+                    )
+                    insert into site.page_view
+                        (session_id, page, detail, device, load_ms, visitor)
+                    select %s, %s, %s, %s, %s, left(md5(salt.salt || %s), 16) from salt
+                    """,
+                    (session_id, page, detail, device, load_ms, f"{ip}|{ua}"),
                 )
         except Exception:  # noqa: BLE001 — a missing table or a busy database is ignored
             pass
@@ -1768,12 +1785,11 @@ PREDICTION_OFF_NOTE = (
     "How much later or earlier than LTD's real-time prediction (what apps like Transit show) "
     "the bus came, by how many minutes away the prediction said the bus was: the line is the "
     "typical bus, the shading where 8 buses in 10 came, and the dashed line is when it was "
-    "predicted. In grey behind, the printed timetable for the same bus arrivals: its typical "
-    "bus and its 8 in 10 (flat, because the timetable doesn't change as the bus gets nearer). "
-    "The narrower the blue shading against the grey, the more the prediction helps. Minutes "
-    "away is what the prediction said at the time, not when the bus actually came. Measured on "
-    "bus arrivals that had a prediction 15 minutes out, each counted once at each distance; "
-    "points with fewer than 20 are left out."
+    "predicted. The thin grey line is the printed timetable's typical bus for the same bus "
+    "arrivals (flat, because the timetable doesn't change as the bus gets nearer); hover for "
+    "its 8 in 10. Minutes away is what the prediction said at the time, not when the bus "
+    "actually came. Measured on bus arrivals that had a prediction 15 minutes out, each counted "
+    "once at each distance; points with fewer than 20 are left out."
 )
 
 # the key for "every route together" in prediction_off() and countdown_off_chart()
@@ -1916,11 +1932,10 @@ def countdown_off_chart(
     """How much later or earlier than predicted the bus came, against how many minutes away the
     prediction said it was, drawn as the lateness charts are: the typical bus (the line with
     dots), the band 8 in 10 buses fell in, and the dashed on-time line, here meaning "when it
-    was predicted". Behind them in grey, the printed timetable for the same arrivals: its typical
-    bus and its 8 in 10 (flat, because the timetable doesn't change as the bus gets nearer), so
-    a blue band narrower than the grey one is the prediction doing better. One choice at a time
-    (`selected`'s first key: ALL_ROUTES or a route id). None when it has fewer than two
-    points."""
+    was predicted". A thin grey line: the printed timetable's typical bus for the same arrivals
+    (flat, because the timetable doesn't change as the bus gets nearer); its 8 in 10 is in the
+    hover text. One choice at a time (`selected`'s first key: ALL_ROUTES or a route id). None
+    when it has fewer than two points."""
     if df.empty or not selected:
         return None
     key = selected[0]
@@ -1961,20 +1976,7 @@ def countdown_off_chart(
 
     fig = go.Figure()
     if has_tt:
-        # the timetable, behind: a pale grey band across the chart with its typical bus
-        fig.add_trace(
-            go.Scatter(
-                x=[0.5, 15.5, 15.5, 0.5],
-                y=[t_hi, t_hi, t_lo, t_lo],
-                fill="toself",
-                fillcolor="rgba(75, 85, 99, 0.10)",
-                mode="lines",
-                line={"width": 1, "color": REF_GREY, "dash": "dot"},
-                hoverinfo="skip",
-                legendgroup="timetable",
-                showlegend=False,
-            )
-        )
+        # the timetable's typical bus for the same arrivals: a thin grey line across the chart
         fig.add_trace(
             go.Scatter(
                 x=[0.5, 15.5],
@@ -2017,7 +2019,12 @@ def countdown_off_chart(
                 + ("as predicted" if round(abs(v) * 60) < 6 else f"{words(v)} than predicted")
                 + f"<br>8 in 10 buses: {fmt_range(lo * 60, hi * 60)} against the prediction"
                 + f"<br>{float(r['mean_abs_s']) / 60:.1f} min off on average"
-                + (f"<br>printed timetable: typical bus {fmt_delay(t_med * 60)}" if has_tt else "")
+                + (
+                    f"<br>printed timetable: typical bus {fmt_delay(t_med * 60)}, 8 in 10 "
+                    f"{fmt_range(t_lo * 60, t_hi * 60)}"
+                    if has_tt
+                    else ""
+                )
                 + f"<br>{int(r['n']):,} bus arrivals"
                 for m, v, lo, hi, r in zip(x, med, lows, highs, recs, strict=False)
             ],
@@ -2032,7 +2039,7 @@ def countdown_off_chart(
             "tickvals": [1, 5, 10, 15],
             "zeroline": False,
         },
-        yaxis=minutes_axis(lows + highs + ([t_lo, t_hi] if has_tt else []), pad=0.3),
+        yaxis=minutes_axis(lows + highs + ([t_med] if has_tt else []), pad=0.3),
         legend={
             "orientation": "h",
             "yanchor": "bottom",
@@ -3578,7 +3585,8 @@ def data_note(start: date | None = None) -> None:
         line + " [How it's measured](/methods) · "
         # plain pages with the headline numbers (static_site.py): quick to load and to share
         "[Every route and stop on one page](/reports/) · "
-        "[Source code on GitHub](https://github.com/blemberger/eugene-bus-reliability)"
+        "[Source code on GitHub](https://github.com/blemberger/eugene-bus-reliability) · "
+        f"Contact: [{CONTACT_EMAIL}](mailto:{CONTACT_EMAIL})"
     )
 
 

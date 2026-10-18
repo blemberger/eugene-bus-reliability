@@ -90,13 +90,18 @@ the laptop does the same wait at any time. Ctrl+C stops only the waiting, never 
 - **Laptop:** `make fetch-dump` builds a full diagnostic snapshot on the server (collection
   health, outages, the analysis, every page rendered, memory, disk, log errors) and
   copies it to `dump.txt`.
-- **Laptop:** `make visitors` reports the site's visitors: visits and page views per day,
-  share on phones, the pages and stops people looked at, and the other sites that sent
-  them (from Caddy's access log). The site records only the time, the page, phone or
-  computer, and a random id per browser tab; no IP addresses or cookies. The report ends
-  with an "AT A GLANCE" summary to quote. To leave your own browsing out of the counts, open
-  the site once with `?dont_count_me` at the end of the address on each browser and phone
-  you use; that browser then keeps a cookie saying so (the only cookie the site sets).
+- **Laptop:** `make visitors` reports the site's visitors, laid out like WordPress (Jetpack)
+  stats so the two compare: views and visitors per day, week and month as bar charts, the
+  totals, the pages people looked at, the other sites that sent them, phones against
+  computers, and the busiest day and hour. It prints the text version and copies the page
+  with the charts to `visitors.html` (open it from WSL with `explorer.exe visitors.html`).
+  A view is a page opened; a visitor is one browser on one day, as WordPress counts them.
+  The site stores the time, the page, phone or computer, a random id per browser tab, and a
+  visitor code: the browser's internet address and type mixed with a random value that
+  changes every day and is deleted the next day, so the code can't be traced back to the
+  address, which is never stored. No cookies. To leave your own browsing out of the counts,
+  open the site once with `?dont_count_me` at the end of the address on each browser and
+  phone you use; that browser then keeps a cookie saying so (the only cookie the site sets).
 - **Site:** the Status page shows what came in during the last few minutes and when the
   analysis last ran.
 - **Server:** `make server-db-busy` lists anything the database has been running for more

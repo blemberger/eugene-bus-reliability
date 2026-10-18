@@ -21,9 +21,13 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--cycles", type=int, help="stop after N cycles (default: run forever)")
 
     sub.add_parser("report", help="print what has been collected so far")
-    sub.add_parser(
-        "referrers", help="summarize the web server's access log (on stdin): visits, sources"
+    p = sub.add_parser(
+        "visitors",
+        help="the visitor report, laid out like WordPress stats (with the web server's access "
+        "log on stdin when --log is given)",
     )
+    p.add_argument("--html", help="also write the page with the charts to this file")
+    p.add_argument("--log", action="store_true", help="read the access log on stdin")
 
     p = sub.add_parser(
         "dump", help="diagnostic snapshot: collection health, feed shape, analysis layer"
@@ -80,10 +84,10 @@ def main(argv: list[str] | None = None) -> None:
 
         Poller(settings).run(max_cycles=args.cycles)
 
-    elif args.cmd == "referrers":
-        from eugene_bus_reliability import referrers
+    elif args.cmd == "visitors":
+        from eugene_bus_reliability import visitors
 
-        referrers.main()
+        visitors.main(settings.database_url, args.html, args.log)
 
     elif args.cmd == "report":
         from eugene_bus_reliability import report
