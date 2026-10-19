@@ -11,6 +11,8 @@ from pathlib import Path
 
 import streamlit as st
 
+from eugene_bus_reliability import analytics
+
 # the background cache warmer (common.warm_caches) runs cached queries outside a page, which
 # Streamlit would otherwise warn about on every call
 logging.getLogger("streamlit.runtime.scriptrunner_utils.script_run_context").setLevel(logging.ERROR)
@@ -208,6 +210,9 @@ if page.url_path in ("", None):
     except Exception:  # noqa: BLE001 — no browser (tests, scripts)
         home = None
 st.logo(str(Path(__file__).parent / "static" / "wordmark.svg"), size="large", link=home)
+# Google Analytics, when the server's .env names the site's id (eugene_bus_reliability/analytics.py)
+if analytics.loader_js():
+    st.html(f"<script>{analytics.loader_js()}</script>", unsafe_allow_javascript=True)
 if os.environ.get("DATABASE_URL"):
     from common import feed_banner, log_page_view, start_cache_warmer
 

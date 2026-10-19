@@ -16,3 +16,4 @@ logs/
 *.parquet
 dump.txt
 visitors.html
+*:Zone.Identifier

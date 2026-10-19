@@ -24,6 +24,7 @@ from zoneinfo import ZoneInfo
 import psycopg
 from psycopg.rows import dict_row
 
+from eugene_bus_reliability import analytics
 from eugene_bus_reliability.faq import CONTACT_EMAIL, questions
 from eugene_bus_reliability.names import clean_stop_name
 from eugene_bus_reliability.signed import SIGNED_THRESHOLDS, signed_col, signed_percentile
@@ -249,7 +250,7 @@ def page(
 <meta property="og:type" content="website"><meta property="og:site_name" content="Eugene Bus Watch">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;600;700&display=swap">
-<style>{CSS}</style>{head_extra}</head>
+<style>{CSS}</style>{head_extra}{analytics.head_tag()}</head>
 <body><header><a href="/">{LOGO}Eugene Bus Watch</a></header>
 <main>{body}</main>
 <footer><p>Last 30 days, all days, updated {escape(updated)}. Eugene Bus Watch measures when Lane

@@ -71,10 +71,10 @@ the first stretch of the route ahead of the last, so a route that uses a street 
 maximum over time removes GPS jitter, and when that fraction steps past a stop between two reports the crossing time is
 interpolated (±15 s at a 30 s poll while moving). Independently, the feed keeps reporting a departure time for stops
 already passed that no longer changes; that "settled" time is recorded too, and the two are compared in the cross-check
-below. Stops passed before a trip's first report can't be timed and are excluded. What counts is when the bus leaves: at
-a trip's first stop it usually arrives early and waits, and at a timepoint an early bus holds until its time, so at
-both LTD's recorded departure is used (a real measurement there). Everywhere else our GPS time is used, which in practice
-is when the bus goes past or pulls away.
+below. Stops passed before a trip's first report can't be timed and are excluded. What counts is when the bus leaves. At a
+trip's first stop and at timepoints, where an early bus waits, our GPS time can catch the bus still waiting, and LTD's
+own recorded departure is sometimes just the scheduled time, so there the later of the two is used. Everywhere else
+our GPS time is used, which in practice is when the bus goes past or pulls away.
 
 **Headways.** On routes scheduled every 20 minutes or better, the gap between consecutive buses at a stop is compared to
 the scheduled gap. Bunched = under half the scheduled gap; big gap = over 1.5×.

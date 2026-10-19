@@ -95,6 +95,8 @@ services:
       RAW_ARCHIVE_DIR: /data/raw
       # the queries to keep cached, kept across updates (common.WARM_FILE)
       WARM_FILE: /cache/warm_queries.pkl
+      # Google Analytics, when .env names the site's id (eugene_bus_reliability/analytics.py)
+      GA_MEASUREMENT_ID: ${GA_MEASUREMENT_ID:-}
     volumes:
       - ./data/raw:/data/raw:ro
       - app_cache:/cache

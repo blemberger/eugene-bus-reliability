@@ -871,8 +871,9 @@ def main(settings: Settings, raw: bool = False) -> None:
             "bus later than predicted, or do we time a later moment?"
         )
         print(
-            "LTD predicts when the bus arrives. At timepoints we use LTD's recorded departure; at\n"
-            "other stops our GPS time, when the bus passes or pulls away. If 'later than predicted'\n"
+            "LTD predicts when the bus arrives. At timepoints we score the later of LTD's recorded\n"
+            "departure and our GPS time; at other stops our GPS time, when the bus passes or pulls\n"
+            "away. If 'later than predicted'\n"
             "is much bigger at other stops than at timepoints, part of it is the moment we time\n"
             "(the stop's dwell), not the bus. signed = median of (our time − predicted), seconds."
         )
@@ -895,29 +896,34 @@ def main(settings: Settings, raw: bool = False) -> None:
         )
 
         section(
-            "TIMEPOINTS: LTD's recorded departure against our GPS time for the same bus (last 7 days)"
+            "TIMEPOINTS AND FIRST STOPS: LTD's recorded departure against our GPS time for the same "
+            "bus (last 7 days)"
         )
         print(
-            "At timepoints the site uses LTD's recorded departure where it has one (time_source\n"
-            "ltd_departure). ltd_minus_gps = that minus our GPS time for the same bus; the two\n"
-            "lateness columns are the typical lateness each way. If ltd_minus_gps is well below 0,\n"
-            "LTD records the departure earlier than the bus is seen leaving, and the timepoints read\n"
-            "less late than the stops around them (the +48 s bump above)."
+            "Where both times exist, the site scores the later of the two (each can come early: our\n"
+            "GPS can catch a bus still waiting, LTD's record is sometimes just the scheduled time).\n"
+            "ltd_minus_gps = LTD's time minus ours; pct_ltd_scored = how often LTD's was the later;\n"
+            "the lateness columns are the typical lateness by LTD's time, by ours, and as scored.\n"
+            "Scored should sit a little above the later of the two medians, not far above it."
         )
         show(
             cur,
             """
-            select time_source, count(*) as n,
+            select is_first_stop, count(*) as n,
+                   round(100.0 * avg((time_source = 'ltd_departure')::int), 1) as pct_ltd_scored,
                    round(percentile_cont(0.5) within group (order by methods_diff_s)) as ltd_minus_gps_s,
                    round(percentile_cont(0.25) within group (order by methods_diff_s)) as p25_s,
                    round(percentile_cont(0.75) within group (order by methods_diff_s)) as p75_s,
-                   round(percentile_cont(0.5) within group (order by delay_s)) as lateness_used_s,
+                   round(100.0 * avg((extract(epoch from feed_settled_time - scheduled_arrival) = 0)::int), 1)
+                       as pct_ltd_exactly_scheduled,
                    round(percentile_cont(0.5) within group (order by
-                       case when time_source = 'ltd_departure' then delay_s - methods_diff_s
-                            else delay_s end)) as lateness_by_gps_s
+                       extract(epoch from feed_settled_time - scheduled_arrival))) as lateness_by_ltd_s,
+                   round(percentile_cont(0.5) within group (order by
+                       extract(epoch from observed_arrival - scheduled_arrival))) as lateness_by_gps_s,
+                   round(percentile_cont(0.5) within group (order by delay_s)) as lateness_scored_s
             from marts.fct_stop_events
-            where is_timepoint and status is not null and methods_diff_s is not null
-              and not is_first_stop
+            where (is_timepoint or is_first_stop) and status is not null
+              and methods_diff_s is not null and feed_settled_time is not null
               and service_date >= (now() at time zone 'America/Los_Angeles')::date - 6
             group by 1 order by 1
         """,
@@ -1254,8 +1260,9 @@ def main(settings: Settings, raw: bool = False) -> None:
                    round(percentile_cont(0.5) within group (order by methods_diff_s)) median_diff_s,
                    round(100.0 * avg((methods_diff_s > 60)::int), 1) ltd_later_1min_pct,
                    round(100.0 * avg((methods_diff_s < -60)::int), 1) ltd_earlier_1min_pct,
-                   round(100.0 * avg((methods_diff_s > 60)::int) filter (where delay_s < -60), 1)
-                       ltd_later_1min_pct_when_we_say_early
+                   round(100.0 * avg((methods_diff_s > 60)::int)
+                         filter (where observed_arrival < scheduled_arrival - interval '60 seconds'), 1)
+                       ltd_later_1min_pct_when_gps_says_early
             from marts.fct_stop_events
             where is_timepoint and methods_diff_s is not null and is_bounded
               and service_date >= current_date - 7

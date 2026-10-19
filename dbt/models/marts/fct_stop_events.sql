@@ -7,12 +7,15 @@
 -- first report.
 --
 -- The time scored is when the bus left the stop. At a trip's first stop and at timepoints,
--- LTD's feed records that departure itself (a real measurement there, unlike its estimates
--- between timepoints); our GPS time can instead catch a bus that is waiting (at the first
--- stop for minutes before it is due out, at a timepoint when it is early and holding). So
--- there, when LTD recorded a departure for a trip we saw running, that is the time scored
--- (time_source 'ltd_departure'); everywhere else it is our GPS time ('gps'), except at stops
--- where our GPS time is doubtful as a rule (int_doubtful_stops), which are not scored.
+-- LTD's feed records a departure time itself, and each of the two times can come before the
+-- bus really left: our GPS time can catch a bus that is waiting (at the first stop for minutes
+-- before it is due out, at a timepoint when it is early and holding), and LTD's record can be
+-- early too (a quarter of LTD's timepoint departures are exactly the scheduled time, and the
+-- stops between timepoints ran 47 s later than LTD's timepoint times but 1 s later than our
+-- GPS ones: dump, BETWEEN-TIMEPOINT CHECK). So there the later of the two is scored (each
+-- alone when it is the only one), and time_source says which it was ('ltd_departure' or
+-- 'gps'); everywhere else it is our GPS time ('gps'), except at stops where our GPS time is
+-- doubtful as a rule (int_doubtful_stops), which are not scored.
 
 -- Built incrementally (macros/incremental.sql): each build recomputes the latest two service days.
 
@@ -110,11 +113,21 @@ joined as (
      and d.direction_id is not distinct from s.direction_id
 ),
 
+picked as (
+    select *,
+        -- LTD's departure is the time scored where it is the only one, or the later one
+        -- (coalesce: with no GPS time for the stop, gps_scorable is null, not false)
+        use_ltd_departure
+            and not coalesce(gps_scorable and observed_arrival > feed_settled_time, false)
+            as ltd_scored
+    from joined
+),
+
 scored as (
     select *,
-        case when use_ltd_departure then feed_settled_time
+        case when ltd_scored then feed_settled_time
              when gps_scorable then observed_arrival end as scored_time
-    from joined
+    from picked
 )
 
 select
@@ -124,9 +137,9 @@ select
     is_precise, is_doubtful, feed_settled_time, feed_scheduled_time, was_skipped, methods_diff_s,
     -- when the bus left, as scored (status is set): LTD's departure or our GPS time
     case when scored_time is not null then scored_time end as scored_time,
-    case when use_ltd_departure then 'ltd_departure' when observed_arrival is not null then 'gps' end
+    case when ltd_scored then 'ltd_departure' when observed_arrival is not null then 'gps' end
         as time_source,
-    case when use_ltd_departure then extract(epoch from feed_settled_time - sched_time)::int
+    case when ltd_scored then extract(epoch from feed_settled_time - sched_time)::int
          when is_bounded and not is_doubtful then extract(epoch from observed_arrival - sched_time)::int
     end as delay_s,
     case

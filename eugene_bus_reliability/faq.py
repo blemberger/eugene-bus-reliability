@@ -6,6 +6,8 @@ numbers (the last 30 days)."""
 
 from __future__ import annotations
 
+from eugene_bus_reliability import analytics
+
 GITHUB = "https://github.com/blemberger/eugene-bus-reliability"
 CONTACT_EMAIL = "contact@benlemberger.com"
 
@@ -62,7 +64,8 @@ def questions(stats: dict | None = None) -> list[tuple[str, str]]:
             "is at a stop, so the time is worked out from where the bus's GPS places it along "
             "its route. At timepoints (the few main stops on each route with an exact time in "
             "LTD's printed timetable, where an early bus waits for its time) and at a trip's "
-            "first stop, LTD's own recorded departure is used. Every stop counts, not only the "
+            "first stop, the later of that and LTD's own recorded departure is used, since "
+            "either can catch the bus before it actually leaves. Every stop counts, not only the "
             "timepoints, because riders wait at every stop.",
         ),
         (
@@ -127,6 +130,17 @@ def questions(stats: dict | None = None) -> list[tuple[str, str]]:
             "never appeared in LTD's live data can't be measured at all. The Data & methods page "
             "shows how much of the service was measured each day.",
         ),
+    ]
+    if analytics.measurement_id():
+        # Google Analytics' terms require telling visitors it is used and that it sets cookies
+        qa.append(
+            (
+                "Does the site use cookies?",
+                "Only Google Analytics', to count visits. Google's account of what it does with "
+                "them: https://policies.google.com/technologies/partner-sites",
+            )
+        )
+    qa += [
         (
             "Who makes Eugene Bus Watch?",
             "It is an independent project, not affiliated with Lane Transit District. The source "

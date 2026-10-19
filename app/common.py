@@ -71,6 +71,7 @@ def require_db() -> None:
 
 
 # stop names as people read them (shared with the plain report pages)
+from eugene_bus_reliability import analytics  # noqa: E402
 from eugene_bus_reliability.faq import CONTACT_EMAIL  # noqa: E402
 from eugene_bus_reliability.names import (  # noqa: E402
     STOP_NAME_COLUMNS,
@@ -800,9 +801,9 @@ BOT_AGENTS = re.compile(
 
 
 # A browser that has opened the site once with ?dont_count_me (the site's owner, on each of
-# his browsers) carries this cookie and is left out of the visitor counts, as WordPress stats
-# leave out a logged-in owner. Set only on request; nothing else uses cookies.
-NOT_COUNTED_COOKIE = "ebw_not_counted"
+# his browsers) carries this cookie and is left out of the visitor counts (the site's own and
+# Google Analytics'), as WordPress stats leave out a logged-in owner. Set only on request.
+NOT_COUNTED_COOKIE = analytics.NOT_COUNTED_COOKIE  # Google Analytics leaves it out too
 
 
 def not_counted() -> bool:

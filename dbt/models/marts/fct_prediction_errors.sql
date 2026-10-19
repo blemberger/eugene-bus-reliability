@@ -2,7 +2,8 @@
 -- horizon_s: how far ahead the prediction was made (predicted arrival − time it
 -- was first asserted). error_s: observed − predicted; positive = bus came later
 -- than the sign said. Scored against the time fct_stop_events scores for the stop (when the bus
--- left: LTD's recorded departure at first stops and timepoints, our GPS time elsewhere), so
+-- left: our GPS time, or at first stops and timepoints the later of it and LTD's recorded
+-- departure), so
 -- only stops it scores count, and both measures use the same time.
 
 -- Built incrementally (macros/incremental.sql): each build recomputes the latest two service days.

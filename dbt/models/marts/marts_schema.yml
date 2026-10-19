@@ -38,13 +38,14 @@ models:
               config:
                 where: "status is not null and time_source = 'gps' and service_date >= current_date - 3"
       - name: scored_time
-        description: "When the bus left the stop, as scored (set where status is): LTD's recorded departure or our GPS time."
+        description: "When the bus left the stop, as scored (set where status is): our GPS time, or at a first stop or timepoint the later of it and LTD's recorded departure."
       - name: is_doubtful
         description: "Our GPS time at this stop (route, direction) is out of line with the stops either side as a rule (int_doubtful_stops); not scored unless LTD's departure is used."
       - name: time_source
         description: >
-          Which time was scored: 'ltd_departure' (LTD's recorded departure, used at a trip's
-          first stop) or 'gps' (our arrival time from the bus positions).
+          Which time was scored: 'ltd_departure' (LTD's recorded departure, at a trip's first
+          stop or a timepoint when it is the later of the two or the only one) or 'gps' (our time
+          from the bus positions).
         tests:
           - accepted_values:
               arguments:
