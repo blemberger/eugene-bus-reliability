@@ -25,7 +25,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from eugene_bus_reliability import analytics
-from eugene_bus_reliability.faq import CONTACT_EMAIL, questions
+from eugene_bus_reliability.faq import CONTACT_EMAIL, questions, stats_from_lateness
 from eugene_bus_reliability.names import clean_stop_name
 from eugene_bus_reliability.signed import SIGNED_THRESHOLDS, signed_col, signed_percentile
 from eugene_bus_reliability.stop_order import route_stop_order
@@ -320,7 +320,7 @@ def load(conn: psycopg.Connection) -> dict:
     lat = cur.execute(
         """
         select route_id, stop_id, hour_local, n, median_delay_s, p10_delay_s, p90_delay_s,
-               mean_abs_delay_s
+               mean_abs_delay_s, n_early, n_on_time, n_late
         from marts.mart_lateness where period = '30d' and days = 'all'
         """
     ).fetchall()
@@ -679,14 +679,7 @@ def build(database_url: str, target: Path | None = None) -> int:
 
     # questions and answers (faq.py), with the latest numbers, marked up as an FAQ for search
     # engines (schema.org FAQPage)
-    stats: dict = {}
-    if overall:
-        stats["overall"] = {
-            "median": overall["median_delay_s"],
-            "p10": overall["p10_delay_s"],
-            "p90": overall["p90_delay_s"],
-            "mean_abs": overall["mean_abs_delay_s"],
-        }
+    stats = stats_from_lateness(overall, list(route_rows.values()), route_full)
     pa = d["pred_all"]
     if pa and pa.get("pred_s") is not None and pa.get("tt_s") is not None:
         p50, p10, p90 = (signed_percentile(pa, q) for q in (0.5, 0.1, 0.9))

@@ -55,7 +55,8 @@ def describe_db() -> None:
 
 
 def pick_examples() -> dict:
-    """A real route and a real busy stop, so the deeper page states get exercised too."""
+    """A real route and a real busy ordinary stop, so the deeper page states get exercised
+    too."""
     import psycopg
 
     out = {}
@@ -74,9 +75,12 @@ def pick_examples() -> dict:
             out["route_id"] = row[0] if row else None
             row = conn.execute(
                 """
+                -- the busiest stop between timepoints (no times of its own in LTD's
+                -- schedule): an ordinary stop, which most riders use
                 select st.stop_id from gtfs.stop_times st
                 where st.feed_version_id = (select max(feed_version_id) from gtfs.feed_version)
-                group by 1 order by count(*) desc limit 1
+                group by 1
+                order by bool_or(st.arrival_seconds is not null), count(*) desc limit 1
                 """
             ).fetchone()
             out["stop_id"] = row[0] if row else None

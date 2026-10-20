@@ -15,8 +15,10 @@ from common import (
     LINE_MAIN,
     LIVE_CHECK_SECONDS,
     MARKER_MAIN,
+    MIN_RANGE,
     REPORT_TABLE_HEIGHT,
     back_button,
+    band_runs,
     card,
     clean_headsign,
     clean_headsigns,
@@ -44,6 +46,7 @@ from common import (
     local_times,
     minutes_axis,
     next_stops,
+    not_enough,
     on_time_line,
     page_filters,
     place_join,
@@ -229,9 +232,12 @@ with table_slot, card():
     )
     headline_metrics(me, today, start, " on this route vs timetable")
     if along.empty:
-        st.caption("Not enough scored arrivals yet.")
+        st.caption(not_enough(start, wt))
     else:
-        along["p10_s"], along["p90_s"] = along["p10"].astype(float), along["p90"].astype(float)
+        # the 8 in 10 only where enough buses were measured for one
+        wide = along["n"] >= MIN_RANGE
+        along["p10_s"] = along["p10"].astype(float).where(wide)
+        along["p90_s"] = along["p90"].astype(float).where(wide)
         along["med_s"] = along["median_delay"].astype(float)
         lo, hi = range_scale(along, "p10_s", "p90_s")
         link_table(
@@ -290,7 +296,7 @@ with card():
         "timetable has slack there. Hover a point for its stop and numbers.",
     )
     if along.empty:
-        st.caption("Not enough scored arrivals yet.")
+        st.caption(not_enough(start, wt))
     else:
         along["label"] = along["Stop"].astype(str)
         if is_mobile():  # long stop names would leave little room for the plot on a phone
@@ -300,19 +306,8 @@ with card():
         stops_order = along["label"].tolist()
         fig = go.Figure()
         on_time_line(fig)
-        fig.add_trace(
-            go.Scatter(
-                x=stops_order + stops_order[::-1],
-                y=list(along["p90"]) + list(along["p10"])[::-1],
-                fill="toself",
-                fillcolor="rgba(31,95,158,0.18)",
-                mode="lines",
-                line_width=0,
-                hoverinfo="skip",
-                name="8 in 10 buses",
-                legendrank=2,  # listed after the line, as on every chart
-            )
-        )
+        wide = list(along["n"] >= MIN_RANGE)
+        band_runs(fig, stops_order, list(along["p10"]), list(along["p90"]), wide, BRAND)
         fig.add_trace(
             go.Scatter(
                 x=stops_order,
@@ -324,7 +319,12 @@ with card():
                 marker={"size": MARKER_MAIN},
                 hovertext=[
                     f"{name}<br>typical bus {fmt_delay(m)}<br>8 in 10 buses: "
-                    f"{fmt_range(lo_, hi_)}<br>{int(n):,} arrivals"
+                    + (
+                        fmt_range(lo_, hi_)
+                        if n >= MIN_RANGE
+                        else f"shown from {MIN_RANGE} arrivals"
+                    )
+                    + f"<br>{int(n):,} arrivals"
                     for name, m, lo_, hi_, n in zip(
                         along["Stop"],
                         along["med_s"],
@@ -355,7 +355,11 @@ with card():
                 "spikecolor": "#9aa0a6",
                 "spikethickness": 1,
             },
-            yaxis=minutes_axis(list(along["p10"]) + list(along["p90"])),
+            yaxis=minutes_axis(
+                list(along["median_delay"])
+                + [v for v, w in zip(along["p10"], wide, strict=False) if w]
+                + [v for v, w in zip(along["p90"], wide, strict=False) if w]
+            ),
             height=460 if is_mobile() else 520,
             legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0, "xanchor": "left"},
             margin={"l": 10, "r": 10, "t": 30, "b": 10},

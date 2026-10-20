@@ -4,6 +4,7 @@ health of LTD's feed right now."""
 from __future__ import annotations
 
 import math
+from datetime import timedelta
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -17,8 +18,10 @@ from common import (
     col_date,
     col_minutes,
     collection_start,
+    current_fv,
     fmt_date,
     fmt_pct,
+    lateness,
     local_today,
     marts_ready,
     q,
@@ -26,7 +29,7 @@ from common import (
     show_chart,
 )
 
-from eugene_bus_reliability.faq import questions
+from eugene_bus_reliability.faq import questions, stats_from_lateness
 
 require_db()
 st.title("Data & methods")
@@ -356,10 +359,33 @@ with card():
                 )
                 show_chart(fig)
 
+
 # ---- questions and answers (the same as the plain page /reports/faq/, for search engines) ----
+def _faq_numbers() -> dict:
+    """The latest numbers the questions quote (last 30 days, all days), as on /reports/faq/."""
+    start = local_today() - timedelta(days=29)
+    overall = lateness(start, None, "overall")
+    if overall.empty:
+        return {}
+    routes = lateness(start, None, "route")
+    names = q(
+        "select route_id, route_short_name as short, route_long_name as long from gtfs.routes "
+        f"where feed_version_id = {current_fv()}"
+    )
+    label = {
+        str(r.route_id): f"{r.short} ({r.long})" if r.long and r.long != r.short else str(r.short)
+        for r in names.itertuples()
+    }
+    return stats_from_lateness(
+        overall.to_dict("records")[0],
+        routes.to_dict("records"),
+        lambda rid: label.get(str(rid), str(rid)),
+    )
+
+
 with card():
     st.subheader("Questions and answers")
-    for question, answer in questions():
+    for question, answer in questions(_faq_numbers()):
         with st.expander(question):
             st.markdown(answer)
 

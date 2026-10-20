@@ -7,7 +7,6 @@ import streamlit as st
 from common import (
     BRAND,
     LATENESS_CHART_NOTE,
-    NOT_ENOUGH_HOURLY,
     card,
     data_note,
     day_label,
@@ -20,6 +19,7 @@ from common import (
     lateness,
     lateness_title,
     marts_ready,
+    not_enough,
     page_filters,
     predictions_card,
     q,
@@ -65,13 +65,10 @@ with first_slot, card():
             else:
                 st.info(f"No measured arrivals for {scope.label()}, {period}.")
     else:
-        min_n = 5 if scope.stop_id else 10
-        fig = hourly_lines_chart(
-            [{"label": scope.label(), "df": hourly, "color": BRAND}], min_n=min_n
-        )
+        fig = hourly_lines_chart([{"label": scope.label(), "df": hourly, "color": BRAND}])
         with chart_slot:
             if fig is None:
-                st.caption(NOT_ENOUGH_HOURLY.format(n=min_n))
+                st.caption(not_enough(start, wt))
             else:
                 show_chart(fig)
         headline_metrics(

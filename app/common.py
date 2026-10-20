@@ -60,6 +60,12 @@ GO_COLOUR = ROUTE_COLOUR
 INK = "#1b2533"
 LINE_COLOURS = ["#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948"]
 
+# How many arrivals a number needs before the site shows it, the same everywhere: the typical
+# bus (a median) from 5; the range 8 in 10 buses came in (the 10th to 90th percentile) from 10,
+# below which it would be little more than the earliest and latest bus.
+MIN_TYPICAL = 5
+MIN_RANGE = 10
+
 
 # ---------------------------------------------------------------- database ----
 
@@ -1779,8 +1785,18 @@ def route_table(rank: pd.DataFrame, start: date, key: str) -> None:
 # ----------------------------------------------- how far off LTD's predictions are ----
 
 
-# shown in place of an hour-by-hour chart without enough data; .format(n=the chart's min_n)
-NOT_ENOUGH_HOURLY = "Not enough arrivals yet for this chart (needs {n} in an hour)."
+def not_enough(start: date | None = None, wt: str | None = None, what: str = "arrivals") -> str:
+    """The note shown where a chart or table hasn't enough data for the choices made, saying
+    which wider choice may have enough."""
+    tips = []
+    if start is not None and period_key(start) != "all":
+        tips.append(f"“{PERIODS['all']}”")
+    if wt:
+        tips.append(f"“{DAY_CHOICES['all']}”")
+    return f"Not enough {what} yet for this choice." + (
+        f" {' or '.join(tips)} may have enough." if tips else ""
+    )
+
 
 PREDICTION_OFF_NOTE = (
     "How much later or earlier than LTD's real-time prediction (what apps like Transit show) "
@@ -1927,7 +1943,7 @@ def countdown_off_chart(
     names: dict[str, str],
     selected: list[str],
     all_label: str = "All routes",
-    min_n: int = 20,
+    min_n: int = MIN_TYPICAL,
     colors: dict[str, str] | None = None,
 ) -> go.Figure | None:
     """How much later or earlier than predicted the bus came, against how many minutes away the
@@ -1935,8 +1951,9 @@ def countdown_off_chart(
     dots) and the band 8 in 10 buses fell in; 'on time' (when it was predicted) is a plain grid
     line, not marked as on the lateness charts. A thin grey line: the printed timetable's typical bus for the same arrivals
     (flat, because the timetable doesn't change as the bus gets nearer); its 8 in 10 is in the
-    hover text. One choice at a time (`selected`'s first key: ALL_ROUTES or a route id). None
-    when it has fewer than two points."""
+    hover text. One choice at a time (`selected`'s first key: ALL_ROUTES or a route id). A
+    distance is drawn with min_n arrivals, its 8 in 10 with MIN_RANGE. None when it has fewer
+    than two points."""
     if df.empty or not selected:
         return None
     key = selected[0]
@@ -1962,12 +1979,19 @@ def countdown_off_chart(
     highs = [mins(r, 0.9) for r in recs]
     if any(v is None for v in med + lows + highs):
         return None
+    wide = [int(r["n"]) >= MIN_RANGE for r in recs]  # enough for the 8 in 10
     tt_rows = df[(df["basis"] == "timetable") & (df["_r"] == key) & (df["n"] >= min_n)]
     tt = tt_rows.to_dict("records")[0] if len(tt_rows) else None
     t_med = mins(tt, 0.5) if tt else None
-    t_lo = mins(tt, 0.1) if tt else None
-    t_hi = mins(tt, 0.9) if tt else None
-    has_tt = None not in (t_med, t_lo, t_hi)
+    t_wide = bool(tt) and int(tt["n"]) >= MIN_RANGE
+    t_lo = mins(tt, 0.1) if t_wide else None
+    t_hi = mins(tt, 0.9) if t_wide else None
+    has_tt = t_med is not None
+    t_range = (
+        f"8 in 10 buses: {fmt_range(t_lo * 60, t_hi * 60)}"
+        if None not in (t_lo, t_hi)
+        else f"8 in 10 buses: shown from {MIN_RANGE} arrivals"
+    )
     label = all_label if key == ALL_ROUTES else names.get(key, key)
     colour = (colors or {}).get(key, BRAND)
     x = [int(m) for m in g["ahead_min"]]
@@ -1988,24 +2012,11 @@ def countdown_off_chart(
                 legendrank=3,
                 line={"color": REF_GREY, "width": LINE_REF},
                 hovertemplate=f"<b>Printed timetable ({in_parens(label)})</b><br>typical bus "
-                f"{fmt_delay(t_med * 60)}<br>8 in 10 buses: {fmt_range(t_lo * 60, t_hi * 60)}"
+                f"{fmt_delay(t_med * 60)}<br>{t_range}"
                 "<br>for the same bus arrivals<extra></extra>",
             )
         )
-    fig.add_trace(
-        go.Scatter(
-            x=x + x[::-1],
-            y=highs + lows[::-1],
-            fill="toself",
-            fillcolor=colour,
-            opacity=0.18,
-            mode="lines",
-            line_width=0,
-            hoverinfo="skip",
-            name="8 in 10 buses",
-            legendrank=2,
-        )
-    )
+    band_runs(fig, x, lows, highs, wide, colour)
     fig.add_trace(
         go.Scatter(
             x=x,
@@ -2018,16 +2029,20 @@ def countdown_off_chart(
             hovertext=[
                 f"<b>{label}</b><br>predicted {m} min away: the typical bus came "
                 + ("as predicted" if round(abs(v) * 60) < 6 else f"{words(v)} than predicted")
-                + f"<br>8 in 10 buses: {fmt_range(lo * 60, hi * 60)} against the prediction"
+                + (
+                    f"<br>8 in 10 buses: {fmt_range(lo * 60, hi * 60)} against the prediction"
+                    if w
+                    else f"<br>8 in 10 buses: shown from {MIN_RANGE} arrivals"
+                )
                 + f"<br>{float(r['mean_abs_s']) / 60:.1f} min off on average"
                 + (
-                    f"<br>printed timetable: typical bus {fmt_delay(t_med * 60)}, 8 in 10 "
-                    f"{fmt_range(t_lo * 60, t_hi * 60)}"
+                    f"<br>printed timetable: typical bus {fmt_delay(t_med * 60)}"
+                    + (f", 8 in 10 {fmt_range(t_lo * 60, t_hi * 60)}" if t_lo is not None else "")
                     if has_tt
                     else ""
                 )
                 + f"<br>{int(r['n']):,} bus arrivals"
-                for m, v, lo, hi, r in zip(x, med, lows, highs, recs, strict=False)
+                for m, v, lo, hi, r, w in zip(x, med, lows, highs, recs, wide, strict=False)
             ],
             hoverinfo="text",
         )
@@ -2041,7 +2056,13 @@ def countdown_off_chart(
             "tickvals": [1, 5, 10, 15],
             "zeroline": False,
         },
-        yaxis=minutes_axis(lows + highs + ([t_med] if has_tt else []), pad=0.3, bold_zero=False),
+        yaxis=minutes_axis(
+            med
+            + [v for v, w in zip(lows + highs, wide + wide, strict=False) if w]
+            + ([t_med] if has_tt else []),
+            pad=0.3,
+            bold_zero=False,
+        ),
         legend={
             "orientation": "h",
             "yanchor": "bottom",
@@ -2187,13 +2208,71 @@ def as_name(label: str) -> str:
     return label[:1].upper() + label[1:]
 
 
+def band_runs(
+    fig: go.Figure,
+    x: list,
+    lows: list,
+    highs: list,
+    keep: list[bool],
+    color: str,
+    name: str = "8 in 10 buses",
+) -> None:
+    """The shaded band where 8 in 10 buses fell, drawn only where `keep` is true (enough
+    arrivals for a range): one band per unbroken run of such points, a short bar for a point
+    on its own; one legend entry for them all."""
+    runs: list[list[int]] = []
+    for i, k in enumerate(keep):
+        if not k:
+            continue
+        if runs and runs[-1][-1] == i - 1:
+            runs[-1].append(i)
+        else:
+            runs.append([i])
+    for j, run in enumerate(runs):
+        xs = [x[i] for i in run]
+        lo = [lows[i] for i in run]
+        hi = [highs[i] for i in run]
+        common = {
+            "hoverinfo": "skip",
+            # named for what it is the spread of; listed after the line it belongs to
+            "name": name,
+            "legendgroup": "band",
+            "legendrank": 2,
+            "showlegend": j == 0,
+        }
+        if len(run) == 1:
+            fig.add_trace(
+                go.Scatter(
+                    x=[xs[0], xs[0]],
+                    y=[lo[0], hi[0]],
+                    mode="lines",
+                    line={"color": color, "width": 12},
+                    opacity=0.18,
+                    **common,
+                )
+            )
+        else:
+            fig.add_trace(
+                go.Scatter(
+                    x=xs + xs[::-1],
+                    y=hi + lo[::-1],
+                    fill="toself",
+                    fillcolor=color,
+                    opacity=0.18,
+                    mode="lines",
+                    line_width=0,
+                    **common,
+                )
+            )
+
+
 def lateness_chart(
     hourly: pd.DataFrame,
     label: str,
     color: str = BRAND,
     reference: pd.DataFrame | None = None,
     reference_label: str = "all routes",
-    min_n: int = 10,
+    min_n: int = MIN_TYPICAL,
 ) -> go.Figure | None:
     """Typical minutes late by hour of day with the range 8 in 10 buses fall in, from rows with
     hour_local, n, median_delay_s, p10_delay_s, p90_delay_s (and n_days). reference, if given,
@@ -2210,14 +2289,14 @@ def hourly_lines_chart(
     lines: list[dict],
     reference: pd.DataFrame | None = None,
     reference_label: str = "all routes",
-    min_n: int = 10,
+    min_n: int = MIN_TYPICAL,
 ) -> go.Figure | None:
     """Typical minutes late by hour of day, one line per entry of `lines` (dicts with 'label',
     'df' (rows with hour_local, n, median_delay_s, p10_delay_s, p90_delay_s, optionally
     n_days), 'color' and optionally 'dash'). With one line, the band where 8 in 10 of its buses
-    fell is drawn too; with several, the lines alone, so they can be compared. `reference`
-    (same columns) is drawn as a grey line with dots, only over the hours the lines cover.
-    None when no line has an hour with min_n arrivals."""
+    fell is drawn too, over the hours with MIN_RANGE arrivals; with several, the lines alone,
+    so they can be compared. `reference` (same columns) is drawn as a grey line with dots, only
+    over the hours the lines cover. None when no line has an hour with min_n arrivals."""
     kept = []
     for line in lines:
         d = line["df"]
@@ -2236,28 +2315,27 @@ def hourly_lines_chart(
         d = ln["df"].assign(_k=ln["df"]["hour_local"].map(service_hour_key)).sort_values("_k")
         x = [x_of[int(h)] for h in d["hour_local"]]
         if one:
-            fig.add_trace(
-                go.Scatter(
-                    x=x + x[::-1],
-                    y=list(d["p90_delay_s"] / 60) + list(d["p10_delay_s"] / 60)[::-1],
-                    fill="toself",
-                    fillcolor=ln["color"],
-                    opacity=0.18,
-                    mode="lines",
-                    line_width=0,
-                    hoverinfo="skip",
-                    # named for what it is the spread of; listed after the line it belongs to
-                    name="8 in 10 buses",
-                    legendrank=2,
-                )
+            band_runs(
+                fig,
+                x,
+                list(d["p10_delay_s"] / 60),
+                list(d["p90_delay_s"] / 60),
+                list(d["n"] >= MIN_RANGE),
+                ln["color"],
             )
-            values += list(d["p10_delay_s"] / 60) + list(d["p90_delay_s"] / 60)
+            wide = d[d["n"] >= MIN_RANGE]
+            values += list(wide["p10_delay_s"] / 60) + list(wide["p90_delay_s"] / 60)
         days = d["n_days"] if "n_days" in d else pd.Series([None] * len(d), index=d.index)
         hover = [
             (
                 f"<b>{as_name(ln['label'])}</b>, {xx}<br>typical bus {fmt_delay(m)}"
-                f"<br>8 in 10 buses: {fmt_range(lo, hi)}"
-                f"<br>{int(n):,} arrivals" + (f" over {int(nd)} days" if pd.notna(nd) else "")
+                + (
+                    f"<br>8 in 10 buses: {fmt_range(lo, hi)}"
+                    if n >= MIN_RANGE
+                    else f"<br>8 in 10 buses: shown from {MIN_RANGE} arrivals"
+                )
+                + f"<br>{int(n):,} arrivals"
+                + (f" over {int(nd)} days" if pd.notna(nd) else "")
             )
             for xx, m, lo, hi, n, nd in zip(
                 x,
@@ -2891,12 +2969,9 @@ def times_of_day_card(
             help=LATENESS_CHART_NOTE + f" {period[0].upper() + period[1:]}{help_extra}.",
         )
         _, hourly = scoped_lateness(start, wt, scope, direction)
-        min_n = 5 if (scope.stop_id or direction is not None) else 10
-        fig = hourly_lines_chart(
-            [{"label": scope.label(), "df": hourly, "color": BRAND}], min_n=min_n
-        )
+        fig = hourly_lines_chart([{"label": scope.label(), "df": hourly, "color": BRAND}])
         if fig is None:
-            st.caption(NOT_ENOUGH_HOURLY.format(n=min_n))
+            st.caption(not_enough(start, wt))
         else:
             show_chart(fig)
 
@@ -2998,7 +3073,7 @@ def predictions_card(
             )
         )
         if fig is None:
-            st.caption("Not enough measured arrivals with a prediction yet for this choice.")
+            st.caption(not_enough(start, wt, "measured arrivals with a prediction"))
         else:
             show_chart(fig)
         if link:
@@ -3276,7 +3351,10 @@ def link_table(
 
 
 def range_cell(p10, med, p90, lo: float, hi: float) -> str:
-    """The 'usual range' cell of a link_table: the strip and the numbers."""
+    """The 'usual range' cell of a link_table: the strip and the numbers (a note instead
+    where there were too few buses for a range: p10 or p90 missing)."""
+    if pd.isna(p10) or pd.isna(p90):
+        return f"<span class='ebw-s'>needs {MIN_RANGE} buses</span>"
     return (
         f"<span class='ebw-g'>{range_strip(p10, med, p90, lo, hi)}"
         f"<span class='ebw-s'>{html_escape(fmt_range(p10, p90))}</span></span>"
@@ -3908,30 +3986,43 @@ def clock(seconds) -> str:
 def stop_timetable(stop_id: str, day: str) -> pd.DataFrame:
     """The buses due at a stop on a day of `day`'s kind, hour by hour: one row per hour, one
     column per route and direction ('11 → Thurston'), the minutes past the hour in each cell,
-    as a stop's posted schedule shows them. Buses that only drop off here are left out."""
+    as a stop's posted schedule shows them. Buses that only drop off here are left out.
+    LTD's schedule gives times only at timepoints; at the stops between, the time is the one
+    worked out from the timepoints either side (int_stop_times_filled, as trip planners do),
+    and the result's attrs["estimated"] says the stop has such times."""
     fv = current_fv()
     _, ids = timetable_services()[day]
     if not ids:
         return pd.DataFrame()
     df = q(
         f"""
+        with trip_stops as (
+            select f.trip_id, f.stop_sequence, f.stop_id, f.arrival_seconds, f.has_scheduled_time,
+                   max(f.stop_sequence) over (partition by f.trip_id) as last_sequence
+            from intermediate.int_stop_times_filled f
+            join gtfs.trips t on t.trip_id = f.trip_id and t.feed_version_id = f.feed_version_id
+            where f.feed_version_id = {fv} and t.service_id = any(%s)
+              and f.trip_id in (select x.trip_id from gtfs.stop_times x
+                                where x.feed_version_id = {fv} and x.stop_id = %s)
+        )
         select r.route_short_name as route, t.direction_id, t.trip_headsign as headsign,
-               coalesce(st.departure_seconds, st.arrival_seconds) as s
-        from gtfs.stop_times st
-        join gtfs.trips t on t.trip_id = st.trip_id and t.feed_version_id = st.feed_version_id
-        join gtfs.routes r on r.route_id = t.route_id and r.feed_version_id = t.feed_version_id
-        where st.feed_version_id = {fv} and st.stop_id = %s and t.service_id = any(%s)
+               coalesce(st.departure_seconds, ts.arrival_seconds) as s,
+               not ts.has_scheduled_time as estimated
+        from trip_stops ts
+        join gtfs.stop_times st on st.feed_version_id = {fv} and st.trip_id = ts.trip_id
+         and st.stop_sequence = ts.stop_sequence
+        join gtfs.trips t on t.trip_id = ts.trip_id and t.feed_version_id = {fv}
+        join gtfs.routes r on r.route_id = t.route_id and r.feed_version_id = {fv}
+        where ts.stop_id = %s and ts.arrival_seconds is not null
           and coalesce(st.pickup_type, 0) <> 1
-          and coalesce(st.departure_seconds, st.arrival_seconds) is not null
           -- not the end of the trip: nobody boards there
-          and st.stop_sequence < (select max(x.stop_sequence) from gtfs.stop_times x
-                                  where x.feed_version_id = st.feed_version_id
-                                    and x.trip_id = st.trip_id)
+          and ts.stop_sequence < ts.last_sequence
         """,
-        (stop_id, ids),
+        (ids, stop_id, stop_id),
     )
     if df.empty:
         return df
+    estimated = bool(df["estimated"].any())
     df["toward"] = clean_headsigns(df)
     df["col"] = [
         f"{r} → {h}" if h else str(r) for r, h in zip(df["route"], df["toward"], strict=False)
@@ -3950,7 +4041,9 @@ def stop_timetable(stop_id: str, day: str) -> pd.DataFrame:
             mins = sorted(df[(df["hour"] == h) & (df["col"] == c)]["minute"])
             row[c] = " ".join(f"{m:02d}" for m in mins)
         table_rows.append(row)
-    return pd.DataFrame(table_rows, columns=["Hour", *cols])
+    out = pd.DataFrame(table_rows, columns=["Hour", *cols])
+    out.attrs["estimated"] = estimated
+    return out
 
 
 def route_timetable(route_id: str, direction: int, day: str) -> pd.DataFrame:
@@ -4009,8 +4102,14 @@ def timetable_card(title: str, key: str, build, note: str = "") -> None:
             st.caption(f"No buses scheduled here on {TIMETABLE_DAYS[day]}.")
             return
         table(tt, hide_index=True, width="stretch", height=min(560, 38 + 35 * len(tt)))
+        estimated = (
+            " LTD's schedule fixes times only at timepoints; the times here are worked out "
+            "from the timepoints either side, as trip planners do."
+            if tt.attrs.get("estimated")
+            else ""
+        )
         st.caption(
             (note + " " if note else "")
             + f"From LTD's published schedule ({TIMETABLE_DAYS[day].lower()}, as on "
-            f"{fmt_date(when)}); holidays and detours can change it."
+            f"{fmt_date(when)}); holidays and detours can change it.{estimated}"
         )
