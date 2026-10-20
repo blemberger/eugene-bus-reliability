@@ -52,6 +52,13 @@ st.html(
     " background: #ffffff; box-shadow: 0 1px 3px rgba(20, 30, 45, 0.08);"
     " padding: 1.1rem 1.3rem 1.2rem 1.3rem; }"
     "[data-testid='stCaptionContainer'] { font-size: 0.95rem; }"
+    # a folded timetable: its heading a size under a card's title (it is extra detail, but a
+    # heading); inside, the days it shows, written with the table (common.timetable_card)
+    "[class*='st-key-ttcard_'] [data-testid='stExpander'] summary p { font-size: 1.2rem;"
+    " font-weight: 600; }"
+    ".ebw-ttday { font-size: 1.15rem; font-weight: 700; color: #262730; }"
+    ".ebw-ttday span { font-size: 0.95rem; font-weight: 400; color: #6b7280;"
+    " margin-left: 0.6rem; }"
     # bigger buttons and button rows
     "[data-testid='stButtonGroup'] button { font-size: 1.05rem; min-height: 2.6rem;"
     " padding: 0.4rem 1.05rem; }"
@@ -132,6 +139,7 @@ st.html(
     " padding: 0.8rem 0.8rem 0.9rem 0.8rem; }"
     " h1 { font-size: 1.75rem !important; line-height: 1.2 !important; }"
     " h2, h3 { font-size: 1.3rem !important; }"
+    " [class*='st-key-ttcard_'] [data-testid='stExpander'] summary p { font-size: 1.1rem; }"
     " [data-testid='stPageLink'] p { white-space: normal; }"
     # the four headline numbers two by two, not one per row down the screen
     " [data-testid='stHorizontalBlock']:has([data-testid='stMetric']) { flex-wrap: wrap;"

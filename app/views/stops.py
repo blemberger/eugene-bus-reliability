@@ -499,13 +499,17 @@ with card():
         "negative = early.",
     )
     stop_right_now()
+    st.page_link(
+        "views/accuracy.py",
+        label="How LTD's predictions for these buses have changed →",
+        query_params={"stop": stop_id},
+    )
 
 # ---- the plain timetable, folded away: for reference --------------------------------------
 timetable_card(
     f"Timetable at {SNAME}, every route",
     f"tt_stop_{stop_id}",
     lambda day: stop_timetable(stop_id, day),
-    note="Each row is an hour; the numbers are the minutes past it when each bus is due here.",
 )
 
 

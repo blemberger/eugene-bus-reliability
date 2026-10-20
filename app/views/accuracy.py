@@ -97,165 +97,38 @@ with filters_slot:
 period = f"{day_label(wt)} since {fmt_date(start)}"
 PERIOD = period[0].upper() + period[1:]
 
-# ---- how far off: the prediction at each distance, and the timetable ----------------------
-with chart_slot, card():
-    st.subheader(
-        f"Prediction accuracy{SUFFIX}{days_suffix()}",
-        help=PREDICTION_OFF_NOTE + f" {PERIOD}.",
-    )
-    rows = prediction_scope_rows(start, wt, scope)
-    fig0 = (
-        None
-        if rows.empty
-        else countdown_off_chart(
-            rows, {}, [ALL_ROUTES], all_label=as_name(scope.label()), colors={ALL_ROUTES: BRAND}
-        )
-    )
-    if fig0 is None:
-        st.caption(not_enough(start, wt, "measured arrivals with a prediction"))
-    else:
-        show_chart(fig0)
-
-
-# ---- by time of day ---------------------------------------------------------------------
-with card():
-    st.subheader(
-        f"Prediction accuracy by time of day{SUFFIX}{days_suffix()}",
-        help="Predictions made about this far ahead, by the hour they were on show. Each bar "
-        "builds up: the dark part is the share right to within 2 minutes; add the middle part "
-        "for within 3 minutes; the whole bar is within 5 minutes. The space above is how often "
-        "the bus came more than 5 minutes off. (Windows under 2 minutes would be finer than an "
-        f"arrival can be timed at every stop.) Hours with fewer than {MIN_RANGE} bus arrivals "
-        f"are left out. {PERIOD}.",
-    )
-    AHEAD_CHOICES = {"2 min": (1, 2), "5 min": (5, 5), "10 min": (10, 10), "15 min": (15, 15)}
-    ahead = (
-        st.segmented_control(
-            "Predictions made this far ahead",
-            list(AHEAD_CHOICES),
-            default="5 min",
-            key="tod_ahead",
-        )
-        or "5 min"
-    )
-    lo, hi = AHEAD_CHOICES[ahead]
-    clause, params = day_sql(wt)
-    if scope.stop_id:
-        # one stop: from the arrivals themselves (the daily table has no stops)
-        where, wparams = scope.where()
-        tod = q(
-            f"""
-            select hour_local, count(*) as n,
-                   count(*) filter (where abs(error_s) <= 120) as within1,
-                   count(*) filter (where abs(error_s) <= 180) as within2,
-                   count(*) filter (where abs(error_s) <= 300) as within3
-            from marts.fct_countdown_samples
-            where in_comparison and ahead_min between %s and %s and service_date >= %s
-              {where} {clause}
-            group by 1 order by 1
-            """,
-            (lo, hi, start, *wparams, *params),
-        )
-    else:
-        tod = q(
-            f"""
-            select hour_local, sum(n)::bigint as n, sum(n_within_2min)::bigint as within1,
-                   sum(n_within_3min)::bigint as within2, sum(n_within_5min)::bigint as within3
-            from marts.mart_prediction_daily
-            where basis = 'sign' and ahead_min between %s and %s and service_date >= %s {clause}
-              {"and route_id = %s" if scope.route_id else ""}
-            group by 1 order by 1
-            """,
-            (lo, hi, start, *params, *([scope.route_id] if scope.route_id else [])),
-        )
-    tod = tod[tod["n"] >= MIN_RANGE].copy()
-    if tod.empty:
-        st.caption(not_enough(start, wt, "measured bus arrivals this far ahead"))
-    else:
-        # service order: 5 am first, the hours after midnight last
-        tod = tod.assign(_k=tod["hour_local"].map(service_hour_key)).sort_values("_k")
-        tod["Hour"] = tod["hour_local"].map(hour_label)
-        for k in (1, 2, 3):
-            tod[f"p{k}"] = tod[f"within{k}"] / tod["n"]
-        # One bar per hour, built up in layers: the dark part is "right within 2 min", adding the
-        # middle part gives "within 3 min", the whole bar "within 5 min". One blue, dark to light.
-        layers = [
-            ("p1", None, "within 2 min", BRAND),
-            ("p2", "p1", "2–3 min off", "#5b9bd5"),
-            ("p3", "p2", "3–5 min off", "#b3d1ee"),
-        ]
-        custom = list(zip(tod["p1"], tod["p2"], tod["p3"], tod["n"].astype(int), strict=False))
-        fig3 = go.Figure()
-        for col, below, name, color in layers:
-            fig3.add_trace(
-                go.Bar(
-                    x=tod["Hour"],
-                    y=tod[col] - (tod[below] if below else 0),
-                    name=name,
-                    marker={"color": color, "line": {"color": "white", "width": 1}},
-                    customdata=custom,
-                    hovertemplate=(
-                        "<b>%{x}</b><br>right within 2 min: %{customdata[0]:.0%}<br>"
-                        "within 3 min: %{customdata[1]:.0%}<br>within 5 min: %{customdata[2]:.0%}"
-                        "<br>%{customdata[3]:,} bus arrivals<extra></extra>"
-                    ),
-                )
+# the predictions, every value each held, for the buses due at one stop in the next 45
+# minutes, with each bus's timetable time there ({fv}: the schedule version in force)
+COMING_SQL = """
+            with coming as (
+                select trip_id, start_date, stop_sequence from rt.prediction_current
+                where stop_id = %s
+                  and coalesce(arrival_time, departure_time)
+                      between now() - interval '2 minutes' and now() + interval '45 minutes'
+                  and last_seen_at > now() - interval '3 minutes'
             )
-        fig3.update_layout(
-            barmode="stack",
-            yaxis_tickformat=".0%",
-            yaxis_range=[0, 1],
-            xaxis_title="",
-            yaxis_title="Share of predictions",
-            legend={
-                "orientation": "h",
-                "yanchor": "bottom",
-                "y": 1.02,
-                "x": 0,
-                "title": "",
-                "traceorder": "normal",
-            },
-        )
-        show_chart(fig3)
-
-
-# ---- tables: each route, each stop -------------------------------------------------------
-# the signed running counts only where the tables use them (5 minutes away and the timetable):
-# adding up the others too made the stops table's query twice as slow
-SIGNED_5 = ", ".join(
-    f"sum({signed_col(t)}) filter (where basis = 'timetable' or ahead_min = 5) as {signed_col(t)}"
-    for t in SIGNED_THRESHOLDS
-)
-
-
-def off_by(key: str, where: str, params: tuple, daily: bool) -> pd.DataFrame:
-    """Average minutes off per `key` (route_id or stop_id) at 5, 10 and 15 minutes away and for
-    the timetable, for the page's period and days."""
-    clause, wt_params = day_sql(wt)
-    table_name = "mart_prediction_daily" if daily else "mart_prediction_stop_daily"
-    try:
-        return q(
-            f"""
-            select {key} as id, basis, ahead_min, sum(n) as n,
-                   sum(sum_abs_s)::float8 / nullif(sum(n), 0) as mean_abs_s,
-                   {SIGNED_5}
-            from marts.{table_name}
-            where service_date >= %s {clause} {where}
-              and {key} is not null and (basis = 'timetable' or ahead_min in (5, 10, 15))
-            group by 1, 2, 3
-            """,
-            (start, *wt_params, *params),
-        )
-    except Exception:  # noqa: BLE001 — the table is being rebuilt
-        return pd.DataFrame()
-
-
-def fmt_vs(seconds: float, what: str) -> str:
-    """'0.4 min later than predicted', '1.2 min earlier than predicted', 'as predicted'."""
-    m = abs(seconds) / 60
-    if round(m, 1) == 0:
-        return f"as {what}"
-    return f"{m:.1f} min {'later' if seconds > 0 else 'earlier'} than {what}"
+            select u.trip_id, r.route_short_name as route, t.trip_headsign as headsign,
+                   u.first_seen_at, u.last_seen_at,
+                   coalesce(u.arrival_time, u.departure_time) as predicted,
+                   se.scheduled_arrival as scheduled
+            from (
+                select trip_id, start_date, stop_sequence, arrival_time, departure_time,
+                       first_seen_at, last_seen_at
+                from rt.prediction_history
+                union all
+                select trip_id, start_date, stop_sequence, arrival_time, departure_time,
+                       first_seen_at, last_seen_at
+                from rt.prediction_current
+            ) u
+            join coming c using (trip_id, start_date, stop_sequence)
+            join gtfs.trips t  on t.trip_id = u.trip_id and t.feed_version_id = {fv}
+            join gtfs.routes r on r.route_id = t.route_id and r.feed_version_id = {fv}
+            left join intermediate.int_scheduled_stop_events se
+              on se.service_date = c.start_date and se.trip_id = c.trip_id
+             and se.stop_sequence = c.stop_sequence
+            where coalesce(u.arrival_time, u.departure_time) is not null
+            order by u.trip_id, u.first_seen_at
+            """
 
 
 def _local(s: pd.Series) -> pd.Series:
@@ -407,6 +280,195 @@ def coming_now_chart(hist: pd.DataFrame) -> None:
             ),
         },
     )
+
+
+# ---- how far off: the prediction at each distance, and the timetable ----------------------
+with chart_slot, card():
+    st.subheader(
+        f"Prediction accuracy{SUFFIX}{days_suffix()}",
+        help=PREDICTION_OFF_NOTE + f" {PERIOD}.",
+    )
+    rows = prediction_scope_rows(start, wt, scope)
+    fig0 = (
+        None
+        if rows.empty
+        else countdown_off_chart(
+            rows, {}, [ALL_ROUTES], all_label=as_name(scope.label()), colors={ALL_ROUTES: BRAND}
+        )
+    )
+    if fig0 is None:
+        st.caption(not_enough(start, wt, "measured arrivals with a prediction"))
+    else:
+        show_chart(fig0)
+
+
+# ---- one stop, right now: how each coming bus's prediction has changed --------------------
+with card():
+    st.subheader(
+        f"Predictions for the buses coming to {scope.stop_name} now"
+        if scope.stop_id
+        else "Predictions for the buses coming now",
+        anchor="coming",
+        help="Each solid line is a bus on its way here: the arrival time LTD predicted (up) "
+        "at each moment (across). A flat line is a prediction that held; a line that keeps "
+        "stepping later is the prediction correcting itself as the bus falls behind. The "
+        "dashed line in the same colour is the bus's time in the printed timetable.",
+    )
+    if not scope.stop_id:
+        st.info(
+            "Choose a stop above to see the buses coming to it and how LTD's predictions "
+            "for them have changed."
+        )
+    else:
+        try:
+            hist = q_live(COMING_SQL.format(fv=FV), (scope.stop_id,))
+            if hist.empty:
+                st.info("No buses predicted for this stop in the next 45 minutes.")
+            else:
+                coming_now_chart(hist)
+        except Exception as exc:  # noqa: BLE001 — say so in the card rather than show nothing
+            st.error(f"This chart couldn't be drawn: {type(exc).__name__}: {exc}")
+
+
+# ---- by time of day ---------------------------------------------------------------------
+with card():
+    st.subheader(
+        f"Prediction accuracy by time of day{SUFFIX}{days_suffix()}",
+        help="Predictions made about this far ahead, by the hour they were on show. Each bar "
+        "builds up: the dark part is the share right to within 2 minutes; add the middle part "
+        "for within 3 minutes; the whole bar is within 5 minutes. The space above is how often "
+        "the bus came more than 5 minutes off. (Windows under 2 minutes would be finer than an "
+        f"arrival can be timed at every stop.) Hours with fewer than {MIN_RANGE} bus arrivals "
+        f"are left out. {PERIOD}.",
+    )
+    AHEAD_CHOICES = {"2 min": (1, 2), "5 min": (5, 5), "10 min": (10, 10), "15 min": (15, 15)}
+    ahead = (
+        st.segmented_control(
+            "Predictions made this far ahead",
+            list(AHEAD_CHOICES),
+            default="5 min",
+            key="tod_ahead",
+        )
+        or "5 min"
+    )
+    lo, hi = AHEAD_CHOICES[ahead]
+    clause, params = day_sql(wt)
+    if scope.stop_id:
+        # one stop: from the arrivals themselves (the daily table has no stops)
+        where, wparams = scope.where()
+        tod = q(
+            f"""
+            select hour_local, count(*) as n,
+                   count(*) filter (where abs(error_s) <= 120) as within1,
+                   count(*) filter (where abs(error_s) <= 180) as within2,
+                   count(*) filter (where abs(error_s) <= 300) as within3
+            from marts.fct_countdown_samples
+            where in_comparison and ahead_min between %s and %s and service_date >= %s
+              {where} {clause}
+            group by 1 order by 1
+            """,
+            (lo, hi, start, *wparams, *params),
+        )
+    else:
+        tod = q(
+            f"""
+            select hour_local, sum(n)::bigint as n, sum(n_within_2min)::bigint as within1,
+                   sum(n_within_3min)::bigint as within2, sum(n_within_5min)::bigint as within3
+            from marts.mart_prediction_daily
+            where basis = 'sign' and ahead_min between %s and %s and service_date >= %s {clause}
+              {"and route_id = %s" if scope.route_id else ""}
+            group by 1 order by 1
+            """,
+            (lo, hi, start, *params, *([scope.route_id] if scope.route_id else [])),
+        )
+    tod = tod[tod["n"] >= MIN_RANGE].copy()
+    if tod.empty:
+        st.caption(not_enough(start, wt, "measured bus arrivals this far ahead"))
+    else:
+        # service order: 5 am first, the hours after midnight last
+        tod = tod.assign(_k=tod["hour_local"].map(service_hour_key)).sort_values("_k")
+        tod["Hour"] = tod["hour_local"].map(hour_label)
+        for k in (1, 2, 3):
+            tod[f"p{k}"] = tod[f"within{k}"] / tod["n"]
+        # One bar per hour, built up in layers: the dark part is "right within 2 min", adding the
+        # middle part gives "within 3 min", the whole bar "within 5 min". One blue, dark to light.
+        layers = [
+            ("p1", None, "within 2 min", BRAND),
+            ("p2", "p1", "2–3 min off", "#5b9bd5"),
+            ("p3", "p2", "3–5 min off", "#b3d1ee"),
+        ]
+        custom = list(zip(tod["p1"], tod["p2"], tod["p3"], tod["n"].astype(int), strict=False))
+        fig3 = go.Figure()
+        for col, below, name, color in layers:
+            fig3.add_trace(
+                go.Bar(
+                    x=tod["Hour"],
+                    y=tod[col] - (tod[below] if below else 0),
+                    name=name,
+                    marker={"color": color, "line": {"color": "white", "width": 1}},
+                    customdata=custom,
+                    hovertemplate=(
+                        "<b>%{x}</b><br>right within 2 min: %{customdata[0]:.0%}<br>"
+                        "within 3 min: %{customdata[1]:.0%}<br>within 5 min: %{customdata[2]:.0%}"
+                        "<br>%{customdata[3]:,} bus arrivals<extra></extra>"
+                    ),
+                )
+            )
+        fig3.update_layout(
+            barmode="stack",
+            yaxis_tickformat=".0%",
+            yaxis_range=[0, 1],
+            xaxis_title="",
+            yaxis_title="Share of predictions",
+            legend={
+                "orientation": "h",
+                "yanchor": "bottom",
+                "y": 1.02,
+                "x": 0,
+                "title": "",
+                "traceorder": "normal",
+            },
+        )
+        show_chart(fig3)
+
+
+# ---- tables: each route, each stop -------------------------------------------------------
+# the signed running counts only where the tables use them (5 minutes away and the timetable):
+# adding up the others too made the stops table's query twice as slow
+SIGNED_5 = ", ".join(
+    f"sum({signed_col(t)}) filter (where basis = 'timetable' or ahead_min = 5) as {signed_col(t)}"
+    for t in SIGNED_THRESHOLDS
+)
+
+
+def off_by(key: str, where: str, params: tuple, daily: bool) -> pd.DataFrame:
+    """Average minutes off per `key` (route_id or stop_id) at 5, 10 and 15 minutes away and for
+    the timetable, for the page's period and days."""
+    clause, wt_params = day_sql(wt)
+    table_name = "mart_prediction_daily" if daily else "mart_prediction_stop_daily"
+    try:
+        return q(
+            f"""
+            select {key} as id, basis, ahead_min, sum(n) as n,
+                   sum(sum_abs_s)::float8 / nullif(sum(n), 0) as mean_abs_s,
+                   {SIGNED_5}
+            from marts.{table_name}
+            where service_date >= %s {clause} {where}
+              and {key} is not null and (basis = 'timetable' or ahead_min in (5, 10, 15))
+            group by 1, 2, 3
+            """,
+            (start, *wt_params, *params),
+        )
+    except Exception:  # noqa: BLE001 — the table is being rebuilt
+        return pd.DataFrame()
+
+
+def fmt_vs(seconds: float, what: str) -> str:
+    """'0.4 min later than predicted', '1.2 min earlier than predicted', 'as predicted'."""
+    m = abs(seconds) / 60
+    if round(m, 1) == 0:
+        return f"as {what}"
+    return f"{m:.1f} min {'later' if seconds > 0 else 'earlier'} than {what}"
 
 
 def prediction_table(
@@ -580,52 +642,3 @@ with card():
         # busiest first: the stops most riders use
         sort=None,
     )
-
-
-# ---- one stop, right now: how each coming bus's prediction has been revised --------------
-if scope.stop_id:
-    with card():
-        st.subheader(
-            f"Predictions for the buses coming to {scope.stop_name} now",
-            help="Each solid line is a bus on its way here: the arrival time LTD predicted (up) "
-            "at each moment (across). A flat line is a prediction that held; a line that keeps "
-            "stepping later is the prediction correcting itself as the bus falls behind. The "
-            "dashed line in the same colour is the bus's time in the printed timetable.",
-        )
-        hist = q_live(
-            f"""
-            with coming as (
-                select trip_id, start_date, stop_sequence from rt.prediction_current
-                where stop_id = %s
-                  and coalesce(arrival_time, departure_time)
-                      between now() - interval '2 minutes' and now() + interval '45 minutes'
-                  and last_seen_at > now() - interval '3 minutes'
-            )
-            select u.trip_id, r.route_short_name as route, t.trip_headsign as headsign,
-                   u.first_seen_at, u.last_seen_at,
-                   coalesce(u.arrival_time, u.departure_time) as predicted,
-                   se.scheduled_arrival as scheduled
-            from (
-                select trip_id, start_date, stop_sequence, arrival_time, departure_time,
-                       first_seen_at, last_seen_at
-                from rt.prediction_history
-                union all
-                select trip_id, start_date, stop_sequence, arrival_time, departure_time,
-                       first_seen_at, last_seen_at
-                from rt.prediction_current
-            ) u
-            join coming c using (trip_id, start_date, stop_sequence)
-            join gtfs.trips t  on t.trip_id = u.trip_id and t.feed_version_id = {FV}
-            join gtfs.routes r on r.route_id = t.route_id and r.feed_version_id = {FV}
-            left join intermediate.int_scheduled_stop_events se
-              on se.service_date = c.start_date and se.trip_id = c.trip_id
-             and se.stop_sequence = c.stop_sequence
-            where coalesce(u.arrival_time, u.departure_time) is not null
-            order by u.trip_id, u.first_seen_at
-            """,
-            (scope.stop_id,),
-        )
-        if hist.empty:
-            st.caption("No buses predicted for this stop in the next 45 minutes.")
-        else:
-            coming_now_chart(hist)

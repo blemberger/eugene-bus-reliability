@@ -3121,6 +3121,9 @@ def col_range(label: str = "Usual range"):
 
 # the width of the "−1 to 5 min" numbers beside each range strip
 RANGE_TEXT_PX = 86
+# every other row of a table, so a row can be followed across: a shade lighter than the
+# header's, darker than the white of the rest
+ROW_STRIPE = "#f5f7fa"
 
 _TABLE_CSS = """
 <style>
@@ -3131,7 +3134,7 @@ _TABLE_CSS = """
          font-size: 15px; }
 .ebw-r { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; align-items: center;
          padding: 7px 12px; border-bottom: 1px solid #eef0f2; color: #262730;
-         text-decoration: none; }
+         text-decoration: none; background: var(--z, var(--p, #fff)); }
 a.ebw-r { transition: background-color 0.12s; }
 a.ebw-r:hover { background: #eaf1f9; }
 /* pressed (on a phone, the only feedback a tap gets): a shade darker */
@@ -3172,7 +3175,8 @@ a.ebw-r:hover .ebw-go { transform: translateX(3px); }
 .ebw-x2 { top: 0; width: 4px; height: 16px; border-radius: 1px; background: #123f6b; }
 /* the first column (the route or stop) stays in place while the rest scroll sideways, on a
    phone or any window too narrow for the whole table */
-.ebw-r > :first-child { position: sticky; left: 0; z-index: 1; background: #fff;
+.ebw-r > :first-child { position: sticky; left: 0; z-index: 1;
+                        background: var(--z, var(--p, #fff));
                         margin-left: -12px; padding-left: 12px; align-self: stretch;
                         display: flex; align-items: center; }
 .ebw-h > :first-child { background: #f6f8f9; z-index: 2; }
@@ -3300,8 +3304,10 @@ def link_table(
             )
             var = f"--{'a' if d == 'asc' else 'd'}{j}"
             arrow = "▲" if d == "asc" else "▼"
+            # rows in this order, shaded every other one in it
             css.append(
-                f"#{rid}-{d}:checked ~ .ebw-t .ebw-r:not(.ebw-h) {{ order: var({var}); }}"
+                f"#{rid}-{d}:checked ~ .ebw-t .ebw-r:not(.ebw-h) "
+                f"{{ order: var({var}); --z: var(--z{var[2:]}); }}"
                 f"#{rid}-{d}:checked ~ .ebw-t .{rid}-h::after "
                 f"{{ content: ' {arrow}'; color: {BRAND}; }}"
             )
@@ -3317,10 +3323,18 @@ def link_table(
             f"<span class='ebw-so {rid}-h'>{label}</span></label>{c.get('axis', '')}</div>"
         )
 
+    def shade(place: int) -> str:
+        return ROW_STRIPE if place % 2 else "#fff"
+
     def row(i: int, r: dict) -> str:
-        style = []  # the column widths come from the table (CSS variables are inherited)
+        # the column widths come from the table (CSS variables are inherited); each row's place
+        # in every order it can be sorted in, and its shade there (every other row, as placed)
+        style = [f"--p:{shade(i)}"]
         for j, rank in ranks.items():
-            style.append(f"--a{j}:{rank[i]};--d{j}:{n - 1 - rank[i]}")
+            style.append(
+                f"--a{j}:{rank[i]};--d{j}:{n - 1 - rank[i]};"
+                f"--za{j}:{shade(rank[i])};--zd{j}:{shade(n - 1 - rank[i])}"
+            )
         tip = f" title='{html_escape(r['hover'])}'" if r.get("hover") else ""
         body = "".join(cell(c, r.get(c["key"])) for c in columns)
         if linked:
@@ -3985,8 +3999,9 @@ def clock(seconds) -> str:
 
 def stop_timetable(stop_id: str, day: str) -> pd.DataFrame:
     """The buses due at a stop on a day of `day`'s kind, hour by hour: one row per hour, one
-    column per route and direction ('11 → Thurston'), the minutes past the hour in each cell,
-    as a stop's posted schedule shows them. Buses that only drop off here are left out.
+    column per route and direction ('11 → Thurston'), the times each is due in that hour in
+    each cell ('6:06  6:21  6:36'; the hour's am/pm is in the row's first column). Buses that
+    only drop off here are left out.
     LTD's schedule gives times only at timepoints; at the stops between, the time is the one
     worked out from the timepoints either side (int_stop_times_filled, as trip planners do),
     and the result's attrs["estimated"] says the stop has such times."""
@@ -4029,6 +4044,9 @@ def stop_timetable(stop_id: str, day: str) -> pd.DataFrame:
     ]
     df["hour"] = (df["s"].astype(int) // 3600).astype(int)  # 24+ = after midnight
     df["minute"] = (df["s"].astype(int) // 60 % 60).astype(int)
+    df["time"] = [
+        f"{(h % 12) or 12}:{m:02d}" for h, m in zip(df["hour"], df["minute"], strict=False)
+    ]
     cols = sorted(
         df["col"].unique(),
         key=lambda c: (len(c.split(" ")[0]), c.split(" ")[0], c),
@@ -4038,8 +4056,8 @@ def stop_timetable(stop_id: str, day: str) -> pd.DataFrame:
     for h in hours:
         row = {"Hour": hour_label(h)}
         for c in cols:
-            mins = sorted(df[(df["hour"] == h) & (df["col"] == c)]["minute"])
-            row[c] = " ".join(f"{m:02d}" for m in mins)
+            here = df[(df["hour"] == h) & (df["col"] == c)].sort_values("minute")
+            row[c] = "\u2002".join(here["time"])  # an en space between times
         table_rows.append(row)
     out = pd.DataFrame(table_rows, columns=["Hour", *cols])
     out.attrs["estimated"] = estimated
@@ -4093,15 +4111,39 @@ def route_timetable(route_id: str, direction: int, day: str) -> pd.DataFrame:
 
 def timetable_card(title: str, key: str, build, note: str = "") -> None:
     """A folded section with the plain timetable (build(day) -> DataFrame), the days to show
-    chosen inside it; `note` says how to read it."""
-    with card(), st.expander(title):
+    chosen inside it; `note` says how to read it. Above the table, the days it is for: written
+    only once the table for them is ready, so while a new choice of days loads, the old
+    heading stays with the old table (streamlit_app.py styles the st-key-ttcard_ container)."""
+    with card(), st.container(key=f"ttcard_{key}"), st.expander(title):
         day = timetable_day_picker(key)
         when, _ = timetable_services()[day]
         tt = build(day)
+        st.markdown(
+            f"<div class='ebw-ttday'>{TIMETABLE_DAYS[day]}"
+            + (f"<span>the schedule for {when:%a}, {fmt_date(when)}</span>" if when else "")
+            + "</div>",
+            unsafe_allow_html=True,
+        )
         if tt.empty:
             st.caption(f"No buses scheduled here on {TIMETABLE_DAYS[day]}.")
             return
-        table(tt, hide_index=True, width="stretch", height=min(560, 38 + 35 * len(tt)))
+        link_table(
+            tt.to_dict("records"),
+            [
+                {
+                    "key": c,
+                    "label": c,
+                    # as wide as the longest heading or times, so nothing runs into the next
+                    # column; on a phone the table scrolls sideways
+                    "width": "minmax(max-content, 1fr)",
+                    "bold": i == 0,
+                    "sort": None,  # a timetable reads in its own order
+                }
+                for i, c in enumerate(tt.columns)
+            ],
+            max_height=560,
+            key=f"tt{key}",
+        )
         estimated = (
             " LTD's schedule fixes times only at timepoints; the times here are worked out "
             "from the timepoints either side, as trip planners do."
@@ -4110,6 +4152,5 @@ def timetable_card(title: str, key: str, build, note: str = "") -> None:
         )
         st.caption(
             (note + " " if note else "")
-            + f"From LTD's published schedule ({TIMETABLE_DAYS[day].lower()}, as on "
-            f"{fmt_date(when)}); holidays and detours can change it.{estimated}"
+            + f"From LTD's published schedule; holidays and detours can change it.{estimated}"
         )

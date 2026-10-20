@@ -8,6 +8,7 @@ test runner, the same database (DATABASE_URL) and the same code as `make app`.
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import os
@@ -111,6 +112,14 @@ def report(at, label: str, seconds: float) -> None:
     for i, df in enumerate(at.dataframe):
         v = df.value
         print(f"   table {i}: {v.shape[0]} rows × {v.shape[1]} cols {list(v.columns)[:8]}")
+    # the site's own tables (common.link_table, drawn as HTML): rows and headings
+    for i, h in enumerate(t for t in at.get("html") if "class='ebw-t'" in (t.proto.body or "")):
+        body = h.proto.body
+        rows = body.count("class='ebw-r'") + body.count("class='ebw-r'".replace("'", '"'))
+        head = body.split("ebw-r ebw-h'>", 1)[-1].split("</div></div>", 1)[0]
+        cols = [c for c in (re.sub(r"<[^>]+>", "|", head).split("|")) if c.strip()]
+        cols = [html.unescape(c) for c in dict.fromkeys(cols)]
+        print(f"   site table {i}: {rows} rows; headings {cols[:8]}")
     for i, ch in enumerate(at.get("plotly_chart")):
         try:
             spec = json.loads(ch.proto.spec)
@@ -327,7 +336,7 @@ def main() -> None:
         run_page(
             "views/accuracy.py",
             f"views/accuracy.py with stop {ex['stop_id']}",
-            {"pred_stop_id": ex["stop_id"]},
+            params={"stop": ex["stop_id"]},
         )
         run_page(
             "views/map.py",
