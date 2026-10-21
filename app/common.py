@@ -2095,11 +2095,13 @@ CHART_TEXT = "#31333f"  # Streamlit's text colour, so charts read as part of the
 CHART_GRID = "#e4e8ea"
 
 
-def show_chart(fig: go.Figure) -> None:
+def show_chart(fig: go.Figure, left: int | None = None) -> None:
     """Draw a Plotly chart the way every chart on the site is drawn: the page's font at a
     readable size, light grid lines, the legend above the plot on a phone, no toolbar, and no
     zooming or panning by accident (dragging a finger over a chart on a phone should scroll the
-    page); hovering still shows the numbers. Margins a chart sets itself are kept."""
+    page); hovering still shows the numbers. Margins a chart sets itself are kept. left: a
+    fixed left margin in pixels, the same for charts stacked one above the other so their
+    plots start at the same place (otherwise it grows to fit the axis labels)."""
     margin = {
         side: default
         for side, default in (("l", 10), ("r", 10), ("t", 30), ("b", 10))
@@ -2140,6 +2142,9 @@ def show_chart(fig: go.Figure) -> None:
 
     fig.for_each_xaxis(_no_empty_title)
     fig.for_each_yaxis(_no_empty_title)
+    if left is not None:
+        fig.update_layout(margin={"l": left})
+        fig.update_yaxes(automargin=False, title_standoff=8)
     if fig.layout.legend.title.text is not None and not str(fig.layout.legend.title.text).strip():
         fig.layout.legend.title.text = None
     st.plotly_chart(
@@ -4154,3 +4159,412 @@ def timetable_card(title: str, key: str, build, note: str = "") -> None:
             (note + " " if note else "")
             + f"From LTD's published schedule; holidays and detours can change it.{estimated}"
         )
+
+
+# ---------------------------------------- the predictions on show now, as they changed ----
+# Every value LTD's prediction for a trip at a stop has held (history and current), to join
+# to the trip-stops a chart follows.
+_PREDICTION_VALUES = """
+    select trip_id, start_date, stop_sequence, arrival_time, departure_time,
+           first_seen_at, last_seen_at
+    from rt.prediction_history
+    union all
+    select trip_id, start_date, stop_sequence, arrival_time, departure_time,
+           first_seen_at, last_seen_at
+    from rt.prediction_current
+"""
+
+# the buses due at one stop in the next 45 minutes, every prediction value each has held there,
+# with its timetable time there ({fv}: the schedule version in force)
+COMING_SQL = (
+    """
+    with coming as (
+        select trip_id, start_date, stop_sequence from rt.prediction_current
+        where stop_id = %s
+          and coalesce(arrival_time, departure_time)
+              between now() - interval '2 minutes' and now() + interval '45 minutes'
+          and last_seen_at > now() - interval '3 minutes'
+    )
+    select u.trip_id, r.route_short_name as route, t.trip_headsign as headsign,
+           u.first_seen_at, u.last_seen_at,
+           coalesce(u.arrival_time, u.departure_time) as predicted,
+           se.scheduled_arrival as scheduled
+    from ("""
+    + _PREDICTION_VALUES
+    + """) u
+    join coming c using (trip_id, start_date, stop_sequence)
+    join gtfs.trips t  on t.trip_id = u.trip_id and t.feed_version_id = {fv}
+    join gtfs.routes r on r.route_id = t.route_id and r.feed_version_id = {fv}
+    left join intermediate.int_scheduled_stop_events se
+      on se.service_date = c.start_date and se.trip_id = c.trip_id
+     and se.stop_sequence = c.stop_sequence
+    where coalesce(u.arrival_time, u.departure_time) is not null
+    order by u.trip_id, u.first_seen_at
+    """
+)
+
+# the buses on one route now (in one direction, {direction}), every prediction value each has
+# held for the end of its trip, with its timetable times at the start and the end: trips whose
+# scheduled start has come (or comes within 5 minutes) and whose end is not yet past
+ROUTE_NOW_SQL = (
+    """
+    with live as (
+        select p.trip_id, p.start_date, p.stop_sequence, p.stop_id
+        from rt.prediction_current p
+        join gtfs.trips t on t.trip_id = p.trip_id and t.feed_version_id = {fv}
+        join intermediate.int_scheduled_stop_events se
+          on se.service_date = p.start_date and se.trip_id = p.trip_id
+         and se.stop_sequence = p.stop_sequence and se.is_last_stop
+        where t.route_id = %s {direction}
+          and p.last_seen_at > now() - interval '3 minutes'
+          and coalesce(p.arrival_time, p.departure_time) > now() - interval '2 minutes'
+    )
+    select u.trip_id, t.trip_headsign as headsign, r.route_short_name as route,
+           s.stop_name as last_stop, u.first_seen_at, u.last_seen_at,
+           coalesce(u.arrival_time, u.departure_time) as predicted,
+           se.scheduled_arrival as scheduled, sf.scheduled_arrival as starts
+    from ("""
+    + _PREDICTION_VALUES
+    + """) u
+    join live c using (trip_id, start_date, stop_sequence)
+    join gtfs.trips t  on t.trip_id = u.trip_id and t.feed_version_id = {fv}
+    join gtfs.routes r on r.route_id = t.route_id and r.feed_version_id = {fv}
+    join gtfs.stops s  on s.stop_id = c.stop_id and s.feed_version_id = {fv}
+    join intermediate.int_scheduled_stop_events se
+      on se.service_date = c.start_date and se.trip_id = c.trip_id
+     and se.stop_sequence = c.stop_sequence
+    join intermediate.int_scheduled_stop_events sf
+      on sf.service_date = c.start_date and sf.trip_id = c.trip_id and sf.is_first_stop
+    where coalesce(u.arrival_time, u.departure_time) is not null
+      and sf.scheduled_arrival <= now() + interval '5 minutes'
+    order by u.trip_id, u.first_seen_at
+    """
+)
+
+
+def _local(s) -> pd.Series:
+    """UTC timestamps -> Eugene clock times without a zone, as the charts' time axes take them."""
+    return pd.to_datetime(pd.Series(s), utc=True).dt.tz_convert(LOCAL_TZ).dt.tz_localize(None)
+
+
+def _hm(t) -> str:
+    """'10:15 am'."""
+    return t.strftime("%I:%M %p").lstrip("0").lower()
+
+
+def _hms(t) -> str:
+    """'10:15:40 am': LTD's predictions are to the second (apps round them to the minute)."""
+    return t.strftime("%I:%M:%S %p").lstrip("0").lower()
+
+
+def _fit(lo, hi, least, share: float = 0.06, floor=None):
+    """An axis range around [lo, hi]: at least `least` wide (widened evenly about the middle),
+    then a margin of `share` of the width each side (at least `floor`), so the points sit
+    just inside the plot rather than on its edges or in a sea of blank space."""
+    span = hi - lo
+    if span < least:
+        lo, hi = lo - (least - span) / 2, hi + (least - span) / 2
+        span = least
+    pad = span * share
+    if floor is not None and pad < floor:
+        pad = floor
+    return [lo - pad, hi + pad]
+
+
+PREDICTION_MARKER = 13  # a dot where LTD's prediction changed: big enough to aim at
+
+
+def _live_lines(fig, x, y, name, colour, group, hovers) -> None:
+    """One bus's predictions as a step line: a dot at each value as LTD first said it, the line
+    running on to when it last said the latest one."""
+    fig.add_trace(
+        go.Scatter(
+            x=x,
+            y=y,
+            mode="lines+markers",
+            name=name,
+            legendgroup=group,
+            line={"color": colour, "width": LINE_MAIN, "shape": "hv"},
+            marker={"size": [PREDICTION_MARKER] * (len(x) - 1) + [0], "color": colour},
+            hovertext=hovers,
+            hoverinfo="text",
+        )
+    )
+
+
+def coming_now_chart(hist: pd.DataFrame) -> None:
+    """The buses coming to one stop now: for each, the arrival LTD predicted at each moment
+    (a solid step line, a dot where it changed, running on to when it was last said) and its
+    timetable time (dashed, the same colour); then a table of the same. hist: one row per
+    prediction value (trip_id, route, headsign, first_seen_at, last_seen_at, predicted,
+    scheduled)."""
+    hist = hist.copy()
+    hist["toward"] = clean_headsigns(hist)
+    trips = (
+        hist.groupby("trip_id")
+        .agg(
+            route=("route", "first"),
+            toward=("toward", "first"),
+            scheduled=("scheduled", "first"),
+            now=("predicted", "last"),
+        )
+        .sort_values("now")
+    )
+    # a bus is named by its route; where two coming buses share one, by its timetable time too
+    repeats = trips["route"].duplicated(keep=False)
+    names = {}
+    for trip, r in trips.iterrows():
+        name = f"Route {r['route']}"
+        if repeats[trip]:
+            due = _local([r["scheduled"] if pd.notna(r["scheduled"]) else r["now"]])[0]
+            name += f", due {_hm(due)}"
+        names[trip] = name
+    palette = [BRAND, *LINE_COLOURS]
+    fig = go.Figure()
+    xs: list = []
+    ys: list = []
+    dashed: list = []
+    for i, (trip, r) in enumerate(trips.iterrows()):
+        colour = palette[i % len(palette)]
+        g = hist[hist["trip_id"] == trip].sort_values("first_seen_at")
+        said = list(_local(g["first_seen_at"]))
+        pred = list(_local(g["predicted"]))
+        x = [*said, _local(g["last_seen_at"]).iloc[-1]]
+        y = [*pred, pred[-1]]
+        toward = f" → {r['toward']}" if r["toward"] else ""
+        _live_lines(
+            fig,
+            x,
+            y,
+            names[trip],
+            colour,
+            trip,
+            [
+                f"<b>{names[trip]}{toward}</b><br>at {_hms(a)} LTD said: arrives {_hms(p)}"
+                for a, p in zip(said, pred, strict=False)
+            ]
+            + [f"<b>{names[trip]}{toward}</b><br>still predicted: arrives {_hms(pred[-1])}"],
+        )
+        xs += x
+        ys += y
+        if pd.notna(r["scheduled"]):
+            sched = _local([r["scheduled"]])[0]
+            ys.append(sched)
+            dashed.append(
+                (sched, colour, f"<b>{names[trip]}{toward}</b><br>timetable: {_hm(sched)}")
+            )
+    minute = pd.Timedelta(minutes=1)
+    x_lo, x_hi = _fit(min(xs), max(xs), 5 * minute, share=0.03)
+    y_lo, y_hi = _fit(min(ys), max(ys), 4 * minute, floor=pd.Timedelta(seconds=20))
+    for sched, colour, hover in dashed:
+        fig.add_trace(
+            go.Scatter(
+                x=[x_lo, x_hi],
+                y=[sched, sched],
+                mode="lines",
+                showlegend=False,
+                line={"color": colour, "width": LINE_REF, "dash": "dash"},
+                hovertext=hover,
+                hoverinfo="text",
+            )
+        )
+    if dashed:  # one legend entry saying what the dashed lines are
+        fig.add_trace(
+            go.Scatter(
+                x=[None],
+                y=[None],
+                mode="lines",
+                name="Timetable (dashed)",
+                line={"color": REF_GREY, "width": LINE_REF, "dash": "dash"},
+                hoverinfo="skip",
+            )
+        )
+    fig.update_layout(
+        xaxis={"title": "When LTD said it", "range": [x_lo, x_hi], "tickformat": "%-I:%M"},
+        yaxis={
+            "title": "Predicted arrival here",
+            "range": [y_lo, y_hi],
+            "tickformat": "%-I:%M %p",
+        },
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0, "xanchor": "left"},
+        hovermode="closest",
+        height=440,
+    )
+    show_chart(fig)
+    first = hist.sort_values("first_seen_at").groupby("trip_id")["predicted"].first()
+    changes = hist.groupby("trip_id").size() - 1
+    rows = pd.DataFrame(
+        {
+            "Bus": [names[t] for t in trips.index],
+            "Toward": trips["toward"].to_numpy(),
+            "Now predicted": local_times(trips["now"]).to_numpy(),
+            "Timetable": local_times(trips["scheduled"]).to_numpy(),
+            "First predicted": local_times(first.reindex(trips.index)).to_numpy(),
+            "Changes": changes.reindex(trips.index).to_numpy(),
+        }
+    )
+    if is_mobile():  # what fits a phone's width: the bus, its two times, and the changes
+        rows = rows.drop(columns=["Toward", "First predicted"])
+    table(
+        rows,
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "Now predicted": col_time("Now predicted"),
+            "Timetable": col_time("Timetable"),
+            "First predicted": col_time("First predicted"),
+            "Changes": col_count(
+                "Changes", help="How many times LTD has changed this bus's prediction here."
+            ),
+        },
+    )
+
+
+@st.fragment(run_every=f"{POLL_SECONDS}s")
+def _coming_now_live(stop_id: str) -> None:
+    """The chart and table for one stop, redrawn with each update of LTD's feed. A failure is
+    said in the card, not left as an empty space."""
+    try:
+        hist = q_live(COMING_SQL.format(fv=current_fv()), (stop_id,))
+        if hist.empty:
+            st.info("No buses predicted for this stop in the next 45 minutes.")
+        else:
+            coming_now_chart(hist)
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"This chart couldn't be drawn: {type(exc).__name__}: {exc}")
+
+
+COMING_NOW_HELP = (
+    "Each solid line is a bus on its way here: the arrival time LTD predicted (up) at each "
+    "moment (across), to the second, as LTD gives it (apps round it to the minute). A flat "
+    "line is a prediction that held; a line that keeps stepping later is the prediction "
+    "correcting itself as the bus falls behind. The dashed line in the same colour is the "
+    "bus's time in the printed timetable."
+)
+
+
+def coming_now_card(stop_id: str | None, stop_name: str | None, picker=None) -> None:
+    """'Predictions for the buses coming to … now', in its own card. picker, if given, draws a
+    stop choice under the title (the Predictions page repeats its stop list there); with no
+    stop chosen, the card says to choose one."""
+    with card():
+        st.subheader(
+            f"Predictions for the buses coming to {stop_name} now"
+            if stop_id
+            else "Predictions for the buses coming to a stop now",
+            anchor="coming",
+            help=COMING_NOW_HELP,
+        )
+        if picker is not None:
+            picker()
+        if not stop_id:
+            st.info(
+                "Choose a stop to see the buses coming to it and how LTD's predictions for "
+                "them have changed."
+            )
+            return
+        _coming_now_live(stop_id)
+
+
+def route_now_chart(hist: pd.DataFrame) -> None:
+    """The buses on one route now: for each, how late LTD has predicted it will reach the end
+    of its trip, at each moment (a step line as on the stop chart). hist: one row per
+    prediction value (trip_id, headsign, route, last_stop, first_seen_at, last_seen_at,
+    predicted, scheduled, starts)."""
+    hist = hist.copy()
+    hist["toward"] = clean_headsigns(hist)
+    hist["late_min"] = (
+        pd.to_datetime(hist["predicted"], utc=True) - pd.to_datetime(hist["scheduled"], utc=True)
+    ).dt.total_seconds() / 60
+    trips = (
+        hist.groupby("trip_id")
+        .agg(
+            toward=("toward", "first"),
+            last_stop=("last_stop", "first"),
+            starts=("starts", "first"),
+            scheduled=("scheduled", "first"),
+            now=("late_min", "last"),
+        )
+        .sort_values("starts")
+    )
+    several_ways = trips["toward"].nunique() > 1
+    names = {
+        trip: f"{_hm(_local([r['starts']])[0])} bus"
+        + (f" to {r['toward']}" if several_ways and r["toward"] else "")
+        for trip, r in trips.iterrows()
+    }
+    palette = [BRAND, *LINE_COLOURS]
+    fig = go.Figure()
+    on_time_line(fig)
+    xs: list = []
+    ys: list = []
+    for i, (trip, r) in enumerate(trips.iterrows()):
+        colour = palette[i % len(palette)]
+        g = hist[hist["trip_id"] == trip].sort_values("first_seen_at")
+        said = list(_local(g["first_seen_at"]))
+        late = list(g["late_min"].astype(float))
+        pred = list(_local(g["predicted"]))
+        end = clean_stop_name(r["last_stop"])
+        x = [*said, _local(g["last_seen_at"]).iloc[-1]]
+        y = [*late, late[-1]]
+
+        def words(m: float) -> str:
+            return fmt_delay(m * 60)
+
+        _live_lines(
+            fig,
+            x,
+            y,
+            names[trip],
+            colour,
+            trip,
+            [
+                f"<b>{names[trip]}</b><br>at {_hms(a)} LTD said: reaches {end} at {_hms(p)}, "
+                f"{words(m)}"
+                for a, p, m in zip(said, pred, late, strict=False)
+            ]
+            + [f"<b>{names[trip]}</b><br>still predicted: {words(late[-1])} at {end}"],
+        )
+        xs += x
+        ys += y
+    minute = pd.Timedelta(minutes=1)
+    x_lo, x_hi = _fit(min(xs), max(xs), 5 * minute, share=0.03)
+    fig.update_layout(
+        xaxis={"title": "When LTD said it", "range": [x_lo, x_hi], "tickformat": "%-I:%M"},
+        yaxis=minutes_axis(ys, pad=0.4) | {"title": "At the end of its trip"},
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0, "xanchor": "left"},
+        hovermode="closest",
+        height=420,
+    )
+    show_chart(fig)
+
+
+@st.fragment(run_every=f"{POLL_SECONDS}s")
+def _route_now_live(route_id: str, direction: int | None) -> None:
+    try:
+        hist = q_live(
+            ROUTE_NOW_SQL.format(
+                fv=current_fv(),
+                direction="" if direction is None else "and t.direction_id = %s",
+            ),
+            (route_id, *(() if direction is None else (int(direction),))),
+        )
+        if hist.empty:
+            st.info("No buses on this route right now.")
+        else:
+            route_now_chart(hist)
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"This chart couldn't be drawn: {type(exc).__name__}: {exc}")
+
+
+def route_now_card(route_id: str, route_name: str, direction: int | None) -> None:
+    """'How late the buses on route … are running now', in its own card."""
+    with card():
+        st.subheader(
+            f"How late the buses on route {route_name} are running now",
+            help="Each line is a bus on the route now (in the direction chosen above): how late "
+            "LTD has predicted it will reach the end of its trip (up), at each moment (across). "
+            "A line climbing means the bus is falling behind; a flat one, holding its pace. "
+            "Hover a dot for the time LTD predicted, to the second.",
+        )
+        _route_now_live(route_id, direction)

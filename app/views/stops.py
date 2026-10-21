@@ -17,6 +17,7 @@ from common import (
     busy_stops,
     card,
     clean_headsigns,
+    coming_now_card,
     current_fv,
     data_note,
     day_label,
@@ -499,11 +500,9 @@ with card():
         "negative = early.",
     )
     stop_right_now()
-    st.page_link(
-        "views/accuracy.py",
-        label="How LTD's predictions for these buses have changed →",
-        query_params={"stop": stop_id},
-    )
+
+# ---- the predictions for the buses coming here, as they have changed ----------------------
+coming_now_card(stop_id, SNAME)
 
 # ---- the plain timetable, folded away: for reference --------------------------------------
 timetable_card(

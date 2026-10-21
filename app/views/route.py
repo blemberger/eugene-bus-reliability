@@ -58,6 +58,7 @@ from common import (
     recomputing_note,
     require_db,
     require_marts,
+    route_now_card,
     route_order,
     route_rank,
     route_tiles,
@@ -574,6 +575,9 @@ with card():
         "there, and how late that puts it against the timetable (negative = early).",
     )
     route_right_now()
+
+# ---- how late LTD expects each bus on the route to finish, as it has changed --------------
+route_now_card(route_id, route_name, direction)
 
 # ---- the plain timetable, folded away: for reference --------------------------------------
 if direction is not None:

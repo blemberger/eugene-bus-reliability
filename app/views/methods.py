@@ -95,6 +95,7 @@ cancellation flag, realtime trip ids that don't match the schedule. See the sect
 """)
 
 # ---- coverage & quality ----------------------------------------------------------------------
+COVERAGE_LEFT = 78  # room left of the two coverage charts for their axis labels and titles
 with card():
     st.subheader("How much of the service we measured")
     if not marts_ready():
@@ -127,6 +128,10 @@ with card():
             c2.metric(
                 "Bus arrivals measured, all days", f"{int(cov['stop_events_observed'].sum()):,}"
             )
+            # the two charts below share their days: the same span (each day's line point over
+            # the middle of its bar) and the same room for the numbers on the left, so a day in
+            # one sits right above the same day in the other
+            days_range = [-0.5, len(done) - 0.5]
             fig = go.Figure()
             fig.add_trace(
                 go.Scatter(
@@ -149,11 +154,11 @@ with card():
                     "dtick": 0.01 if low >= 0.9 else None,
                     "title": "Stops we timed",
                 },
-                xaxis={"type": "category", "title": ""},
+                xaxis={"type": "category", "title": "", "range": days_range},
                 showlegend=False,
                 height=320,
             )
-            show_chart(fig)
+            show_chart(fig, left=COVERAGE_LEFT)
             st.caption(
                 "Of the stops due on trips that ran, how many we timed; it should sit near 100%. "
                 "A dip means our measurement missed stops: gaps between a bus's GPS reports, "
@@ -175,12 +180,12 @@ with card():
                 )
             )
             fig2.update_layout(
-                xaxis={"type": "category", "title": ""},
+                xaxis={"type": "category", "title": "", "range": days_range},
                 yaxis={"title": "Trips"},
                 showlegend=False,
                 height=260,
             )
-            show_chart(fig2)
+            show_chart(fig2, left=COVERAGE_LEFT)
             st.caption(
                 "In LTD's timetable, but never in its live feed: usually a cancelled trip, "
                 "sometimes a bus whose tracker was off (the feed doesn't say which). These trips "
