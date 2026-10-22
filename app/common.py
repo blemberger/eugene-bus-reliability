@@ -4248,171 +4248,139 @@ def _local(s) -> pd.Series:
 
 
 def _hm(t) -> str:
-    """'10:15 am'."""
+    """'10:15 am', to the nearest minute (10:15:40 reads 10:16), as apps show predictions."""
+    t = pd.Timestamp(t).round("min")
     return t.strftime("%I:%M %p").lstrip("0").lower()
 
 
 def _hms(t) -> str:
-    """'10:15:40 am': LTD's predictions are to the second (apps round them to the minute)."""
-    return t.strftime("%I:%M:%S %p").lstrip("0").lower()
-
-
-def _fit(lo, hi, least, share: float = 0.06, floor=None):
-    """An axis range around [lo, hi]: at least `least` wide (widened evenly about the middle),
-    then a margin of `share` of the width each side (at least `floor`), so the points sit
-    just inside the plot rather than on its edges or in a sea of blank space."""
-    span = hi - lo
-    if span < least:
-        lo, hi = lo - (least - span) / 2, hi + (least - span) / 2
-        span = least
-    pad = span * share
-    if floor is not None and pad < floor:
-        pad = floor
-    return [lo - pad, hi + pad]
+    """'10:15:40 am': LTD's predictions are to the second; shown so in the hover text, so the
+    time and the minutes late beside it agree exactly."""
+    return pd.Timestamp(t).strftime("%I:%M:%S %p").lstrip("0").lower()
 
 
 PREDICTION_MARKER = 13  # a dot where LTD's prediction changed: big enough to aim at
 
 
-def _live_lines(fig, x, y, name, colour, group, hovers) -> None:
-    """One bus's predictions as a step line: a dot at each value as LTD first said it, the line
-    running on to when it last said the latest one."""
-    fig.add_trace(
-        go.Scatter(
-            x=x,
-            y=y,
-            mode="lines+markers",
-            name=name,
-            legendgroup=group,
-            line={"color": colour, "width": LINE_MAIN, "shape": "hv"},
-            marker={"size": [PREDICTION_MARKER] * (len(x) - 1) + [0], "color": colour},
-            hovertext=hovers,
-            hoverinfo="text",
-        )
-    )
-
-
-def coming_now_chart(hist: pd.DataFrame) -> None:
-    """The buses coming to one stop now: for each, the arrival LTD predicted at each moment
-    (a solid step line, a dot where it changed, running on to when it was last said) and its
-    timetable time (dashed, the same colour); then a table of the same. hist: one row per
-    prediction value (trip_id, route, headsign, first_seen_at, last_seen_at, predicted,
-    scheduled)."""
-    hist = hist.copy()
-    hist["toward"] = clean_headsigns(hist)
-    trips = (
-        hist.groupby("trip_id")
-        .agg(
-            route=("route", "first"),
-            toward=("toward", "first"),
-            scheduled=("scheduled", "first"),
-            now=("predicted", "last"),
-        )
-        .sort_values("now")
-    )
-    # a bus is named by its route; where two coming buses share one, by its timetable time too
-    repeats = trips["route"].duplicated(keep=False)
-    names = {}
-    for trip, r in trips.iterrows():
-        name = f"Route {r['route']}"
-        if repeats[trip]:
-            due = _local([r["scheduled"] if pd.notna(r["scheduled"]) else r["now"]])[0]
-            name += f", due {_hm(due)}"
-        names[trip] = name
+def lateness_now_chart(hist: pd.DataFrame, label_of, hover_of, place: str, y_title: str):
+    """Buses on their way, one line each: how late LTD's prediction put the bus against the
+    timetable (up; on time is the dashed line) at each moment (across), stepping where the
+    prediction changed (a dot) and running on to when LTD last said it. Measured from on time
+    rather than drawn as clock times, so a few buses due far apart still show small changes.
+    hist: one row per prediction value (trip_id, first_seen_at, last_seen_at, predicted,
+    scheduled, and what label_of / hover_of read); label_of(row) names a bus in the legend,
+    hover_of(row) heads its hover text; place: where the prediction is for ('here', 'at
+    Thurston Station')."""
+    hist = hist[hist["scheduled"].notna()].copy()
+    hist["late_s"] = (
+        pd.to_datetime(hist["predicted"], utc=True) - pd.to_datetime(hist["scheduled"], utc=True)
+    ).dt.total_seconds()
+    first = hist.sort_values("first_seen_at").groupby("trip_id", sort=False).first()
+    order = first.sort_values("scheduled").index
     palette = [BRAND, *LINE_COLOURS]
     fig = go.Figure()
+    on_time_line(fig)
     xs: list = []
     ys: list = []
-    dashed: list = []
-    for i, (trip, r) in enumerate(trips.iterrows()):
+    for i, trip in enumerate(order):
         colour = palette[i % len(palette)]
         g = hist[hist["trip_id"] == trip].sort_values("first_seen_at")
+        row = first.loc[trip]
+        name, head = label_of(row), hover_of(row)
         said = list(_local(g["first_seen_at"]))
         pred = list(_local(g["predicted"]))
+        late = [v / 60 for v in g["late_s"].astype(float)]
         x = [*said, _local(g["last_seen_at"]).iloc[-1]]
-        y = [*pred, pred[-1]]
-        toward = f" → {r['toward']}" if r["toward"] else ""
-        _live_lines(
-            fig,
-            x,
-            y,
-            names[trip],
-            colour,
-            trip,
-            [
-                f"<b>{names[trip]}{toward}</b><br>at {_hms(a)} LTD said: arrives {_hms(p)}"
-                for a, p in zip(said, pred, strict=False)
-            ]
-            + [f"<b>{names[trip]}{toward}</b><br>still predicted: arrives {_hms(pred[-1])}"],
-        )
-        xs += x
-        ys += y
-        if pd.notna(r["scheduled"]):
-            sched = _local([r["scheduled"]])[0]
-            ys.append(sched)
-            dashed.append(
-                (sched, colour, f"<b>{names[trip]}{toward}</b><br>timetable: {_hm(sched)}")
-            )
-    minute = pd.Timedelta(minutes=1)
-    x_lo, x_hi = _fit(min(xs), max(xs), 5 * minute, share=0.03)
-    y_lo, y_hi = _fit(min(ys), max(ys), 4 * minute, floor=pd.Timedelta(seconds=20))
-    for sched, colour, hover in dashed:
+        y = [*late, late[-1]]
         fig.add_trace(
             go.Scatter(
-                x=[x_lo, x_hi],
-                y=[sched, sched],
-                mode="lines",
-                showlegend=False,
-                line={"color": colour, "width": LINE_REF, "dash": "dash"},
-                hovertext=hover,
+                x=x,
+                y=y,
+                mode="lines+markers",
+                name=name,
+                line={"color": colour, "width": LINE_MAIN, "shape": "hv"},
+                marker={"size": [PREDICTION_MARKER] * len(said) + [0], "color": colour},
+                hovertext=[
+                    f"<b>{head}</b><br>At {_hm(a)}, LTD predicted {_hms(p)} {place}:"
+                    f"<br>{fmt_delay(m * 60)}"
+                    for a, p, m in zip(said, pred, late, strict=False)
+                ]
+                + [
+                    f"<b>{head}</b><br>Still predicted {_hms(pred[-1])} {place}:"
+                    f"<br>{fmt_delay(late[-1] * 60)}"
+                ],
                 hoverinfo="text",
             )
         )
-    if dashed:  # one legend entry saying what the dashed lines are
-        fig.add_trace(
-            go.Scatter(
-                x=[None],
-                y=[None],
-                mode="lines",
-                name="Timetable (dashed)",
-                line={"color": REF_GREY, "width": LINE_REF, "dash": "dash"},
-                hoverinfo="skip",
-            )
-        )
+        xs += x
+        ys += y
+    if not xs:
+        return None
+    lo, hi = min(xs), max(xs)
+    if hi - lo < pd.Timedelta(minutes=5):
+        lo = hi - pd.Timedelta(minutes=5)
+    pad = (hi - lo) * 0.03
     fig.update_layout(
-        xaxis={"title": "When LTD said it", "range": [x_lo, x_hi], "tickformat": "%-I:%M"},
-        yaxis={
-            "title": "Predicted arrival here",
-            "range": [y_lo, y_hi],
-            "tickformat": "%-I:%M %p",
+        xaxis={
+            "title": "When LTD predicted it",
+            "range": [lo - pad, hi + pad],
+            "tickformat": "%-I:%M",
         },
+        yaxis=minutes_axis(ys, pad=0.4) | {"title": y_title},
+        # named even when there is one bus, so its name is there without hovering
+        showlegend=True,
         legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0, "xanchor": "left"},
         hovermode="closest",
-        height=440,
+        height=420,
     )
+    return fig
+
+
+def coming_now_chart(hist: pd.DataFrame) -> None:
+    """The buses coming to one stop now (lateness_now_chart), then a table of the same. hist:
+    one row per prediction value (trip_id, route, headsign, first_seen_at, last_seen_at,
+    predicted, scheduled)."""
+    hist = hist.copy()
+    hist["toward"] = clean_headsigns(hist)
+
+    def due(r) -> str:
+        return _hm(_local([r["scheduled"]])[0])
+
+    fig = lateness_now_chart(
+        hist,
+        lambda r: f"Route {r['route']}, due {due(r)}",
+        lambda r: (
+            f"Route {r['route']}"
+            + (f" to {r['toward']}" if r["toward"] else "")
+            + f", due here {due(r)}"
+        ),
+        "here",
+        "Predicted, against the timetable",
+    )
+    if fig is None:
+        st.info("None of the buses coming here has a time in the timetable to compare with.")
+        return
     show_chart(fig)
-    first = hist.sort_values("first_seen_at").groupby("trip_id")["predicted"].first()
+    last = hist.sort_values("first_seen_at").groupby("trip_id").last().sort_values("scheduled")
     changes = hist.groupby("trip_id").size() - 1
     rows = pd.DataFrame(
         {
-            "Bus": [names[t] for t in trips.index],
-            "Toward": trips["toward"].to_numpy(),
-            "Now predicted": local_times(trips["now"]).to_numpy(),
-            "Timetable": local_times(trips["scheduled"]).to_numpy(),
-            "First predicted": local_times(first.reindex(trips.index)).to_numpy(),
-            "Changes": changes.reindex(trips.index).to_numpy(),
+            "Route": last["route"].astype(str).to_numpy(),
+            "Toward": last["toward"].to_numpy(),
+            "Timetable": local_times(last["scheduled"]).to_numpy(),
+            "Now predicted": local_times(last["predicted"]).to_numpy(),
+            "Changes": changes.reindex(last.index).to_numpy(),
         }
     )
-    if is_mobile():  # what fits a phone's width: the bus, its two times, and the changes
-        rows = rows.drop(columns=["Toward", "First predicted"])
+    if is_mobile():  # what fits a phone's width
+        rows = rows.drop(columns=["Toward"])
     table(
         rows,
         hide_index=True,
         width="stretch",
         column_config={
-            "Now predicted": col_time("Now predicted"),
             "Timetable": col_time("Timetable"),
-            "First predicted": col_time("First predicted"),
+            "Now predicted": col_time("Now predicted"),
             "Changes": col_count(
                 "Changes", help="How many times LTD has changed this bus's prediction here."
             ),
@@ -4435,11 +4403,10 @@ def _coming_now_live(stop_id: str) -> None:
 
 
 COMING_NOW_HELP = (
-    "Each solid line is a bus on its way here: the arrival time LTD predicted (up) at each "
-    "moment (across), to the second, as LTD gives it (apps round it to the minute). A flat "
-    "line is a prediction that held; a line that keeps stepping later is the prediction "
-    "correcting itself as the bus falls behind. The dashed line in the same colour is the "
-    "bus's time in the printed timetable."
+    "Each line is a bus on its way here, named by its time in the timetable. Up: how late "
+    "LTD's prediction for it was against that time (the dashed line is on time). Across: when "
+    "LTD made that prediction. A dot is where the prediction changed; a line climbing means "
+    "the bus is falling behind."
 )
 
 
@@ -4466,79 +4433,6 @@ def coming_now_card(stop_id: str | None, stop_name: str | None, picker=None) -> 
         _coming_now_live(stop_id)
 
 
-def route_now_chart(hist: pd.DataFrame) -> None:
-    """The buses on one route now: for each, how late LTD has predicted it will reach the end
-    of its trip, at each moment (a step line as on the stop chart). hist: one row per
-    prediction value (trip_id, headsign, route, last_stop, first_seen_at, last_seen_at,
-    predicted, scheduled, starts)."""
-    hist = hist.copy()
-    hist["toward"] = clean_headsigns(hist)
-    hist["late_min"] = (
-        pd.to_datetime(hist["predicted"], utc=True) - pd.to_datetime(hist["scheduled"], utc=True)
-    ).dt.total_seconds() / 60
-    trips = (
-        hist.groupby("trip_id")
-        .agg(
-            toward=("toward", "first"),
-            last_stop=("last_stop", "first"),
-            starts=("starts", "first"),
-            scheduled=("scheduled", "first"),
-            now=("late_min", "last"),
-        )
-        .sort_values("starts")
-    )
-    several_ways = trips["toward"].nunique() > 1
-    names = {
-        trip: f"{_hm(_local([r['starts']])[0])} bus"
-        + (f" to {r['toward']}" if several_ways and r["toward"] else "")
-        for trip, r in trips.iterrows()
-    }
-    palette = [BRAND, *LINE_COLOURS]
-    fig = go.Figure()
-    on_time_line(fig)
-    xs: list = []
-    ys: list = []
-    for i, (trip, r) in enumerate(trips.iterrows()):
-        colour = palette[i % len(palette)]
-        g = hist[hist["trip_id"] == trip].sort_values("first_seen_at")
-        said = list(_local(g["first_seen_at"]))
-        late = list(g["late_min"].astype(float))
-        pred = list(_local(g["predicted"]))
-        end = clean_stop_name(r["last_stop"])
-        x = [*said, _local(g["last_seen_at"]).iloc[-1]]
-        y = [*late, late[-1]]
-
-        def words(m: float) -> str:
-            return fmt_delay(m * 60)
-
-        _live_lines(
-            fig,
-            x,
-            y,
-            names[trip],
-            colour,
-            trip,
-            [
-                f"<b>{names[trip]}</b><br>at {_hms(a)} LTD said: reaches {end} at {_hms(p)}, "
-                f"{words(m)}"
-                for a, p, m in zip(said, pred, late, strict=False)
-            ]
-            + [f"<b>{names[trip]}</b><br>still predicted: {words(late[-1])} at {end}"],
-        )
-        xs += x
-        ys += y
-    minute = pd.Timedelta(minutes=1)
-    x_lo, x_hi = _fit(min(xs), max(xs), 5 * minute, share=0.03)
-    fig.update_layout(
-        xaxis={"title": "When LTD said it", "range": [x_lo, x_hi], "tickformat": "%-I:%M"},
-        yaxis=minutes_axis(ys, pad=0.4) | {"title": "At the end of its trip"},
-        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0, "xanchor": "left"},
-        hovermode="closest",
-        height=420,
-    )
-    show_chart(fig)
-
-
 @st.fragment(run_every=f"{POLL_SECONDS}s")
 def _route_now_live(route_id: str, direction: int | None) -> None:
     try:
@@ -4551,8 +4445,28 @@ def _route_now_live(route_id: str, direction: int | None) -> None:
         )
         if hist.empty:
             st.info("No buses on this route right now.")
+            return
+        hist = hist.copy()
+        hist["toward"] = clean_headsigns(hist)
+        hist["end"] = [clean_stop_name(v) for v in hist["last_stop"]]
+
+        def due(r) -> str:
+            return _hm(_local([r["scheduled"]])[0])
+
+        def where(r) -> str:
+            return r["toward"] or r["end"]
+
+        fig = lateness_now_chart(
+            hist,
+            lambda r: f"Due at {where(r)} {due(r)}",
+            lambda r: f"Bus due at {r['end']} at {due(r)}",
+            "there",
+            "Predicted at the end of the line",
+        )
+        if fig is None:
+            st.info("No buses on this route right now.")
         else:
-            route_now_chart(hist)
+            show_chart(fig)
     except Exception as exc:  # noqa: BLE001
         st.error(f"This chart couldn't be drawn: {type(exc).__name__}: {exc}")
 
@@ -4562,9 +4476,9 @@ def route_now_card(route_id: str, route_name: str, direction: int | None) -> Non
     with card():
         st.subheader(
             f"How late the buses on route {route_name} are running now",
-            help="Each line is a bus on the route now (in the direction chosen above): how late "
-            "LTD has predicted it will reach the end of its trip (up), at each moment (across). "
-            "A line climbing means the bus is falling behind; a flat one, holding its pace. "
-            "Hover a dot for the time LTD predicted, to the second.",
+            help="Each line is a bus on the route now (in the direction chosen above), named by "
+            "the time the timetable has it reach the end of the line. Up: how late LTD's "
+            "prediction puts it there against that time (the dashed line is on time). Across: "
+            "when LTD made that prediction. A line climbing means the bus is falling behind.",
         )
         _route_now_live(route_id, direction)

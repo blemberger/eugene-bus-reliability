@@ -1,5 +1,5 @@
-"""One route's report card: its stops, lateness by hour, delay along the line, headways,
-trend and predictions.
+"""One route's report card: its stops, lateness by hour, delay along the line, trend,
+predictions and the buses on it now.
 
 Reached from the Routes table or directly at /route?route=<route_id> (bookmarkable).
 """
@@ -35,7 +35,6 @@ from common import (
     fmt_delay,
     fmt_range,
     headline_metrics,
-    hour_label,
     is_mobile,
     late_minutes,
     lateness,
@@ -63,7 +62,6 @@ from common import (
     route_rank,
     route_tiles,
     route_timetable,
-    service_hour_key,
     service_today,
     show_chart,
     stop_choices,
@@ -367,119 +365,6 @@ with card():
             hovermode="closest",
         )
         show_chart(fig)
-
-# ---- waiting, on a frequent route: riders turn up rather than check the time -------------
-# For a rider arriving at a random moment, the average wait is sum(gap²) / (2 · sum(gap)) over
-# the gaps between buses: uneven gaps make it longer than half the scheduled gap, because more
-# riders arrive during the long gaps. The same from the scheduled gaps is the wait the
-# timetable promises.
-head = q(
-    f"""
-    select extract(hour from scheduled_arrival at time zone 'America/Los_Angeles')::int as hour_local,
-           count(*) as n,
-           percentile_cont(0.5) within group (order by scheduled_headway_s) as sched,
-           sum(observed_headway_s::float8 ^ 2) / (2 * sum(observed_headway_s)) as wait,
-           sum(scheduled_headway_s::float8 ^ 2) / (2 * sum(scheduled_headway_s)) as wait_sched,
-           count(*) filter (where observed_headway_s < 0.5 * scheduled_headway_s) as bunched,
-           count(*) filter (where observed_headway_s > 1.5 * scheduled_headway_s) as gapped
-    from (
-        select *, case extract(isodow from service_date)
-                      when 6 then 'saturday' when 7 then 'sunday' else 'weekday' end as weekday_type
-        from intermediate.int_headways
-    ) h
-    where route_id = %s and service_date >= %s and observed_headway_s > 0
-      and scheduled_headway_s > 0 and scheduled_headway_s <= 1200 {wt_clause} {dir_clause}
-    group by 1 having count(*) >= {MIN_RANGE} order by 1
-    """,
-    (route_id, start, *wt_params, *dir_params),
-)
-if not head.empty:
-    with card():
-        head = head.assign(_k=head["hour_local"].map(service_hour_key)).sort_values("_k")
-        st.subheader(
-            f"Waiting for route {route_name}{days_suffix()}",
-            help="On a route scheduled every 20 minutes or better, most riders just go to the "
-            "stop rather than check the time, so what counts is how long they wait. Average "
-            "wait: for a rider who turns up at any moment, from the real gaps between buses; "
-            "uneven gaps make it longer, because more riders turn up during the long gaps. "
-            "On schedule: the same if every bus kept to the timetable. Bunched: buses that "
-            "came less than half the scheduled gap after the one before; big gaps: more than "
-            "1.5 times the scheduled gap. Hours on the frequent schedule only.",
-        )
-        link_table(
-            [
-                {
-                    "hover": f"{int(r.n):,} gaps between buses measured",
-                    "hour": hour_label(int(r.hour_local)),
-                    "hour_s": service_hour_key(int(r.hour_local)),
-                    "sched": f"{r.sched / 60:.0f} min",
-                    "sched_s": float(r.sched),
-                    "wait": f"{r.wait / 60:.1f} min",
-                    "wait_s": float(r.wait),
-                    "wait_sched": f"{r.wait_sched / 60:.1f} min",
-                    "wait_sched_s": float(r.wait_sched),
-                    "bunched": f"{r.bunched / r.n:.0%}",
-                    "bunched_s": float(r.bunched / r.n),
-                    "gapped": f"{r.gapped / r.n:.0%}",
-                    "gapped_s": float(r.gapped / r.n),
-                }
-                for r in head.itertuples()
-            ],
-            [
-                {
-                    "key": "hour",
-                    "label": "Hour",
-                    "width": "minmax(4em, 1fr)",
-                    "bold": True,
-                    "sort": "hour_s",
-                    "first": "asc",
-                },
-                {
-                    "key": "sched",
-                    "label": "Every",
-                    "width": "minmax(4em, 1fr)",
-                    "num": True,
-                    "sort": "sched_s",
-                    "help": "How often the timetable has a bus.",
-                },
-                {
-                    "key": "wait",
-                    "label": "Average wait",
-                    "width": "minmax(6em, 1fr)",
-                    "num": True,
-                    "sort": "wait_s",
-                    "help": "For a rider who turns up at any moment, from the real gaps.",
-                },
-                {
-                    "key": "wait_sched",
-                    "label": "On schedule",
-                    "width": "minmax(6em, 1fr)",
-                    "num": True,
-                    "sort": "wait_sched_s",
-                    "help": "The average wait if every bus kept to the timetable.",
-                },
-                {
-                    "key": "bunched",
-                    "label": "Bunched",
-                    "width": "minmax(4.5em, 1fr)",
-                    "num": True,
-                    "sort": "bunched_s",
-                    "help": "Buses less than half the scheduled gap after the one before.",
-                },
-                {
-                    "key": "gapped",
-                    "label": "Big gaps",
-                    "width": "minmax(4.5em, 1fr)",
-                    "num": True,
-                    "sort": "gapped_s",
-                    "help": "Gaps more than 1.5 times the scheduled one.",
-                },
-            ],
-            max_height=520,
-            key="route_headways",
-            default_sort="hour:asc",
-        )
-
 
 # ---- the predictions (drawn under the filters) and the trend: every stop on the route, or one
 with pred_slot:

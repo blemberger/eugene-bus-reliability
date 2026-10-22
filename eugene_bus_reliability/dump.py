@@ -1415,30 +1415,6 @@ def main(settings: Settings, raw: bool = False) -> None:
         """,
         )
 
-        section(
-            "WAITING (route pages): the routes with hours scheduled every 20 min or better, last "
-            "30 days, all days (each such hour with 10+ gaps is a row of 'Waiting for route X')"
-        )
-        show(
-            cur,
-            """
-            select r.route_short_name as route, count(*) as hours,
-                   min(h.sched) / 60 as most_frequent_min
-            from (
-                select route_id,
-                       extract(hour from scheduled_arrival at time zone 'America/Los_Angeles') hr,
-                       percentile_cont(0.5) within group (order by scheduled_headway_s) as sched
-                from intermediate.int_headways
-                where service_date >= (now() at time zone 'America/Los_Angeles')::date - 29
-                  and observed_headway_s > 0 and scheduled_headway_s > 0
-                  and scheduled_headway_s <= 1200
-                group by 1, 2 having count(*) >= 10
-            ) h
-            join (select distinct route_id, route_short_name from gtfs.routes) r using (route_id)
-            group by 1 order by 1
-            """,
-        )
-
         section("CANCELLED TRIPS: does LTD's feed flag them? (trip updates marked CANCELED)")
         show(
             cur,

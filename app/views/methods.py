@@ -79,16 +79,13 @@ trip's first stop and at timepoints, where an early bus waits, our GPS time can 
 own recorded departure is sometimes just the scheduled time, so there the later of the two is used. Everywhere else
 our GPS time is used, which in practice is when the bus goes past or pulls away.
 
-**Headways.** On routes scheduled every 20 minutes or better, the gap between consecutive buses at a stop is compared to
-the scheduled gap. Bunched = under half the scheduled gap; big gap = over 1.5×.
-
 **Excluded.** Trips with no realtime data; stops with no bounded observed arrival; arrivals more than 30 minutes early or
 90 minutes late against the schedule, which in practice means a bus reporting the wrong trip rather than real service
 (counted as "Implausible" in the coverage table below); arrivals whose time can't be pinned down to within 2 minutes
 because the bus's reports around that stop were far apart, usually during a feed outage ("Imprecise" below);
 stops where, trip after trip, our GPS time is more than 2 minutes out of line with the stops just before and after
 it, usually a stop whose mapped position isn't where buses really stop ("Doubtful stop" below);
-predictions more than 90 minutes out or made after the bus had arrived; the first stop of a trip for headway purposes.
+predictions more than 90 minutes out or made after the bus had arrived.
 
 **Known failure modes we measure rather than assume.** Feed outages, vehicles with stale GPS, trips cancelled without a
 cancellation flag, realtime trip ids that don't match the schedule. See the sections below.
