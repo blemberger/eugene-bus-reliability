@@ -23,7 +23,6 @@ from common import (
     days_suffix,
     filters_again,
     fmt_date,
-    fmt_off,
     hour_label,
     link_table,
     not_enough,
@@ -108,6 +107,27 @@ with chart_slot, card():
         show_chart(fig0)
 
 
+# ---- how far ahead: one choice for the time-of-day chart and both tables, its buttons shown
+# above each, so changing any of them changes all three
+AHEAD_CHOICES = {"2 min": 2, "5 min": 5, "10 min": 10, "15 min": 15}
+
+
+def ahead_choice(key: str) -> int:
+    """The 'Predictions made this far ahead' buttons, kept to the page's one choice (in
+    st.session_state['pred_ahead']): minutes away."""
+    chosen = st.session_state.get("pred_ahead", "5 min")
+    st.session_state[key] = chosen
+
+    def keep() -> None:
+        if st.session_state.get(key):  # clicking the chosen button again changes nothing
+            st.session_state["pred_ahead"] = st.session_state[key]
+
+    st.segmented_control(
+        "Predictions made this far ahead", list(AHEAD_CHOICES), key=key, on_change=keep
+    )
+    return AHEAD_CHOICES[st.session_state.get("pred_ahead", "5 min")]
+
+
 # ---- by time of day ---------------------------------------------------------------------
 with card():
     st.subheader(
@@ -119,17 +139,7 @@ with card():
         f"arrival can be timed at every stop.) Hours with fewer than {MIN_RANGE} bus arrivals "
         f"are left out. {PERIOD}.",
     )
-    AHEAD_CHOICES = {"2 min": (1, 2), "5 min": (5, 5), "10 min": (10, 10), "15 min": (15, 15)}
-    ahead = (
-        st.segmented_control(
-            "Predictions made this far ahead",
-            list(AHEAD_CHOICES),
-            default="5 min",
-            key="tod_ahead",
-        )
-        or "5 min"
-    )
-    lo, hi = AHEAD_CHOICES[ahead]
+    lo = hi = ahead_choice("tod_ahead")
     clause, params = day_sql(wt)
     if scope.stop_id:
         # one stop: from the arrivals themselves (the daily table has no stops)
@@ -211,31 +221,28 @@ with card():
 
 
 # ---- tables: each route, each stop -------------------------------------------------------
-# the signed running counts only where the tables use them (5 minutes away and the timetable):
-# adding up the others too made the stops table's query twice as slow
-SIGNED_5 = ", ".join(
-    f"sum({signed_col(t)}) filter (where basis = 'timetable' or ahead_min = 5) as {signed_col(t)}"
-    for t in SIGNED_THRESHOLDS
-)
+SIGNED_SUMS = ", ".join(f"sum({signed_col(t)}) as {signed_col(t)}" for t in SIGNED_THRESHOLDS)
 
 
-def off_by(key: str, where: str, params: tuple, daily: bool) -> pd.DataFrame:
-    """Average minutes off per `key` (route_id or stop_id) at 5, 10 and 15 minutes away and for
-    the timetable, for the page's period and days."""
+def off_by(key: str, where: str, params: tuple, daily: bool, ahead: int) -> pd.DataFrame:
+    """Average minutes off per `key` (route_id or stop_id) when the prediction said `ahead`
+    minutes away (basis 'sign') and for the timetable on the same arrivals (basis 'timetable',
+    counted once per arrival, so its n is the number of arrivals), for the page's period and
+    days."""
     clause, wt_params = day_sql(wt)
     table_name = "mart_prediction_daily" if daily else "mart_prediction_stop_daily"
     try:
         return q(
             f"""
-            select {key} as id, basis, ahead_min, sum(n) as n,
+            select {key} as id, basis, sum(n) as n,
                    sum(sum_abs_s)::float8 / nullif(sum(n), 0) as mean_abs_s,
-                   {SIGNED_5}
+                   {SIGNED_SUMS}
             from marts.{table_name}
             where service_date >= %s {clause} {where}
-              and {key} is not null and (basis = 'timetable' or ahead_min in (5, 10, 15))
-            group by 1, 2, 3
+              and {key} is not null and (basis = 'timetable' or ahead_min = %s)
+            group by 1, 2
             """,
-            (start, *wt_params, *params),
+            (start, *wt_params, *params, ahead),
         )
     except Exception:  # noqa: BLE001 — the table is being rebuilt
         return pd.DataFrame()
@@ -250,30 +257,32 @@ def fmt_vs(seconds: float, what: str) -> str:
 
 
 def prediction_table(
-    off: pd.DataFrame, first_cols: list[dict], row_of, key: str, sort: str | None, min_n: int = 20
+    off: pd.DataFrame,
+    first_cols: list[dict],
+    row_of,
+    key: str,
+    sort: str | None,
+    ahead: int,
+    min_n: int = 20,
 ) -> None:
-    """A table of how far off the predictions were when they said 5 minutes away, beside the
-    printed timetable on the same arrivals, one row per id in `off` (off_by()): minutes off on
-    average and the 8-in-10 strip for each (10 minutes away is in the row's hover text). The
-    strips share one scale, so a narrow prediction strip beside a wide timetable one shows the
-    prediction doing better. row_of(id, n) gives the row's href, hover (which carries the number
-    of arrivals) and first columns' values. With no sort, the rows come busiest first, as the
-    stop tables do."""
+    """A table of how far off the predictions were when they said `ahead` minutes away, beside
+    the printed timetable on the same arrivals, one row per id in `off` (off_by()): minutes off
+    on average and the 8-in-10 strip for each. The strips share one scale, so a narrow
+    prediction strip beside a wide timetable one shows the prediction doing better. row_of(id,
+    n) gives the row's href, hover (which carries the number of arrivals) and first columns'
+    values. With no sort, the rows come busiest first, as the stop tables do."""
     if off.empty:
         st.caption(not_enough(start, wt, "measured bus arrivals"))
         return
     off = off.assign(id=off["id"].astype(str))
-    at = {
-        k: off[(off["basis"] == "sign") & (off["ahead_min"] == k)].set_index("id")
-        for k in (5, 10, 15)
-    }
+    told = off[off["basis"] == "sign"].set_index("id")
     tt = off[off["basis"] == "timetable"].set_index("id")
-    ids = [i for i in tt.index if i in at[15].index and at[15].loc[i, "n"] >= min_n]
+    ids = [i for i in tt.index if i in told.index and tt.loc[i, "n"] >= min_n]
     if not ids:
         st.caption(not_enough(start, wt, "measured bus arrivals"))
         return
     if sort is None:
-        ids.sort(key=lambda i: -int(at[15].loc[i, "n"]))
+        ids.sort(key=lambda i: -int(tt.loc[i, "n"]))
 
     def spread(frame: pd.DataFrame, i: str) -> tuple:
         """(average seconds off, typical, low end, high end of the 8 in 10), signed seconds."""
@@ -287,7 +296,7 @@ def prediction_table(
             signed_percentile(r, 0.9),
         )
 
-    vals = {i: (spread(at[5], i), spread(tt, i)) for i in ids}
+    vals = {i: (spread(told, i), spread(tt, i)) for i in ids}
     ends = pd.DataFrame(
         [(v[2], v[3]) for vs in vals.values() for v in vs], columns=["p10", "p90"]
     ).dropna()
@@ -296,14 +305,11 @@ def prediction_table(
     rows = []
     for i in ids:
         (p_off, p_med, p_lo, p_hi), (t_off, t_med, t_lo, t_hi) = vals[i]
-        base = row_of(i, int(at[15].loc[i, "n"]))
-        ten = at[10].loc[i, "mean_abs_s"] if i in at[10].index else None
-        ten = None if ten is None or pd.isna(ten) else float(ten)
+        base = row_of(i, int(tt.loc[i, "n"]))
         if p_med is not None:
-            base["hover"] += f"; 5 minutes away, the typical bus came {fmt_vs(p_med, 'predicted')}"
-        # 10 minutes away: here, as the chart above shows every distance
-        if ten is not None:
-            base["hover"] += f"; 10 minutes away, {fmt_off(ten)} off on average"
+            base["hover"] += (
+                f"; {ahead} minutes away, the typical bus came {fmt_vs(p_med, 'predicted')}"
+            )
         rows.append(
             {
                 **base,
@@ -320,10 +326,10 @@ def prediction_table(
         *first_cols,
         {
             "key": "p_off",
-            "label": "Prediction, 5 min away",
+            "label": f"Prediction, {ahead} min away",
             "width": "9.6em",
             "num": True,
-            "help": "When LTD's prediction said the bus was 5 minutes away. " + OFF,
+            "help": f"When LTD's prediction said the bus was {ahead} minutes away. " + OFF,
             "sort": "p_off_s",
             "first": "asc",
         },
@@ -332,7 +338,7 @@ def prediction_table(
             "label": "8 in 10 buses vs prediction",
             "width": "minmax(13em, 2fr)",
             "html": True,
-            "help": "Against the prediction when it said 5 minutes away (the dashed line: the "
+            "help": f"Against the prediction when it said {ahead} minutes away (the dashed line: the "
             "predicted time; left of it, earlier than predicted). " + STRIP,
             "sort": "p_range_s",
             "first": "asc",
@@ -362,23 +368,30 @@ def prediction_table(
     link_table(rows, cols, max_height=520, key=key, default_sort=sort)
 
 
-TABLE_HELP = (
-    "How far from the time it was given the bus came, on the same bus arrivals: LTD's "
-    "prediction when it said 5 minutes away (hover a row for 10 minutes), and the printed "
-    "timetable. The numbers: "
-    "minutes off on average, early or late alike; lower is better. The strips: where 8 in 10 "
-    "buses came, earlier (left of the dashed line) or later. Rows with at least 50 bus arrivals "
-    "measured. "
-    f"{PERIOD}. Click a column heading to sort; click a row for that report card's predictions."
-)
+def table_help(min_n: int) -> str:
+    return (
+        "How far from the time it was given the bus came, on the same bus arrivals: LTD's "
+        "prediction when it said the bus was the chosen number of minutes away, and the printed "
+        "timetable. The numbers: minutes off on average, early or late alike; lower is better. "
+        "The strips: where 8 in 10 buses came, earlier (left of the dashed line) or later. Rows "
+        f"with at least {min_n} bus arrivals measured. {PERIOD}. Click a column heading to "
+        "sort; click a row for that report card's predictions."
+    )
+
+
+ROUTES_MIN = 20 if not scope.stop_id else MIN_RANGE
+STOPS_MIN = 20
 
 with card():
     at_stop = f" at {scope.stop_name}" if scope.stop_id else ""
-    st.subheader(f"Prediction accuracy by route{at_stop}{days_suffix()}", help=TABLE_HELP)
+    st.subheader(
+        f"Prediction accuracy by route{at_stop}{days_suffix()}", help=table_help(ROUTES_MIN)
+    )
+    ahead = ahead_choice("routes_ahead")
     if scope.stop_id:
-        by_route = off_by("route_id", "and stop_id = %s", (scope.stop_id,), daily=False)
+        by_route = off_by("route_id", "and stop_id = %s", (scope.stop_id,), False, ahead)
     else:
-        by_route = off_by("route_id", "", (), daily=True)
+        by_route = off_by("route_id", "", (), True, ahead)
     prediction_table(
         by_route,
         [{"key": "route", "label": "Route", "width": "3.8em", "bold": True}],
@@ -389,19 +402,24 @@ with card():
         },
         key="pred_routes",
         sort="route:asc",
-        min_n=20 if not scope.stop_id else MIN_RANGE,
+        ahead=ahead,
+        min_n=ROUTES_MIN,
     )
 
 filters_again()  # the period and days buttons again, between the two tables
 
 with card():
     on_route = f" on route {scope.route_name}" if scope.route_id else ""
-    st.subheader(f"Prediction accuracy by stop{on_route}{days_suffix()}", help=TABLE_HELP)
+    st.subheader(
+        f"Prediction accuracy by stop{on_route}{days_suffix()}", help=table_help(STOPS_MIN)
+    )
+    ahead = ahead_choice("stops_ahead")
     by_stop = off_by(
         "stop_id",
         "and route_id = %s" if scope.route_id else "",
         (scope.route_id,) if scope.route_id else (),
-        daily=False,
+        False,
+        ahead,
     )
     names = readable_stop_names(
         q(f"select stop_id, stop_name, stop_code from gtfs.stops where feed_version_id = {FV}")
@@ -419,6 +437,8 @@ with card():
         key="pred_stops",
         # busiest first: the stops most riders use
         sort=None,
+        ahead=ahead,
+        min_n=STOPS_MIN,
     )
 
 

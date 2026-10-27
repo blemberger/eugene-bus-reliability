@@ -9,6 +9,15 @@ from __future__ import annotations
 from eugene_bus_reliability import analytics
 
 GITHUB = "https://github.com/blemberger/eugene-bus-reliability"
+
+# questions the Data & methods page already answers in its own "How it's measured" section:
+# left out of the questions shown there (they stay on the plain page, /reports/faq/)
+ANSWERED_ON_METHODS_PAGE = {
+    "Where does the data come from?",
+    "How is lateness measured?",
+    "What do typical bus, 8 in 10 buses and minutes off mean?",
+    "Is every bus measured?",
+}
 CONTACT_EMAIL = "contact@benlemberger.com"
 
 
@@ -178,8 +187,8 @@ def questions(stats: dict | None = None) -> list[tuple[str, str]]:
     qa += [
         (
             "Where does the data come from?",
-            "From Lane Transit District's own public data: its GTFS schedule and its "
-            "GTFS-Realtime feeds of live bus positions, arrival predictions and service alerts, "
+            "From Lane Transit District's own public data: its schedule, and its live feeds of "
+            "bus positions, arrival predictions and service alerts (GTFS and GTFS-Realtime), "
             "read every 30 seconds. Eugene Bus Watch is an independent project, not affiliated "
             "with LTD.",
         ),
@@ -188,18 +197,17 @@ def questions(stats: dict | None = None) -> list[tuple[str, str]]:
             "For every bus at every stop: the time it actually got there minus the time the "
             "printed timetable gives for that stop. LTD's live data doesn't say when a bus is at "
             "a stop, so that time is worked out from where the bus's GPS places it along its "
-            "route. At timepoints and at a trip's first stop, where buses wait, the later of "
-            "that and LTD's own recorded departure is used, since either can catch the bus "
-            "before it actually leaves. Every stop counts, not only the timepoints, because "
-            "riders wait at every stop.",
+            "route. At timepoints (the few main stops on each route with an exact time in the "
+            "timetable, where an early bus waits) and at a trip's first stop, the later of that "
+            "and LTD's own record of when the bus left is used, since either can catch the bus "
+            "before it actually leaves.",
         ),
         (
             "What do typical bus, 8 in 10 buses and minutes off mean?",
             "Typical bus: the median, so half the buses were later than this and half earlier. "
             "8 in 10 buses: the range from the 10th to the 90th percentile; one bus in ten came "
-            "earlier than its low end and one in ten later than its high end, so its width is "
-            "how much to allow for. Minutes off: how far the buses were from the timetable, early "
-            "or late alike, on average.",
+            "earlier than its low end and one in ten later than its high end. Minutes off: how "
+            "far the buses were from the timetable, early or late alike, on average.",
         ),
         (
             "Is every bus measured?",

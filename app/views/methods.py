@@ -29,7 +29,7 @@ from common import (
     show_chart,
 )
 
-from eugene_bus_reliability.faq import questions, stats_from_lateness
+from eugene_bus_reliability.faq import ANSWERED_ON_METHODS_PAGE, questions, stats_from_lateness
 
 require_db()
 st.title("Data & methods")
@@ -40,55 +40,41 @@ with card():
     st.subheader("How it's measured")
     start = collection_start()
     st.markdown(f"""
-**Sources.** Lane Transit District's public GTFS schedule and GTFS-Realtime feeds (TripUpdates, VehiclePositions, Alerts),
-polled every 30 seconds since {fmt_date(start) if start else "—"}. LTD is the source of all schedule and vehicle data;
-this project is independent and not affiliated with LTD.
+**Sources.** Lane Transit District's public data: its schedule, and its live feeds of bus positions, arrival
+predictions and service alerts, read every 30 seconds since {fmt_date(start) if start else "—"}. This project is
+independent and not affiliated with LTD.
 
-**Lateness.** For every bus at every stop: the time it actually arrived minus the time the printed timetable gives for
-that stop. Positive is late, negative is early. Every stop counts, not only the timepoints, because riders wait at
-every stop.
+**Timepoints.** On each route, a few main stops have an exact time in LTD's timetable; LTD calls them timepoints. A bus
+that gets to one early is meant to wait there until its time. The times at the stops in between are LTD's estimates.
 
-**Timepoints.** On each route, a few main stops have an exact time in LTD's timetable (the times printed in its
-schedules); a bus that gets to one early waits there until its time. Every other stop's time is LTD's own estimate
-between them.
+**Lateness.** For every bus at every stop: the time it actually got there minus the time the timetable gives for that
+stop. Positive is late, negative is early.
 
-**Typical bus.** The median lateness: half the buses were later than this, half earlier.
+**How arrival times are measured.** LTD's live data gives each bus's GPS position every 30 seconds, not when it reaches
+a stop. So each position is placed along the bus's route, and when the bus passes a stop between two reports, the time
+it passed is worked out from those two reports, to within about 15 seconds. At timepoints and at a trip's first stop,
+where a bus may wait, LTD's own record of when the bus left is used as well: the later of the two times counts, since
+either can catch the bus before it actually leaves. Our times are checked against LTD's records further down this page.
 
-**8 in 10 buses.** The range from the 10th to the 90th percentile of lateness: one bus in ten came earlier than the
-low end and one in ten later than the high end. Its width is how much you need to allow for when planning.
+**Left out.** A measured arrival is left out when it is more than 30 minutes early or 90 minutes late (in practice a bus
+reporting the wrong trip), when the bus's reports around the stop were too far apart to time it within 2 minutes, or
+at the few stops where, trip after trip, our time is out of line with the stops either side (usually a stop mapped
+away from where buses really stop). How many, day by day: "Day by day, in numbers", in the next section.
 
-**Minutes off.** How far the bus was from the timetable, early or late alike, averaged: a route whose buses are
+**Typical bus.** The median: half the buses were later than this, half earlier.
+
+**8 in 10 buses.** The range from the 10th to the 90th percentile: one bus in ten came earlier than the low end, and
+one in ten later than the high end.
+
+**Minutes off.** How far the buses were from the timetable, early or late alike, on average: a route whose buses are
 2 minutes early half the time and 2 minutes late the rest is 2 minutes off, though its typical bus is on time.
 
 **Today so far.** The typical bus over today's service, as of the latest update (every 15 minutes).
 
-**Prediction accuracy.** Every real-time arrival prediction LTD publishes is kept, with when it was shown.
-"5 minutes away" means the prediction said 5:00 to 5:59. Each bus arrival counts once at each distance (the
-prediction on show at that moment), and the timetable is measured on the same arrivals. As with lateness, the
-charts show the typical bus and the range 8 in 10 buses came in against the predicted time, later or earlier; the
-tables also give minutes off, how far the actual arrival was from the predicted one, early or late alike, averaged.
-
-**Observed arrival.** LTD's vehicle positions carry no stop information, so arrivals are derived geometrically: each
-position is placed along the route's shape as a fraction of the way along it (walked in time order, each position on
-the first stretch of the route ahead of the last, so a route that uses a street twice can't be confused), the running
-maximum over time removes GPS jitter, and when that fraction steps past a stop between two reports the crossing time is
-interpolated (±15 s at a 30 s poll while moving). Independently, the feed keeps reporting a departure time for stops
-already passed that no longer changes; that "settled" time is recorded too, and the two are compared in the cross-check
-below. Stops passed before a trip's first report can't be timed and are excluded. What counts is when the bus leaves. At a
-trip's first stop and at timepoints, where an early bus waits, our GPS time can catch the bus still waiting, and LTD's
-own recorded departure is sometimes just the scheduled time, so there the later of the two is used. Everywhere else
-our GPS time is used, which in practice is when the bus goes past or pulls away.
-
-**Excluded.** Trips with no realtime data; stops with no bounded observed arrival; arrivals more than 30 minutes early or
-90 minutes late against the schedule, which in practice means a bus reporting the wrong trip rather than real service
-(counted as "Implausible" in the coverage table below); arrivals whose time can't be pinned down to within 2 minutes
-because the bus's reports around that stop were far apart, usually during a feed outage ("Imprecise" below);
-stops where, trip after trip, our GPS time is more than 2 minutes out of line with the stops just before and after
-it, usually a stop whose mapped position isn't where buses really stop ("Doubtful stop" below);
-predictions more than 90 minutes out or made after the bus had arrived.
-
-**Known failure modes we measure rather than assume.** Feed outages, vehicles with stale GPS, trips cancelled without a
-cancellation flag, realtime trip ids that don't match the schedule. See the sections below.
+**Prediction accuracy.** Every arrival prediction LTD publishes (what apps like Transit show) is saved. For each bus,
+we take the prediction LTD was showing when it said the bus was 5 minutes away (5:00 to 5:59), and compare it with
+when the bus actually came; the same at 1 to 15 minutes away. The printed timetable is scored on the same buses, for
+comparison.
 """)
 
 # ---- coverage & quality ----------------------------------------------------------------------
@@ -158,11 +144,10 @@ with card():
             show_chart(fig, left=COVERAGE_LEFT)
             st.caption(
                 "Of the stops due on trips that ran, how many we timed; it should sit near 100%. "
-                "A dip means our measurement missed stops: gaps between a bus's GPS reports, "
-                "detours, or a trip that started reporting part-way along. Each trip's first and "
-                "last stop are left out: at the first the bus is already sitting there when it "
-                "starts reporting the trip, and at the last it often switches to its next trip "
-                "first. Finished days only; today is in the table below."
+                "A dip means we missed stops, usually through gaps in a bus's GPS reports or a "
+                "detour. Each trip's first and last stops are left out of this count, as a bus "
+                "often reports them before or after the trip itself. Finished days only; today "
+                "is in the table below."
             )
 
             st.markdown("##### Scheduled trips that never appeared in LTD's live feed")
@@ -276,88 +261,66 @@ with card():
 
 # ---- cross-check ------------------------------------------------------------------------------
 with card():
-    st.subheader("Two ways of timing arrivals, compared")
+    st.subheader("Our arrival times checked against LTD's")
     st.caption(
-        "Most arrival times on this site come from the bus's GPS reports: the moment its "
-        "position along the route passes the stop. LTD's feed keeps its own time for each stop "
-        "a bus has passed, but that is a real measurement only at timepoints (the few main stops "
-        "on each route with an exact time in the timetable, explained above). At every other "
-        "stop LTD's time is just its last estimate. So the two are compared at timepoints, "
-        "where both really measured the bus."
+        "At timepoints, LTD's feed records when each bus left, so there the same bus has two "
+        "times: ours, worked out from its GPS reports, and LTD's. How closely they agree shows "
+        "how well our method times the buses. Last 30 days."
     )
     if not marts_ready():
         st.caption("Appears once the analysis has run.")
     else:
         agree = q("""
             select sum(n_both_timepoints) as n_tp, sum(n_within_2min_timepoints) as w_tp,
-                   percentile_cont(0.5) within group (order by median_abs_diff_timepoints_s) as med_tp,
-                   percentile_cont(0.5) within group (order by median_diff_s) as med_all
+                   percentile_cont(0.5) within group (order by median_abs_diff_timepoints_s) as med_tp
             from marts.mart_method_agreement
+            where service_date >= current_date - 30
         """).iloc[0]
         if agree["n_tp"] and int(agree["n_tp"]) > 0:
-            c1, c2, c3 = st.columns(3)
+            c1, c2 = st.columns(2)
             c1.metric(
-                "Agree within 2 min at timepoints",
+                "Agree within 2 minutes",
                 fmt_pct(int(agree["w_tp"]), int(agree["n_tp"])),
-                help="Our GPS-derived time and LTD's recorded time for the same bus at the same "
-                "timepoint, within 2 minutes of each other (the most an arrival time on this site "
-                "may be uncertain by).",
+                help="Our time and LTD's for the same bus at the same timepoint, within 2 "
+                "minutes of each other.",
             )
             c2.metric(
-                "Typical gap at timepoints",
+                "Typical difference",
                 f"{float(agree['med_tp']):.0f} s",
-                help="The median difference between the two, either way. Each is only known to "
-                "within about 15 seconds (buses report every 30 s).",
+                help="The median difference between the two, either way. Buses report their "
+                "position every 30 seconds, so each time is only known to within about 15.",
             )
-            c3.metric(
-                "LTD's time between timepoints",
-                f"{abs(float(agree['med_all'])):.0f} s earlier",
-                help="Typically, at the stops between timepoints, where LTD's time is a "
-                "estimate rather than a measurement. Our GPS times at those stops line up with "
-                "our GPS times at the timepoints either side, so the gap is in LTD's estimates "
-                "and no correction is made for it.",
-            )
-            # how far apart the two are, timepoints against the other stops (last 30 days)
             diffs = q(
                 """
-                select is_timepoint,
-                       greatest(-300, least(300, (floor(methods_diff_s / 15.0) * 15)::int)) as bin,
+                select greatest(-300, least(300, (floor(methods_diff_s / 15.0) * 15)::int)) as bin,
                        count(*) as n
                 from marts.fct_stop_events
-                where methods_diff_s is not null and is_bounded and service_date >= current_date - 30
-                group by 1, 2
+                where methods_diff_s is not null and is_bounded and is_timepoint
+                  and service_date >= current_date - 30
+                group by 1 order by 1
                 """
             )
             if not diffs.empty:
-                fig = go.Figure()
-                for tp, name, colour in (
-                    (True, "Timepoints (LTD measures)", "#1f5f9e"),
-                    (False, "Other stops (LTD predicts)", "#9aa0a6"),
-                ):
-                    d = diffs[diffs["is_timepoint"] == tp].sort_values("bin")
-                    share = d["n"] / d["n"].sum()
-                    fig.add_trace(
-                        go.Bar(
-                            x=(d["bin"] + 7.5) / 60,
-                            y=share,
-                            name=name,
-                            marker={"color": colour},
-                            opacity=0.85,
-                            hovertemplate=name
-                            + ": %{y:.1%} of arrivals %{x:.2f} min apart<extra></extra>",
-                        )
+                share = diffs["n"] / diffs["n"].sum()
+                fig = go.Figure(
+                    go.Bar(
+                        x=(diffs["bin"] + 7.5) / 60,
+                        y=share,
+                        marker={"color": "#1f5f9e"},
+                        hovertemplate="%{y:.1%} of buses: LTD's time %{x:.2f} min from ours"
+                        "<extra></extra>",
                     )
+                )
                 fig.update_layout(
-                    barmode="overlay",
                     bargap=0.05,
                     xaxis={
-                        "title": "LTD's time minus ours (minutes; below 0 = LTD's is earlier)",
+                        "title": "LTD's time minus ours, in minutes (below 0: LTD's is earlier)",
                         "range": [-5, 5],
                         "dtick": 1,
                     },
-                    yaxis={"title": "Share of arrivals", "tickformat": ".0%"},
-                    legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0},
-                    height=340,
+                    yaxis={"title": "Share of buses", "tickformat": ".0%"},
+                    showlegend=False,
+                    height=320,
                 )
                 show_chart(fig)
 
@@ -388,6 +351,8 @@ def _faq_numbers() -> dict:
 with card():
     st.subheader("Questions and answers")
     for question, answer in questions(_faq_numbers()):
+        if question in ANSWERED_ON_METHODS_PAGE:  # in "How it's measured" at the top
+            continue
         with st.expander(question):
             st.markdown(answer)
 
